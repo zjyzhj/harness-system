@@ -362,6 +362,22 @@ function esc(s) {
   return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
 
+async function mcpFlow() {
+  const tools = await api.mcp.list();
+  const modal = openModal(`
+    <h2>🔌 MCP 工具</h2>
+    <div class="hint">已连接的 MCP server 暴露的工具（来自 config 的 mcpServers 配置）。模型可在需要时调用。</div>
+    <div id="mcp-tools">
+      ${tools.length ? tools.map((t) => `
+        <div class="row" style="margin:4px 0">
+          <span class="hint" style="flex:none">${esc(t.serverId)}</span>
+          <span style="flex:1"><b>${esc(t.name)}</b> <span class="hint">${esc(t.description || "")}</span></span>
+        </div>`).join("") : `<span class="hint">未配置 MCP server。可在 ~/.harness-bot/config.json 加 mcpServers 数组。</span>`}
+    </div>
+    <div class="actions"><button class="ghost-btn" id="mcp-close">关闭</button></div>`);
+  modal.querySelector("#mcp-close").onclick = closeModal;
+}
+
 // ---- bind ----
 $("#new-bot-btn").onclick = createBotFlow;
 $("#settings-btn").onclick = settingsFlow;
@@ -369,6 +385,7 @@ $("#migrate-btn").onclick = migrateFlow;
 $("#memory-btn").onclick = memoryFlow;
 $("#skills-btn").onclick = skillsFlow;
 $("#tasks-btn").onclick = tasksFlow;
+$("#mcp-btn").onclick = mcpFlow;
 $("#send-btn").onclick = send;
 $("#input").addEventListener("keydown", (e) => {
   if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }

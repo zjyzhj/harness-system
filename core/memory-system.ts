@@ -16,6 +16,7 @@ import { join, basename } from "node:path";
 export class MemorySystem {
   private mem: Record<string, MemoryEntry[]> = {};
   private dir: string;
+  private retriever?: MemoryRetriever;
 
   constructor(private home: string) {
     this.dir = join(home, "memory");
@@ -81,6 +82,14 @@ export class MemorySystem {
     this.persist(botId);
   }
 
+  setRetriever(r: MemoryRetriever) { this.retriever = r; }
+
+  /** 检索（默认关键词打分；注入 retriever 后走语义检索） */
+  async retrieve(botId: string, query: string, limit = 8): Promise<MemoryEntry[]> {
+    if (this.retriever) return this.retriever.retrieve(botId, query, limit);
+    return this.search(botId, query, limit);
+  }
+
   /** 关键词检索（简单打分：命中 tag + 内容 + 最近优先） */
   search(botId: string, query: string, limit = 8): MemoryEntry[] {
     const q = query.toLowerCase();
@@ -129,4 +138,26 @@ function dedupe(arr: MemoryEntry[]): MemoryEntry[] {
   const seen = new Map<string, MemoryEntry>();
   for (const e of arr) seen.set(e.id, e);
   return [...seen.values()];
+}
+
+// ---- V2 记忆增强 ----
+
+export interface MemoryRetriever {
+  /** 语义检索（向量/关键词），返回按相关度排序的记忆 */
+  retrieve(botId: string, query: string, limit?: number): Promise<MemoryEntry[]>;
+}
+
+/** 关键词检索器（默认实现，无需依赖） */
+export class KeywordRetriever implements MemoryRetriever {
+  constructor(private mem: MemorySystem) {}
+  async retrieve(botId: string, query: string, limit = 8): Promise<MemoryEntry[]> {
+    return this.mem.search(botId, query, limit);
+  }
+}
+
+/** 统计每个 kind 的数量 */
+export function memoryStats(mem: MemoryEntry[]): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const e of mem) out[e.kind] = (out[e.kind] ?? 0) + 1;
+  return out;
 }

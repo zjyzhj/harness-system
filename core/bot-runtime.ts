@@ -4,6 +4,7 @@ import type { ProviderCenter } from "./provider-center";
 import type { MemorySystem } from "./memory-system";
 import type { SkillRegistry } from "./skill-registry";
 import type { SystemKit } from "./system-kit";
+import { ToolExecutor, BUILTIN_TOOL_DESCRIPTIONS } from "./tool-executor";
 
 export interface RuntimeDeps {
   store: Store;
@@ -11,6 +12,7 @@ export interface RuntimeDeps {
   memory: MemorySystem;
   skills: SkillRegistry;
   system?: SystemKit;
+  executor?: ToolExecutor;
 }
 
 export interface RuntimeOptions {
@@ -99,8 +101,9 @@ export class BotRuntime {
     }
     if (opts?.injectSkills !== false) {
       const skills = this.deps.skills.toolDescriptions();
-      if (skills) {
-        parts.push(`【可用技能】当需要以下能力时，在回复中输出工具块调用。\n${skills}\n工具块格式：\n\`\`\`tool\n{"tool":"<技能key>","args":{...}}\n\`\`\``);
+      const tools = [BUILTIN_TOOL_DESCRIPTIONS, skills ? `【技能】\n${skills}` : ""].filter(Boolean).join("\n\n");
+      if (tools) {
+        parts.push(`【可用工具与技能】当需要以下能力时，在回复中输出工具块调用。\n${tools}\n工具块格式：\n\`\`\`tool\n{"tool":"<工具或技能key>","args":{...}}\n\`\`\``);
       }
     }
     parts.push(`回复要求：除非用户要求，用中文回答；需要调用技能时先输出工具块，工具结果返回后再给最终回复。`);
@@ -119,46 +122,57 @@ export class BotRuntime {
     return msgs;
   }
 
-  /** 执行一个工具：内置工具（memory/notify/read_file/write_file）或 skill:<key> */
+  /** 执行一个工具：内置工具（executor）或 skill:<key>（真执行技能指令） */
   private async executeTool(bot: Bot, t: ToolInvocation, originalText: string): Promise<{ output: string }> {
     const args = t.args ?? {};
-    switch (t.tool) {
-      case "memory.add":
-      case "remember": {
-        const entry = this.deps.memory.add(bot.id, {
-          kind: (args.kind as any) || "fact",
-          content: String(args.content ?? args.text ?? ""),
-          tags: args.tags ? String(args.tags).split(",").map((s) => s.trim()) : undefined,
-          source: "bot-runtime",
-        });
-        return { output: `已记住：${entry.content}` };
-      }
-      case "memory.search":
-      case "recall": {
-        const hits = this.deps.memory.search(bot.id, String(args.query ?? args.q ?? ""), 6);
-        return { output: hits.length ? hits.map((h) => `- ${h.content}`).join("\n") : "（暂无相关记忆）" };
-      }
-      case "notify": {
-        if (this.deps.system) await this.deps.system.notify(String(args.title ?? bot.name), String(args.body ?? ""));
-        return { output: `已发送通知：${args.title ?? bot.name}` };
-      }
-      case "skill": {
-        const key = String(args.key ?? args.name ?? "");
-        return this.runSkill(bot, key, args);
-      }
-      default:
-        if (t.tool.startsWith("skill:")) return this.runSkill(bot, t.tool.slice(6), args);
-        return { output: `未知工具 ${t.tool}（可用：remember / recall / notify / skill:<key>）` };
+    if (["fs.read", "fs.write", "fs.list", "bash.run", "web.fetch", "notify", "memory.add", "memory.search"].includes(t.tool)) {
+      if (!this.deps.executor) return { output: `工具 ${t.tool} 未启用（executor 未注入）` };
+      const r = await this.deps.executor.run(t.tool, { ...args, botId: bot.id });
+      return { output: r.output };
     }
+    if (t.tool === "remember" || t.tool === "memory.add") {
+      const entry = this.deps.memory.add(bot.id, {
+        kind: (args.kind as any) || "fact",
+        content: String(args.content ?? args.text ?? ""),
+        tags: args.tags ? String(args.tags).split(",").map((s) => s.trim()) : undefined,
+        source: "bot-runtime",
+      });
+      return { output: `已记住：${entry.content}` };
+    }
+    if (t.tool === "recall" || t.tool === "memory.search") {
+      const hits = this.deps.memory.search(bot.id, String(args.query ?? args.q ?? ""), 6);
+      return { output: hits.length ? hits.map((h) => `- ${h.content}`).join("\n") : "（暂无相关记忆）" };
+    }
+    if (t.tool === "notify") {
+      if (this.deps.system) await this.deps.system.notify(String(args.title ?? bot.name), String(args.body ?? ""));
+      return { output: `已发送通知：${args.title ?? bot.name}` };
+    }
+    if (t.tool === "skill" || t.tool.startsWith("skill:")) {
+      const key = t.tool === "skill" ? String(args.key ?? args.name ?? "") : t.tool.slice(6);
+      return this.runSkill(bot, key, args, originalText);
+    }
+    return { output: `未知工具 ${t.tool}（可用: fs.read/fs.write/fs.list/bash.run/web.fetch/notify/memory.add/memory.search/skill:<key>）` };
   }
 
-  private async runSkill(bot: Bot, key: string, args: Record<string, unknown>): Promise<{ output: string }> {
+  private async runSkill(bot: Bot, key: string, args: Record<string, unknown>, originalText: string): Promise<{ output: string }> {
     const skill = this.deps.skills.get(key);
     if (!skill) return { output: `技能 ${key} 不存在` };
     const body = this.deps.skills.loadBody(key);
     if (!body) return { output: `技能 ${key} 无指令正文` };
-    // 把指令正文 + 参数交给模型执行（简化：直接返回指令正文，由上层模型继续）
-    return { output: `【技能 ${skill.name} 指令】\n${body}\n\n【参数】\n${JSON.stringify(args)}` };
+    if (this.deps.executor) {
+      const lines = body
+        .split("\n")
+        .map((l) => l.trim())
+        .filter((l) => /^(?:curl|echo|ls|cat|head|tail|grep|rg|find|pwd|date|whoami|node|bun|python3|git|npm|mkdir|touch|cp|mv|wc|sort|uniq|sed|awk|jq|open|osascript|swift|ps|df|du)/.test(l) && !l.startsWith("#"));
+      const results: string[] = [];
+      for (const line of lines.slice(0, 5)) {
+        const r = await this.deps.executor.run("bash.run", { command: line });
+        results.push(`$ ${line}\n${r.output.slice(0, 600)}`);
+        if (!r.ok) break;
+      }
+      if (results.length) return { output: results.join("\n\n") };
+    }
+    return { output: `【技能 ${skill.name} 指令】\n${body}\n\n【用户请求】\n${originalText}\n【参数】\n${JSON.stringify(args)}` };
   }
 
   private record(botId: string, sessionId: string, userText: string, reply: string, conv: { role: string; content: string }[]) {

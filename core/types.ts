@@ -61,12 +61,16 @@ export interface PetState {
 }
 
 export interface MigrationPayload {
-  format: "harness-bot-migration/v1";
+  format: "harness-bot-migration/v2";
   exportedAt: string;
   providers: Provider[];
   bots: Bot[];
   pets: PetState[];
   assets?: Record<string, string>;
+  /** V2：全量迁移 */
+  memory?: Record<string, MemoryEntry[]>;
+  skills?: Record<string, string>;        // skill key -> SKILL.md 内容
+  tasks?: ScheduledTask[];
 }
 
 // ---- Bot 底层运行时扩展 ----
@@ -124,4 +128,30 @@ export interface RuntimeResult {
   toolCalls: ToolCall[];       // 本次回复前的工具调用记录
   memoryEvents?: MemoryEntry[]; // 本次产生的记忆事件（自动写入）
   usedSkills: string[];        // 实际用到的技能 key
+}
+
+// ---- V2 扩展 ----
+
+export interface AgentStatus {
+  botId: string;
+  state: "idle" | "running" | "error";
+  lastRunAt?: number;
+  lastError?: string;
+  currentTask?: string;
+}
+
+export interface SkillUsageLog {
+  key: string;
+  botId: string;
+  invokedAt: number;
+  ok: boolean;
+  outputPreview?: string;
+}
+
+export interface TaskRunLog {
+  taskId: string;
+  ranAt: number;
+  ok: boolean;
+  error?: string;
+  prompt: string;
 }

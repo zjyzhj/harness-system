@@ -14,6 +14,8 @@ bun run dev        # 仅构建 shell（不启动，便于调试）
 ## 功能
 
 - **Bot 底层运行时**（对标 CowAgent / DeepSeek-Harness / OpenClaw）：
+  - **真工具执行** `core/tool-executor.ts`：bash 白名单执行、文件读写、网页抓取、通知、记忆读写（安全：命令/目录白名单 + 超时 + 危险命令禁止）
+  - **MCP 接入** `core/mcp-client.ts`：连接外部 MCP server（HTTP/stdio），工具自动注册给 bot
   - **持久记忆** `core/memory-system.ts`：每 bot 记忆空间（fact/summary/note/event 分层），关键词检索注入上下文，自动会话摘要，重启不丢
   - **技能** `core/skill-registry.ts`：`skills/<key>/SKILL.md` + YAML frontmatter 规范，渐进披露（默认只注入 description，调用时加载 body），一句话创建技能
   - **定时任务** `core/scheduler.ts`：cron 5 段调度，到期唤醒 bot 执行，持久化 + 手动触发
@@ -30,7 +32,8 @@ bun run dev        # 仅构建 shell（不启动，便于调试）
 ## 数据
 
 - 数据默认存 `~/Library/Application Support/harness-bot/`（或 `HARNESS_HOME` 指定）
-- 存储为纯 JSON 文件（providers/bots/sessions/messages/pets），无原生依赖，迁移 = 复制文件
+- 存储为纯 JSON 文件（providers/bots/sessions/messages/pets/memory/tasks），无原生依赖，迁移 = 复制文件
+- 迁移 v2 全量：bots + providers + 记忆 + 技能 + 定时任务 + 形象
 - 导出文件为 `harness-bot-migration/v1` 格式
 
 ## 文档

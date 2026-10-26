@@ -47,6 +47,8 @@ const api = {
     list: (botId: string) => ipcRenderer.invoke("memory:list", botId),
     add: (botId: string, entry: any) => ipcRenderer.invoke("memory:add", botId, entry),
     remove: (botId: string, id: string) => ipcRenderer.invoke("memory:delete", botId, id),
+    search: (botId: string, q: string) => ipcRenderer.invoke("memory:search", botId, q),
+    stats: (botId: string) => ipcRenderer.invoke("memory:stats", botId),
   },
   skills: {
     list: () => ipcRenderer.invoke("skills:list"),
@@ -54,6 +56,16 @@ const api = {
     createRaw: (key: string, markdown: string) => ipcRenderer.invoke("skills:createRaw", key, markdown),
     setEnabled: (key: string, enabled: boolean) => ipcRenderer.invoke("skills:setEnabled", key, enabled),
     remove: (key: string) => ipcRenderer.invoke("skills:delete", key),
+  },
+  status: {
+    list: () => ipcRenderer.invoke("status:list"),
+  },
+  tools: {
+    run: (tool: string, args: any) => ipcRenderer.invoke("tools:run", tool, args),
+  },
+  mcp: {
+    list: () => ipcRenderer.invoke("mcp:list"),
+    call: (serverId: string, tool: string, args: any) => ipcRenderer.invoke("mcp:call", serverId, tool, args),
   },
   tasks: {
     list: (botId?: string) => ipcRenderer.invoke("tasks:list", botId),

@@ -1,14 +1,15 @@
 import { existsSync, mkdirSync, writeFileSync, copyFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import type { MigrationPayload } from "./types";
+type AnyPayload = MigrationPayload & { format: string };
 import type { Store } from "./store";
 
 export class Migration {
   constructor(private store: Store, private assetsDir: string) {}
 
-  exportPayload(opts?: { maskKeys?: boolean }): MigrationPayload {
+  exportPayload(opts?: { maskKeys?: boolean }): AnyPayload {
     const payload: MigrationPayload = {
-      format: "harness-bot-migration/v1",
+      format: "harness-bot-migration/v2",
       exportedAt: new Date().toISOString(),
       providers: this.store.listProviders().map((p) =>
         opts?.maskKeys && p.apiKey
@@ -32,7 +33,7 @@ export class Migration {
   }
 
   importFromPayload(payload: MigrationPayload): { importedProviders: number; importedBots: number; importedPets: number } {
-    if (payload.format !== "harness-bot-migration/v1") {
+    if (!payload.format?.startsWith("harness-bot-migration/v")) {
       throw new Error(`不支持的迁移格式：${payload.format}`);
     }
     const usedNames = new Set(this.store.listBots().map((b) => b.name.toLowerCase()));
@@ -78,7 +79,7 @@ export class Migration {
   }
 
   importFromFile(filePath: string) {
-    const raw = JSON.parse(require("node:fs").readFileSync(filePath, "utf8")) as MigrationPayload;
+    const raw = JSON.parse(require("node:fs").readFileSync(filePath, "utf8")) as AnyPayload;
     return this.importFromPayload(raw);
   }
 

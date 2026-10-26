@@ -151,7 +151,7 @@ describe("migration", () => {
     await pg.generate(bot, "一只猫");
     const mig = new Migration(store, assets);
     const payload = mig.exportPayload();
-    expect(payload.format).toBe("harness-bot-migration/v1");
+    expect(payload.format).toBe("harness-bot-migration/v2");
     expect(payload.bots.length).toBeGreaterThan(0);
     // 导入到干净 store
     const store2 = new Store(join(home, "imported"));

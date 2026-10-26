@@ -16,12 +16,16 @@ import { AgentRegistry } from "../core/agent-registry";
 import { MessageBus } from "../core/message-bus";
 import { ProviderCenter } from "../core/provider-center";
 import { PersonaGenerator } from "../core/persona";
-import { Migration } from "../core/migration";
+import { MigrationV2 } from "../core/migration-v2";
 import { SystemKit } from "../core/system-kit";
 import { MemorySystem } from "../core/memory-system";
 import { SkillRegistry, BUILTIN_SKILL_TEMPLATES } from "../core/skill-registry";
 import { Scheduler } from "../core/scheduler";
 import { BotRuntime, skillFromText } from "../core/bot-runtime";
+import { ToolExecutor, BUILTIN_TOOL_DESCRIPTIONS } from "../core/tool-executor";
+import { McpClient, type McpServerConfig } from "../core/mcp-client";
+import { OpenAICompatImageGen } from "../core/adapters/image-gen";
+import { AgentStatus } from "../core/types";
 
 const home = process.env.HARNESS_HOME || join(app.getPath("userData"), "..", "harness-bot");
 const store = new Store(home);
@@ -30,7 +34,7 @@ const registry = new AgentRegistry(store);
 const bus = new MessageBus(store);
 const providers = new ProviderCenter(store);
 const persona = new PersonaGenerator(store, assetsDir);
-const migration = new Migration(store, assetsDir);
+
 const system = new SystemKit({
   allowedRoot: join(home, "workspace"),
   notify: (p) => new Notification({ title: p.title, body: p.body }).show() as unknown as boolean,
@@ -48,20 +52,46 @@ if (skills.list().length === 0) {
   }
 }
 const scheduler = new Scheduler(home);
-const runtime = new BotRuntime({ store, providers, memory, skills, system });
+const migration = new MigrationV2(store, assetsDir, memory, skills, scheduler);
+const workspace = join(home, "workspace");
+const executor = new ToolExecutor({ allowedRoots: [workspace] }, system, memory);
+const mcp = new McpClient(loadMcpServers());
+void mcp.init();
+const statuses = new Map<string, AgentStatus>();
+const runtime = new BotRuntime({ store, providers, memory, skills, system, executor });
+
+// 形象生成：有图像 provider 时用真 API，否则降级
+function personaWithImage() {
+  const imgProv = providers.list().find((p) => p.kind === "openai-compat" && p.model?.startsWith("dall") || p.model?.startsWith("gpt-image"));
+  if (imgProv) return new PersonaGenerator(store, assetsDir, new OpenAICompatImageGen(imgProv));
+  return persona;
+}
+
+function loadMcpServers(): McpServerConfig[] {
+  const cfg = store.readConfig();
+  const servers = (cfg as any).mcpServers ?? [];
+  return servers as McpServerConfig[];
+}
 
 // 为所有 bot 注册默认消息处理器：调用其绑定的 provider 生成回复
 async function defaultHandler(from: any, to: any, text: string, ctx: any): Promise<string> {
   const bot = store.getBot(to.id);
   if (!bot) return "bot 不存在";
-  const r = await runtime.handle({
-    bot,
-    from: from.id || "user",
-    text,
-    sessionId: ctx.sessionId,
-    history: store.listMessages(ctx.sessionId).slice(-10),
-  });
-  return r.text;
+  statuses.set(bot.id, { botId: bot.id, state: "running", lastRunAt: Date.now(), currentTask: text.slice(0, 60) });
+  try {
+    const r = await runtime.handle({
+      bot,
+      from: from.id || "user",
+      text,
+      sessionId: ctx.sessionId,
+      history: store.listMessages(ctx.sessionId).slice(-10),
+    });
+    statuses.set(bot.id, { botId: bot.id, state: "idle", lastRunAt: Date.now() });
+    return r.text;
+  } catch (e) {
+    statuses.set(bot.id, { botId: bot.id, state: "error", lastRunAt: Date.now(), lastError: e instanceof Error ? e.message : String(e) });
+    throw e;
+  }
 }
 
 // 注册已有 bot + 新 bot 时自动注册
@@ -155,8 +185,14 @@ app.whenReady().then(() => {
     const bot = store.getBot(task.botId);
     if (!bot) return;
     const sid = `sched-${task.id}-${Date.now()}`;
-    await runtime.handle({ bot, from: "scheduler", text: task.prompt, sessionId: sid });
-    system.notify(`⏰ ${bot.name} 定时任务`, task.name);
+    try {
+      statuses.set(task.botId, { botId: task.botId, state: "running", lastRunAt: Date.now(), currentTask: `⏰ ${task.name}` });
+      await runtime.handle({ bot, from: "scheduler", text: task.prompt, sessionId: sid });
+      statuses.set(task.botId, { botId: task.botId, state: "idle", lastRunAt: Date.now() });
+      system.notify(`⏰ ${bot.name} 定时任务`, task.name);
+    } catch (e) {
+      statuses.set(task.botId, { botId: task.botId, state: "error", lastError: e instanceof Error ? e.message : String(e) });
+    }
   };
   scheduler.start();
 
@@ -178,7 +214,7 @@ ipcMain.handle("bots:setPet", (_e, id: string, enabled: boolean) => {
 ipcMain.handle("persona:generate", async (_e, id: string, desc: string) => {
   const bot = store.getBot(id);
   if (!bot) throw new Error("bot 不存在");
-  return persona.generate(bot, desc);
+  return personaWithImage().generate(bot, desc);
 });
 ipcMain.handle("chat:send", async (_e, botId: string, text: string, sessionId?: string) => {
   const bot = store.getBot(botId);
@@ -206,6 +242,15 @@ ipcMain.handle("pets:save", (_e, p: { botId: string; x: number; y: number; visib
 ipcMain.handle("sessions:list", (_e, botId?: string) => store.listSessions(botId));
 ipcMain.handle("messages:list", (_e, sessionId: string) => store.listMessages(sessionId));
 ipcMain.handle("memory:list", (_e, botId: string) => memory.list(botId));
+ipcMain.handle("memory:stats", (_e, botId: string) => {
+  const { memoryStats } = require("../core/memory-system");
+  return memoryStats(memory.list(botId));
+});
+ipcMain.handle("memory:search", (_e, botId: string, q: string) => memory.search(botId, q, 10));
+ipcMain.handle("tools:run", async (_e, tool: string, args: any) => executor.run(tool, args));
+ipcMain.handle("mcp:list", () => mcp.listTools());
+ipcMain.handle("mcp:call", async (_e, serverId: string, tool: string, args: any) => mcp.callTool(serverId, tool, args));
+ipcMain.handle("status:list", () => [...statuses.values()]);
 ipcMain.handle("memory:add", (_e, botId: string, entry: any) => memory.add(botId, entry));
 ipcMain.handle("memory:delete", (_e, botId: string, id: string) => memory.delete(botId, id));
 ipcMain.handle("skills:list", () => skills.list());
