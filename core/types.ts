@@ -108,6 +108,12 @@ export interface ScheduledTask {
   nextRunAt?: number;
   runCount: number;
   createdAt: number;
+  /** V2-D：失败重试与日志 */
+  maxRetries?: number;
+  retryCount?: number;
+  lastResult?: string;
+  lastError?: string;
+  lastRunLog?: string;
 }
 
 export interface ToolCall {

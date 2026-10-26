@@ -39,7 +39,7 @@ export class Scheduler {
     return this.tasks.filter((t) => t.botId === botId);
   }
 
-  create(input: { botId: string; name: string; cron: string; prompt: string }): ScheduledTask {
+  create(input: { botId: string; name: string; cron: string; prompt: string; maxRetries?: number }): ScheduledTask {
     if (!isValidCron(input.cron)) throw new Error(`cron 表达式无效: ${input.cron}（应为 5 段：分 时 日 月 周）`);
     const t: ScheduledTask = {
       id: randomUUID(),
@@ -48,6 +48,7 @@ export class Scheduler {
       cron: input.cron,
       prompt: input.prompt,
       enabled: true,
+      maxRetries: input.maxRetries ?? 2,
       nextRunAt: nextCronTime(input.cron, Date.now()),
       runCount: 0,
       createdAt: Date.now(),
@@ -94,9 +95,23 @@ export class Scheduler {
       const due = this.tasks.filter((t) => t.enabled && t.nextRunAt && t.nextRunAt <= now);
       for (const t of due) {
         const next = nextCronTime(t.cron, now);
-        this.update(t.id, { lastRunAt: now, nextRunAt: next, runCount: t.runCount + 1 });
+        this.update(t.id, { lastRunAt: now, nextRunAt: next, runCount: t.runCount + 1, lastResult: "running" });
         if (this.onRun) {
-          try { await this.onRun(t); } catch { /* 单任务失败不影响调度 */ }
+          try {
+            await this.onRun(t);
+            this.update(t.id, { lastResult: "ok", retryCount: 0, lastError: undefined, lastRunLog: `✅ ${new Date(now).toISOString()} 成功` });
+          } catch (e) {
+            const err = e instanceof Error ? e.message : String(e);
+            const retries = (t.retryCount ?? 0) + 1;
+            const max = t.maxRetries ?? 2;
+            this.update(t.id, {
+              lastResult: "error",
+              lastError: err,
+              retryCount: retries,
+              lastRunLog: `❌ ${new Date(now).toISOString()} 失败: ${err.slice(0, 120)}`,
+              nextRunAt: retries <= max ? now + [5, 15, 30][Math.min(retries - 1, 2)] * 60_000 : next,
+            });
+          }
         }
       }
     } finally {

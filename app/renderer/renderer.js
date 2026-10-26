@@ -333,7 +333,10 @@ async function tasksFlow() {
     box.innerHTML = tasks.length ? tasks.map((t) => `
       <div class="row" style="margin:4px 0">
         <button class="ghost-btn" style="flex:none" data-toggle="${t.id}">${t.enabled ? "▶️" : "⏸"}</button>
-        <span style="flex:1"><b>${esc(t.name)}</b> <span class="hint">${esc(t.cron)} · 已跑${t.runCount}次</span></span>
+        <span style="flex:1"><b>${esc(t.name)}</b>
+          <span class="hint">${esc(t.cron)} · 已跑${t.runCount}次${t.nextRunAt ? " · 下次 " + new Date(t.nextRunAt).toLocaleString("zh-CN", { hour12: false }) : ""}</span>
+          ${t.lastResult ? `<div class="hint">${t.lastResult === "ok" ? "✅" : "❌"} ${esc(t.lastRunLog || "")}</div>` : ""}
+        </span>
         <button class="ghost-btn" data-run="${t.id}">⚡</button>
         <button class="ghost-btn" data-del="${t.id}">✕</button>
       </div>`).join("") : `<span class="hint">还没有定时任务</span>`;
