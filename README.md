@@ -13,6 +13,11 @@ bun run dev        # 仅构建 shell（不启动，便于调试）
 
 ## 功能
 
+- **Bot 底层运行时**（对标 CowAgent / DeepSeek-Harness / OpenClaw）：
+  - **持久记忆** `core/memory-system.ts`：每 bot 记忆空间（fact/summary/note/event 分层），关键词检索注入上下文，自动会话摘要，重启不丢
+  - **技能** `core/skill-registry.ts`：`skills/<key>/SKILL.md` + YAML frontmatter 规范，渐进披露（默认只注入 description，调用时加载 body），一句话创建技能
+  - **定时任务** `core/scheduler.ts`：cron 5 段调度，到期唤醒 bot 执行，持久化 + 手动触发
+  - **工具循环** `core/bot-runtime.ts`：记忆注入 → 技能清单 → 模型生成 → `\`\`\`tool\`\`\`` 块调用技能/内置工具 → 回填结果 → 最终回复；自动抽取记忆事件
 - **主控面板**：Grok-Bot 风格暗色界面，左侧 bot 列表、中间对话流、底部输入框
 - **一句话创建 bot**：输入 `创建 bot：翻译助手，用 claude 模型，风格活泼` 自动解析名称/角色/模型
 - **一句话生成形象**：输入 `生成形象：一只蓝色狐狸，可爱` → 本地头像 + 角色卡（无图像 API 时自动降级为程序化头像）
@@ -39,12 +44,16 @@ bun run dev        # 仅构建 shell（不启动，便于调试）
 
 ```
 Electron 壳 (app/) ──IPC──▶ core/ (纯 TS)
-                              ├─ AgentRegistry    一句话创建 bot
-                              ├─ MessageBus       多 bot 通信
-                              ├─ ProviderCenter   url/key 配置 + CLI 适配
-                              ├─ PersonaGenerator 形象 + 角色卡
-                              ├─ SystemKit        通知/剪贴板/文件
-                              └─ Migration        导出/导入
+                              ├─ AgentRegistry     一句话创建 bot
+                              ├─ BotRuntime        智能体循环（记忆+技能+工具）
+                              ├─ MemorySystem      持久记忆（fact/summary/note/event）
+                              ├─ SkillRegistry     SKILL.md 技能（渐进披露）
+                              ├─ Scheduler         cron 定时任务
+                              ├─ MessageBus        多 bot 通信
+                              ├─ ProviderCenter    url/key 配置 + CLI 适配
+                              ├─ PersonaGenerator  形象 + 角色卡
+                              ├─ SystemKit         通知/剪贴板/文件
+                              └─ Migration         导出/导入
 ```
 
 核心层不依赖 Electron/Bun 专属 API，测试 `bun test` 全绿（16 项）。

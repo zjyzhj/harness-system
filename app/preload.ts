@@ -43,6 +43,25 @@ const api = {
   messages: {
     list: (sessionId: string) => ipcRenderer.invoke("messages:list", sessionId),
   },
+  memory: {
+    list: (botId: string) => ipcRenderer.invoke("memory:list", botId),
+    add: (botId: string, entry: any) => ipcRenderer.invoke("memory:add", botId, entry),
+    remove: (botId: string, id: string) => ipcRenderer.invoke("memory:delete", botId, id),
+  },
+  skills: {
+    list: () => ipcRenderer.invoke("skills:list"),
+    create: (text: string) => ipcRenderer.invoke("skills:create", text),
+    createRaw: (key: string, markdown: string) => ipcRenderer.invoke("skills:createRaw", key, markdown),
+    setEnabled: (key: string, enabled: boolean) => ipcRenderer.invoke("skills:setEnabled", key, enabled),
+    remove: (key: string) => ipcRenderer.invoke("skills:delete", key),
+  },
+  tasks: {
+    list: (botId?: string) => ipcRenderer.invoke("tasks:list", botId),
+    create: (input: any) => ipcRenderer.invoke("tasks:create", input),
+    remove: (id: string) => ipcRenderer.invoke("tasks:delete", id),
+    setEnabled: (id: string, enabled: boolean) => ipcRenderer.invoke("tasks:setEnabled", id, enabled),
+    runNow: (id: string) => ipcRenderer.invoke("tasks:runNow", id),
+  },
 };
 
 contextBridge.exposeInMainWorld("harness", api);

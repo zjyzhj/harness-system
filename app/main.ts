@@ -18,6 +18,10 @@ import { ProviderCenter } from "../core/provider-center";
 import { PersonaGenerator } from "../core/persona";
 import { Migration } from "../core/migration";
 import { SystemKit } from "../core/system-kit";
+import { MemorySystem } from "../core/memory-system";
+import { SkillRegistry, BUILTIN_SKILL_TEMPLATES } from "../core/skill-registry";
+import { Scheduler } from "../core/scheduler";
+import { BotRuntime, skillFromText } from "../core/bot-runtime";
 
 const home = process.env.HARNESS_HOME || join(app.getPath("userData"), "..", "harness-bot");
 const store = new Store(home);
@@ -34,16 +38,28 @@ const system = new SystemKit({
   clipboardRead: () => clipboard.readText(),
 });
 
+// ---- Bot 底层运行时（持久记忆 / 技能 / 定时任务）----
+const memory = new MemorySystem(home);
+const skillsDir = join(home, "skills");
+const skills = new SkillRegistry(skillsDir);
+if (skills.list().length === 0) {
+  for (const [k, md] of Object.entries(BUILTIN_SKILL_TEMPLATES)) {
+    try { skills.create(k, md); } catch {}
+  }
+}
+const scheduler = new Scheduler(home);
+const runtime = new BotRuntime({ store, providers, memory, skills, system });
+
 // 为所有 bot 注册默认消息处理器：调用其绑定的 provider 生成回复
 async function defaultHandler(from: any, to: any, text: string, ctx: any): Promise<string> {
   const bot = store.getBot(to.id);
-  const prov = bot && (providers.get(bot.providerId) || providers.getDefault());
-  if (!prov) return `⚠️ ${to.name} 还没有可用模型配置，请先在设置中添加 provider。`;
-  const r = await providers.complete(prov, {
-    model: bot?.model,
-    system: bot?.systemPrompt,
-    user: text,
-    history: store.listMessages(ctx.sessionId).slice(-8).map((m) => ({ sessionId: m.sessionId, from: m.from, to: m.to, role: m.role, content: m.content, kind: m.kind, createdAt: m.createdAt })),
+  if (!bot) return "bot 不存在";
+  const r = await runtime.handle({
+    bot,
+    from: from.id || "user",
+    text,
+    sessionId: ctx.sessionId,
+    history: store.listMessages(ctx.sessionId).slice(-10),
   });
   return r.text;
 }
@@ -134,6 +150,16 @@ app.whenReady().then(() => {
   refreshTray();
   createMainWindow();
 
+  // 定时任务：到期时唤醒对应 bot（走运行时）
+  scheduler.onRun = async (task) => {
+    const bot = store.getBot(task.botId);
+    if (!bot) return;
+    const sid = `sched-${task.id}-${Date.now()}`;
+    await runtime.handle({ bot, from: "scheduler", text: task.prompt, sessionId: sid });
+    system.notify(`⏰ ${bot.name} 定时任务`, task.name);
+  };
+  scheduler.start();
+
   app.on("activate", () => mainWin ? mainWin.show() : createMainWindow());
 });
 
@@ -179,5 +205,22 @@ ipcMain.handle("pets:list", () => store.listPets());
 ipcMain.handle("pets:save", (_e, p: { botId: string; x: number; y: number; visible: boolean }) => store.savePet(p));
 ipcMain.handle("sessions:list", (_e, botId?: string) => store.listSessions(botId));
 ipcMain.handle("messages:list", (_e, sessionId: string) => store.listMessages(sessionId));
+ipcMain.handle("memory:list", (_e, botId: string) => memory.list(botId));
+ipcMain.handle("memory:add", (_e, botId: string, entry: any) => memory.add(botId, entry));
+ipcMain.handle("memory:delete", (_e, botId: string, id: string) => memory.delete(botId, id));
+ipcMain.handle("skills:list", () => skills.list());
+ipcMain.handle("skills:create", (_e, text: string) => {
+  const parsed = skillFromText(text);
+  if (!parsed) throw new Error("没听懂要创建的技能，试试：创建技能：自动周报，每周五总结本周工作");
+  return skills.create(parsed.key, parsed.markdown);
+});
+ipcMain.handle("skills:createRaw", (_e, key: string, markdown: string) => skills.create(key, markdown));
+ipcMain.handle("skills:setEnabled", (_e, key: string, enabled: boolean) => skills.setEnabled(key, enabled));
+ipcMain.handle("skills:delete", (_e, key: string) => skills.delete(key));
+ipcMain.handle("tasks:list", (_e, botId?: string) => botId ? scheduler.listForBot(botId) : scheduler.list());
+ipcMain.handle("tasks:create", (_e, input: any) => scheduler.create(input));
+ipcMain.handle("tasks:delete", (_e, id: string) => scheduler.delete(id));
+ipcMain.handle("tasks:setEnabled", (_e, id: string, enabled: boolean) => scheduler.setEnabled(id, enabled));
+ipcMain.handle("tasks:runNow", async (_e, id: string) => { const t = scheduler.list().find((x) => x.id === id); if (t && scheduler.onRun) await scheduler.onRun(t); return scheduler.list().find((x) => x.id === id); });
 
 app.on("window-all-closed", () => {});

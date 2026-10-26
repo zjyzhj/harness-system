@@ -247,6 +247,117 @@ async function migrateFlow() {
   modal.querySelector("#mm-close").onclick = closeModal;
 }
 
+async function memoryFlow() {
+  if (!currentBot) return;
+  const entries = await api.memory.list(currentBot.id);
+  const modal = openModal(`
+    <h2>🧠 ${esc(currentBot.name)} 的持久记忆</h2>
+    <div class="row"><input id="mm-add" placeholder="记一条事实/笔记，如：用户偏好简洁回答" /></div>
+    <div class="actions"><button class="primary-btn" id="mm-add-btn">记住</button></div>
+    <div id="mm-entries">
+      ${entries.length ? entries.map((e) => `
+        <div class="row" style="margin:4px 0">
+          <span class="hint" style="flex:none">${esc(e.kind)}</span>
+          <span style="flex:1">${esc(e.content)}</span>
+          <button class="ghost-btn" data-del="${e.id}">✕</button>
+        </div>`).join("") : `<span class="hint">还没有记忆。可以让 bot 记住偏好，或说「记住：…」</span>`}
+    </div>
+    <div class="actions"><button class="ghost-btn" id="mm-close">关闭</button></div>`);
+  modal.querySelector("#mm-add-btn").onclick = async () => {
+    const v = modal.querySelector("#mm-add").value.trim();
+    if (!v) return;
+    await api.memory.add(currentBot.id, { kind: "fact", content: v, tags: ["手动"], source: "user" });
+    await memoryFlow();
+  };
+  modal.querySelectorAll("[data-del]").forEach((b) => (b.onclick = async () => {
+    await api.memory.remove(currentBot.id, b.dataset.del);
+    await memoryFlow();
+  }));
+  modal.querySelector("#mm-close").onclick = closeModal;
+}
+
+async function skillsFlow() {
+  const all = await api.skills.list();
+  const modal = openModal(`
+    <h2>🛠 技能（SKILL.md）</h2>
+    <div class="hint">技能 = 目录/SKILL.md + frontmatter(name/description)。回复需要时模型会调用。</div>
+    <div class="row"><input id="ms-create" placeholder="一句话创建：创建技能：自动周报，每周五总结本周工作" /></div>
+    <div class="actions"><button class="primary-btn" id="ms-create-btn">创建技能</button></div>
+    <div id="ms-list">
+      ${all.length ? all.map((sk) => `
+        <div class="row" style="margin:4px 0">
+          <button class="ghost-btn" style="flex:none" data-toggle="${sk.key}">${sk.enabled ? "✅" : "⬜"}</button>
+          <span style="flex:1"><b>${esc(sk.name)}</b> <span class="hint">${esc(sk.description)}</span></span>
+          <button class="ghost-btn" data-del="${sk.key}">✕</button>
+        </div>`).join("") : `<span class="hint">还没有技能</span>`}
+    </div>
+    <div class="actions"><button class="ghost-btn" id="ms-close">关闭</button></div>`);
+  modal.querySelector("#ms-create-btn").onclick = async () => {
+    const v = modal.querySelector("#ms-create").value.trim();
+    if (!v) return;
+    try {
+      await api.skills.create(v);
+      await skillsFlow();
+    } catch (e) {
+      const el = modal.querySelector("#ms-create");
+      el.placeholder = "创建失败：" + (e?.message || "未知错误");
+    }
+  };
+  modal.querySelectorAll("[data-toggle]").forEach((b) => (b.onclick = async () => {
+    await api.skills.setEnabled(b.dataset.toggle, !b.textContent.trim().startsWith("✅"));
+    await skillsFlow();
+  }));
+  modal.querySelectorAll("[data-del]").forEach((b) => (b.onclick = async () => {
+    await api.skills.remove(b.dataset.del);
+    await skillsFlow();
+  }));
+  modal.querySelector("#ms-close").onclick = closeModal;
+}
+
+async function tasksFlow() {
+  const modal = openModal(`
+    <h2>⏰ 定时任务</h2>
+    <div class="hint">cron 5 段：分 时 日 月 周。到期会唤醒对应 bot 执行。</div>
+    ${currentBot ? `
+    <div class="kv">
+      <label>任务名</label><input id="mt-name" placeholder="每日早报" value="每日早报" />
+      <label>cron</label><input id="mt-cron" placeholder="0 9 * * *" value="0 9 * * *" />
+      <label>执行指令</label><input id="mt-prompt" placeholder="给 bot 的指令" value="生成今日早报，用中文总结" />
+    </div>
+    <div class="actions"><button class="primary-btn" id="mt-add">为 ${esc(currentBot.name)} 添加</button></div>` : `<span class="hint">先选一个 bot 再添加定时任务</span>`}
+    <div id="mt-list"></div>
+    <div class="actions"><button class="ghost-btn" id="mt-close">关闭</button></div>`);
+  const render = async () => {
+    const tasks = await api.tasks.list(currentBot?.id);
+    const box = modal.querySelector("#mt-list");
+    box.innerHTML = tasks.length ? tasks.map((t) => `
+      <div class="row" style="margin:4px 0">
+        <button class="ghost-btn" style="flex:none" data-toggle="${t.id}">${t.enabled ? "▶️" : "⏸"}</button>
+        <span style="flex:1"><b>${esc(t.name)}</b> <span class="hint">${esc(t.cron)} · 已跑${t.runCount}次</span></span>
+        <button class="ghost-btn" data-run="${t.id}">⚡</button>
+        <button class="ghost-btn" data-del="${t.id}">✕</button>
+      </div>`).join("") : `<span class="hint">还没有定时任务</span>`;
+    box.querySelectorAll("[data-toggle]").forEach((b) => (b.onclick = async () => {
+      const t = tasks.find((x) => x.id === b.dataset.toggle);
+      await api.tasks.setEnabled(b.dataset.toggle, !t.enabled);
+      render();
+    }));
+    box.querySelectorAll("[data-run]").forEach((b) => (b.onclick = async () => { await api.tasks.runNow(b.dataset.run); render(); }));
+    box.querySelectorAll("[data-del]").forEach((b) => (b.onclick = async () => { await api.tasks.remove(b.dataset.del); render(); }));
+  };
+  render();
+  modal.querySelector("#mt-add").onclick = async () => {
+    await api.tasks.create({
+      botId: currentBot.id,
+      name: modal.querySelector("#mt-name").value.trim() || "任务",
+      cron: modal.querySelector("#mt-cron").value.trim(),
+      prompt: modal.querySelector("#mt-prompt").value.trim(),
+    });
+    render();
+  };
+  modal.querySelector("#mt-close").onclick = closeModal;
+}
+
 function esc(s) {
   return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
@@ -255,6 +366,9 @@ function esc(s) {
 $("#new-bot-btn").onclick = createBotFlow;
 $("#settings-btn").onclick = settingsFlow;
 $("#migrate-btn").onclick = migrateFlow;
+$("#memory-btn").onclick = memoryFlow;
+$("#skills-btn").onclick = skillsFlow;
+$("#tasks-btn").onclick = tasksFlow;
 $("#send-btn").onclick = send;
 $("#input").addEventListener("keydown", (e) => {
   if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
