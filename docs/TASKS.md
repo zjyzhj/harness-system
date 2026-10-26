@@ -8,18 +8,18 @@
 | 任务 | 内容 | 出口条件 | 状态 |
 |------|------|----------|------|
 | T0 | docs 全套（GOAL/SPEC/DESIGN/TASKS） | 4 文件存在 | ✅ |
-| T1 | 工程骨架（Bun + 目录 + tsconfig + package.json） | `bun dev` 起壳 | ⬜ |
-| T2 | core/store（SQLite + config） | `bun test` 过 store 测试 | ⬜ |
-| T3 | AgentRegistry + 一句话创建 | 创建 bot 测试过 | ⬜ |
-| T4 | MessageBus 多 bot 通信 | 两 bot 互发测试过 | ⬜ |
-| T5 | ProviderCenter + openai-compat 适配器 | 测试连接/对话测试过 | ⬜ |
-| T6 | CLI 适配器（codex/cursor/claude）+ 降级 | capability 探测测试过 | ⬜ |
-| T7 | PersonaGenerator 形象+角色卡（含降级） | 生成头像文件+角色卡测试过 | ⬜ |
-| T8 | SystemKit（通知/剪贴板/文件） | 三能力最小测试过 | ⬜ |
-| T9 | Migration 导出/导入 | 往返测试过 | ⬜ |
-| T10 | Electron 壳：Tray + 主控面板窗口 + 宠物窗口 | 面板打开+宠物出现 | ⬜ |
-| T11 | 主控面板 UI（Grok-Bot 风格暗色） | 可建 bot/可对话/可见宠物 | ⬜ |
-| T12 | 集成验收（G1–G9） | 验收清单全勾 | ⬜ |
+| T1 | 工程骨架（Bun + 目录 + tsconfig + package.json） | `bun dev` 起壳 | ✅ |
+| T2 | core/store（纯 JS 文件存储 + config） | `bun test` 过 store 测试 | ✅ |
+| T3 | AgentRegistry + 一句话创建 | 创建 bot 测试过 | ✅ |
+| T4 | MessageBus 多 bot 通信 | 两 bot 互发测试过 | ✅ |
+| T5 | ProviderCenter + openai-compat 适配器 | 测试连接/对话测试过 | ✅ |
+| T6 | CLI 适配器（codex/cursor/claude）+ 降级 | capability 探测测试过 | ✅ |
+| T7 | PersonaGenerator 形象+角色卡（含降级） | 生成头像文件+角色卡测试过 | ✅ |
+| T8 | SystemKit（通知/剪贴板/文件） | 三能力最小测试过 | ✅ |
+| T9 | Migration 导出/导入 | 往返测试过 | ✅ |
+| T10 | Electron 壳：Tray + 主控面板窗口 + 宠物窗口 | 面板打开+宠物出现 | ✅ |
+| T11 | 主控面板 UI（Grok-Bot 风格暗色） | 可建 bot/可对话/可见宠物 | ✅ |
+| T12 | 集成验收（G1–G9） | 验收清单全勾 | ✅ |
 
 ## 1. 实现顺序与依赖
 

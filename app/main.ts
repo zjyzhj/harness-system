@@ -6,6 +6,11 @@
 import { app, BrowserWindow, Tray, Menu, ipcMain, clipboard, Notification, screen, nativeImage } from "electron";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
+
+// 应用根：electron . 运行时 getAppPath() 返回项目根目录
+// bun build 会把 import.meta.url / __dirname 编译成源码路径，不能用于定位运行文件。
+const APP_ROOT = app.getAppPath();
+const DIST_DIR = join(APP_ROOT, "dist");
 import { Store } from "../core/store";
 import { AgentRegistry } from "../core/agent-registry";
 import { MessageBus } from "../core/message-bus";
@@ -63,12 +68,18 @@ function createMainWindow() {
     backgroundColor: "#0d0d0d",
     show: false,
     webPreferences: {
-      preload: join(__dirname, "preload.js"),
+      preload: join(DIST_DIR, "preload.cjs"),
       contextIsolation: true,
       nodeIntegration: false,
     },
   });
-  mainWin.loadURL(pathToFileURL(join(__dirname, "renderer", "index.html")).toString());
+  mainWin.loadURL(pathToFileURL(join(DIST_DIR, "renderer", "index.html")).toString());
+  mainWin.webContents.on("did-finish-load", () => {
+    console.log("[harness] 主控面板渲染完成 ✅");
+    mainWin?.webContents.executeJavaScript("typeof window.harness !== 'undefined' ? 'bridge-ok' : 'bridge-missing'")
+      .then((r) => console.log("[harness] preload bridge:", r))
+      .catch(() => console.log("[harness] bridge check skipped"));
+  });
   mainWin.once("ready-to-show", () => mainWin?.show());
   mainWin.on("closed", () => { mainWin = null; });
 }
@@ -89,12 +100,12 @@ function createPetWindow(botId: string) {
     skipTaskbar: true,
     hasShadow: false,
     webPreferences: {
-      preload: join(__dirname, "preload.js"),
+      preload: join(DIST_DIR, "preload.cjs"),
       contextIsolation: true,
       nodeIntegration: false,
     },
   });
-  win.loadURL(pathToFileURL(join(__dirname, "renderer", "pet.html")).toString() + `?botId=${botId}`);
+  win.loadURL(pathToFileURL(join(DIST_DIR, "renderer", "pet.html")).toString() + `?botId=${botId}`);
   win.on("closed", () => petWins.delete(botId));
   win.on("moved", () => {
     const [bx, by] = win.getPosition();
@@ -117,7 +128,7 @@ function refreshTray() {
 }
 
 app.whenReady().then(() => {
-  const icon = nativeImage.createFromPath(join(__dirname, "..", "assets", "tray.png"));
+  const icon = nativeImage.createFromPath(join(DIST_DIR, "..", "assets", "tray.png"));
   tray = new Tray(icon.isEmpty() ? nativeImage.createEmpty() : icon);
   tray.setToolTip("Harness Bot");
   refreshTray();

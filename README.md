@@ -25,6 +25,7 @@ bun run dev        # 仅构建 shell（不启动，便于调试）
 ## 数据
 
 - 数据默认存 `~/Library/Application Support/harness-bot/`（或 `HARNESS_HOME` 指定）
+- 存储为纯 JSON 文件（providers/bots/sessions/messages/pets），无原生依赖，迁移 = 复制文件
 - 导出文件为 `harness-bot-migration/v1` 格式
 
 ## 文档
