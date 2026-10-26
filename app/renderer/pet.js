@@ -74,6 +74,10 @@ api.onPetEvent((ev) => {
   } else if (ev.type === "task-done" || ev.type === "task-error") {
     eventQueue.push(ev);
     poke();
+  } else if (ev.type === "proactive") {
+    // 主动搭话：立即弹气泡并弹跳
+    showBubble(ev.text || "", { title: ev.title || bot?.name || "宠物" });
+    bounce();
   }
 });
 

@@ -22,6 +22,7 @@ import { MemorySystem } from "../core/memory-system";
 import { SkillRegistry, BUILTIN_SKILL_TEMPLATES } from "../core/skill-registry";
 import { Scheduler } from "../core/scheduler";
 import { BotRuntime, skillFromText } from "../core/bot-runtime";
+import { OfflinePersona } from "../core/offline-persona";
 import { ToolExecutor, BUILTIN_TOOL_DESCRIPTIONS } from "../core/tool-executor";
 import { McpClient, type McpServerConfig } from "../core/mcp-client";
 import { OpenAICompatImageGen } from "../core/adapters/image-gen";
@@ -58,7 +59,7 @@ const executor = new ToolExecutor({ allowedRoots: [workspace] }, system, memory)
 const mcp = new McpClient(loadMcpServers());
 void mcp.init();
 const statuses = new Map<string, AgentStatus>();
-const runtime = new BotRuntime({ store, providers, memory, skills, system, executor });
+const runtime = new BotRuntime({ store, providers, memory, skills, system, executor, offline: new OfflinePersona() });
 
 // 形象生成：有图像 provider 时用真 API，否则降级
 function personaWithImage() {
@@ -207,6 +208,17 @@ app.whenReady().then(() => {
     }
   };
   scheduler.start();
+
+  // 主动搭话：有宠物模式且空闲的 bot，随机主动问候（离线人格引擎）
+  setInterval(() => {
+    const pets = store.listBots().filter((b) => b.petEnabled && statuses.get(b.id)?.state !== "running");
+    if (!pets.length || Math.random() > 0.25) return;
+    const bot = pets[Math.floor(Math.random() * pets.length)];
+    const line = new OfflinePersona().proactive(bot, memory.list(bot.id));
+    if (line) {
+      pushPetEvent(bot.id, { type: "proactive", title: line.title, text: line.text });
+    }
+  }, 5 * 60_000);
 
   app.on("activate", () => mainWin ? mainWin.show() : createMainWindow());
 });

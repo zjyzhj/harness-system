@@ -5,6 +5,7 @@ import type { MemorySystem } from "./memory-system";
 import type { SkillRegistry } from "./skill-registry";
 import type { SystemKit } from "./system-kit";
 import { ToolExecutor, BUILTIN_TOOL_DESCRIPTIONS } from "./tool-executor";
+import { OfflinePersona } from "./offline-persona";
 
 export interface RuntimeDeps {
   store: Store;
@@ -13,6 +14,7 @@ export interface RuntimeDeps {
   skills: SkillRegistry;
   system?: SystemKit;
   executor?: ToolExecutor;
+  offline?: OfflinePersona;
 }
 
 export interface RuntimeOptions {
@@ -45,7 +47,11 @@ export class BotRuntime {
     const maxRounds = opts?.maxToolRounds ?? 3;
     const provider = this.deps.providers.get(bot.providerId) || this.deps.providers.getDefault();
     if (!provider) {
-      return { text: `⚠️ ${bot.name} 没有可用模型配置，无法运行。请先在设置中添加 provider。`, toolCalls: [], usedSkills: [] };
+      // 离线人格降级：无模型 key 时也能用角色卡+记忆回应
+      const offline = this.deps.offline ?? new OfflinePersona();
+      const reply = offline.reply(bot, text, this.deps.memory.list(bot.id));
+      this.record(bot.id, sessionId, text, reply, []);
+      return { text: reply, toolCalls: [], usedSkills: [] };
     }
 
     let context = this.buildContext(bot, text, opts);
