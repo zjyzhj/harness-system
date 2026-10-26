@@ -87,6 +87,7 @@ async function defaultHandler(from: any, to: any, text: string, ctx: any): Promi
       history: store.listMessages(ctx.sessionId).slice(-10),
     });
     statuses.set(bot.id, { botId: bot.id, state: "idle", lastRunAt: Date.now() });
+    pushPetEvent(bot.id, { type: "reply", text: r.text.slice(0, 120) });
     return r.text;
   } catch (e) {
     statuses.set(bot.id, { botId: bot.id, state: "error", lastRunAt: Date.now(), lastError: e instanceof Error ? e.message : String(e) });
@@ -103,6 +104,14 @@ registerAll();
 let tray: Tray | null = null;
 let mainWin: BrowserWindow | null = null;
 const petWins = new Map<string, BrowserWindow>();
+
+/** 向某 bot 的宠物窗口推送事件（不存在则跳过） */
+function pushPetEvent(botId: string, event: { type: string; text?: string; title?: string }) {
+  const win = petWins.get(botId);
+  if (win && !win.isDestroyed()) {
+    win.webContents.send("pet:event", event);
+  }
+}
 
 function createMainWindow() {
   mainWin = new BrowserWindow({
@@ -187,11 +196,14 @@ app.whenReady().then(() => {
     const sid = `sched-${task.id}-${Date.now()}`;
     try {
       statuses.set(task.botId, { botId: task.botId, state: "running", lastRunAt: Date.now(), currentTask: `⏰ ${task.name}` });
-      await runtime.handle({ bot, from: "scheduler", text: task.prompt, sessionId: sid });
+      const r = await runtime.handle({ bot, from: "scheduler", text: task.prompt, sessionId: sid });
       statuses.set(task.botId, { botId: task.botId, state: "idle", lastRunAt: Date.now() });
       system.notify(`⏰ ${bot.name} 定时任务`, task.name);
+      pushPetEvent(task.botId, { type: "task-done", title: task.name, text: r.text.slice(0, 120) });
     } catch (e) {
-      statuses.set(task.botId, { botId: task.botId, state: "error", lastError: e instanceof Error ? e.message : String(e) });
+      const err = e instanceof Error ? e.message : String(e);
+      statuses.set(task.botId, { botId: task.botId, state: "error", lastError: err });
+      pushPetEvent(task.botId, { type: "task-error", title: task.name, text: err.slice(0, 120) });
     }
   };
   scheduler.start();

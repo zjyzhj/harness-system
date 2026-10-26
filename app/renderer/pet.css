@@ -1,7 +1,7 @@
 * { box-sizing: border-box; margin: 0; padding: 0; }
 html, body { background: transparent; overflow: hidden; width: 100%; height: 100%; user-select: none; }
 body { display: flex; align-items: center; justify-content: center; }
-#pet { display: flex; flex-direction: column; align-items: center; gap: 4px; }
+#pet { display: flex; flex-direction: column; align-items: center; gap: 4px; cursor: pointer; }
 .draggable { -webkit-app-region: drag; }
 #pet-avatar {
   width: 96px; height: 96px; border-radius: 50%;
@@ -9,9 +9,22 @@ body { display: flex; align-items: center; justify-content: center; }
   box-shadow: 0 8px 30px rgba(80, 70, 229, .45);
   display: flex; align-items: center; justify-content: center; font-size: 48px;
   border: 3px solid rgba(255,255,255,.25);
+  animation: breathe 3s ease-in-out infinite;
+  transition: transform .15s ease;
 }
 #pet-avatar img { width: 100%; height: 100%; object-fit: cover; }
 #pet-name { color: #fff; font-size: 13px; font-weight: 600; text-shadow: 0 1px 6px rgba(0,0,0,.8); }
+#pet-status {
+  width: 14px; height: 14px; border-radius: 50%; border: 2px solid rgba(0,0,0,.5);
+  margin-top: 2px;
+}
+.status-idle { background: #4ade80; }
+.status-running { background: #fbbf24; animation: pulse 1.2s infinite; }
+.status-error { background: #f87171; }
+
+#pet.bounce { animation: bounce .5s ease; }
+#pet.pop { animation: pop .35s ease; }
+
 .bubble {
   position: fixed; bottom: 132px; left: 50%; transform: translateX(-50%);
   width: 260px; background: rgba(20,20,26,.96); border: 1px solid #333; border-radius: 14px;
@@ -20,9 +33,16 @@ body { display: flex; align-items: center; justify-content: center; }
   box-shadow: 0 12px 40px rgba(0,0,0,.5);
 }
 .bubble.hidden { display: none; }
+.bubble.arrive { animation: arrive .25s ease; }
 #bubble-text { white-space: pre-wrap; word-break: break-word; max-height: 120px; overflow-y: auto; margin-bottom: 8px; }
 #bubble-input {
   width: 100%; background: #222; color: #eee; border: 1px solid #444; border-radius: 8px;
   padding: 8px; font-size: 13px; resize: none; outline: none; font-family: inherit;
 }
 #bubble-send { margin-top: 6px; background: #6c5ce7; color: #fff; border: none; border-radius: 8px; padding: 7px 14px; cursor: pointer; }
+
+@keyframes breathe { 0%,100% { transform: scale(1); } 50% { transform: scale(1.04); } }
+@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .35; } }
+@keyframes bounce { 0%,100% { transform: translateY(0); } 40% { transform: translateY(-14px); } }
+@keyframes pop { 0% { transform: scale(.85); } 70% { transform: scale(1.08); } 100% { transform: scale(1); } }
+@keyframes arrive { 0% { opacity: 0; transform: translate(-50%, 8px); } 100% { opacity: 1; transform: translate(-50%, 0); } }

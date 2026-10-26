@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer } from "electron";
+import { contextBridge, ipcRenderer, type IpcRendererEvent } from "electron";
 
 const api = {
   bots: {
@@ -76,5 +76,11 @@ const api = {
   },
 };
 
-contextBridge.exposeInMainWorld("harness", api);
+const onPetEvent = (cb: (event: { type: string; text?: string; title?: string }) => void) => {
+  const listener = (_e: IpcRendererEvent, ev: { type: string; text?: string; title?: string }) => cb(ev);
+  ipcRenderer.on("pet:event", listener);
+  return () => ipcRenderer.removeListener("pet:event", listener);
+};
+
+contextBridge.exposeInMainWorld("harness", { ...api, onPetEvent });
 export type HarnessApi = typeof api;
