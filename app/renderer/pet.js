@@ -74,6 +74,13 @@ api.onPetEvent((ev) => {
   } else if (ev.type === "task-done" || ev.type === "task-error") {
     eventQueue.push(ev);
     poke();
+  } else if (ev.type === "avatar-updated") {
+    // 形象已更新：重新拉取 bot 并刷新外观 + 弹「变身」气泡
+    const list = await api.bots.list();
+    const fresh = list.find((b) => b.id === botId);
+    if (fresh) { bot = fresh; refreshAppearance(); }
+    showBubble(`形象已更新：${ev.text || ""}`, { title: ev.title || "新形象 ✨" });
+    pop();
   } else if (ev.type === "proactive") {
     // 主动搭话：立即弹气泡并弹跳
     showBubble(ev.text || "", { title: ev.title || bot?.name || "宠物" });
@@ -98,15 +105,21 @@ function poke() {
   }, 4000);
 }
 
+function refreshAppearance() {
+  if (!bot) return;
+  nameEl.textContent = bot.name;
+  if (bot.avatarPath) {
+    avatarEl.innerHTML = `<img src="file://${bot.avatarPath}" />`;
+  } else {
+    avatarEl.innerHTML = `<span id="pet-emoji">${bot.name?.slice(0, 1) || "🤖"}</span>`;
+  }
+}
+
 async function init() {
   const [bots, pets] = await Promise.all([api.bots.list(), api.pets.list()]);
   bot = bots.find((b) => b.id === botId);
   if (!bot) return;
-  nameEl.textContent = bot.name;
-  if (bot.name && !bot.avatarPath) emojiEl.textContent = bot.name.slice(0, 1);
-  if (bot.avatarPath) {
-    avatarEl.innerHTML = `<img src="file://${bot.avatarPath}" />`;
-  }
+  refreshAppearance();
   petEl.onclick = () => {
     if (saying) return;
     bubble.classList.toggle("hidden");

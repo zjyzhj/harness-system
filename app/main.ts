@@ -238,7 +238,10 @@ ipcMain.handle("bots:setPet", (_e, id: string, enabled: boolean) => {
 ipcMain.handle("persona:generate", async (_e, id: string, desc: string) => {
   const bot = store.getBot(id);
   if (!bot) throw new Error("bot 不存在");
-  return personaWithImage().generate(bot, desc);
+  const result = await personaWithImage().generate(bot, desc);
+  // 宠物立即刷新形象（头像 + 名字 + 性格）
+  pushPetEvent(id, { type: "avatar-updated", text: desc, title: result.card?.name || bot.name });
+  return result;
 });
 ipcMain.handle("chat:send", async (_e, botId: string, text: string, sessionId?: string) => {
   const bot = store.getBot(botId);

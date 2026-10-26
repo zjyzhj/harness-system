@@ -1,5 +1,6 @@
 import type { Bot, ChatMessage } from "./types";
 import type { Store } from "./store";
+import type { Transport, TransportMessage } from "./transport";
 
 export type BotMessageHandler = (from: Bot, to: Bot, text: string, ctx: MessageContext) => Promise<string>;
 
@@ -19,8 +20,34 @@ export interface MessageBusOptions {
 export class MessageBus {
   private handlers = new Map<string, BotMessageHandler>();
   private listeners = new Set<(m: ChatMessage) => void>();
+  private transports: Transport[] = [];
 
   constructor(private store: Store) {}
+
+  /** 注册远程 transport（可多个） */
+  addTransport(t: Transport) {
+    this.transports.push(t);
+    t.onMessage((msg) => this.handleRemote(msg));
+  }
+
+  private handleRemote(msg: TransportMessage) {
+    // 远程 bot 发来消息 → 找本地 handler 处理并回执
+    const bot = this.store.getBot(msg.to);
+    if (!bot) return;
+    const handler = this.handlers.get(msg.to);
+    if (!handler) return;
+    const from = this.store.getBot(msg.from) ?? { id: msg.from, name: msg.from, role: "远程", persona: "", providerId: "", petEnabled: false, createdAt: Date.now() };
+    void handler(from, bot, msg.text, { sessionId: msg.sessionId ?? `x-${Date.now()}`, bus: this }).then((reply) => {
+      const replyMsg: ChatMessage = {
+        sessionId: msg.sessionId ?? `x-${Date.now()}`, from: bot.id, to: msg.from, role: "assistant", content: reply, kind: "bot-to-bot", createdAt: Date.now(),
+      };
+      this.store.addMessage(replyMsg);
+      this.emit(replyMsg);
+      for (const t of this.transports) {
+        void t.send({ from: bot.id, to: msg.from, text: reply, sessionId: replyMsg.sessionId, timestamp: Date.now() });
+      }
+    });
+  }
 
   register(botId: string, handler: BotMessageHandler) {
     this.handlers.set(botId, handler);
@@ -47,6 +74,14 @@ export class MessageBus {
 
     const handler = this.handlers.get(to.id);
     if (!handler) {
+      // 尝试走远程 transport（目标不在本地）
+      if (this.transports.length) {
+        let delivered = false;
+        for (const t of this.transports) {
+          if (await t.send({ from: from.id, to: to.id, text, sessionId: sid, timestamp: Date.now() })) delivered = true;
+        }
+        if (delivered) return [outgoing];
+      }
       const err: ChatMessage = {
         sessionId: sid, from: to.id, to: from.id, role: "assistant", content: `⚠️ bot ${to.name} 未注册消息处理器（当前仅主控可调用它）。`,
         kind: "bot-to-bot", createdAt: Date.now(),
