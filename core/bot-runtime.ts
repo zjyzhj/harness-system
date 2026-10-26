@@ -5,6 +5,7 @@ import type { MemorySystem } from "./memory-system";
 import type { SkillRegistry } from "./skill-registry";
 import type { SystemKit } from "./system-kit";
 import { ToolExecutor, BUILTIN_TOOL_DESCRIPTIONS } from "./tool-executor";
+import { trimHistoryToBudget } from "./context-budget";
 import { OfflinePersona } from "./offline-persona";
 import type { McpClient } from "./mcp-client";
 
@@ -23,6 +24,7 @@ export interface RuntimeOptions {
   maxToolRounds?: number;        // 最多工具调用轮数
   injectMemory?: boolean;        // 是否注入记忆
   injectSkills?: boolean;        // 是否注入技能描述
+  budgetTokens?: number;         // G1：上下文 token 预算（默认 8000）
 }
 
 const TOOL_BLOCK_RE = /```tool\s*\n([\s\S]*?)\n```/g;
@@ -119,7 +121,24 @@ export class BotRuntime {
     }
 
     let context = this.buildContext(bot, text, opts);
-    const conversation: { role: string; content: string }[] = this.buildHistory(bot, text, input.history, opts);
+    // G1：预算裁剪历史（超预算压缩最旧段为 summary，lastSeq 去重）
+    const session = this.deps.store.listSessionsPage({ limit: 1 }).sessions.find((s) => s.id === sessionId)
+      ?? { lastSeq: 0 } as any;
+    const trimmed = await trimHistoryToBudget(input.history ?? [], session.lastSeq ?? 0, async (msgs) => {
+      try {
+        const p = this.deps.providers.getDefault();
+        if (!p) return "（摘要生成失败：无 provider）";
+        const r = await this.deps.providers.complete(p, {
+          system: "把以下对话压缩为 3-5 条要点摘要（中文），不要多余内容。",
+          user: msgs.map((m) => `${m.role}: ${m.content}`).join("\n"),
+        });
+        return r.text;
+      } catch {
+        return "（摘要生成失败）";
+      }
+    }, { budgetTokens: opts?.budgetTokens ?? 8000 });
+    if (trimmed.compressed) this.deps.store.markCompacted(sessionId, trimmed.compactedUpToSeq);
+    const conversation: { role: string; content: string }[] = trimmed.messages;
     const toolCalls: ToolCall[] = [];
     const usedSkills: string[] = [];
     const memoryEvents: MemoryEntry[] = [];

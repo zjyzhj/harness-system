@@ -289,7 +289,12 @@ ipcMain.handle("migration:import", (_e, filePath: string) => { const r = migrati
 ipcMain.handle("pets:list", () => store.listPets());
 ipcMain.handle("pets:save", (_e, p: { botId: string; x: number; y: number; visible: boolean }) => store.savePet(p));
 ipcMain.handle("sessions:list", (_e, botId?: string) => store.listSessions(botId));
+ipcMain.handle("sessions:page", (_e, opts?: { botId?: string; archived?: boolean; offset?: number; limit?: number }) => store.listSessionsPage(opts));
+ipcMain.handle("sessions:archive", (_e, sessionId: string, archived: boolean) => store.archiveSession(sessionId, archived));
+ipcMain.handle("sessions:delete", (_e, sessionId: string) => store.deleteSession(sessionId));
 ipcMain.handle("messages:list", (_e, sessionId: string) => store.listMessages(sessionId));
+ipcMain.handle("messages:page", (_e, sessionId: string, opts?: { limit?: number; beforeId?: number }) => store.listMessagesPage(sessionId, opts));
+ipcMain.handle("messages:search", (_e, opts?: { q?: string; botId?: string; from?: number; to?: number; limit?: number }) => store.searchMessages(opts));
 ipcMain.handle("memory:list", (_e, botId: string) => memory.list(botId));
 ipcMain.handle("memory:stats", (_e, botId: string) => {
   const { memoryStats } = require("../core/memory-system");

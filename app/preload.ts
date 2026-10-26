@@ -41,9 +41,14 @@ const api = {
   },
   sessions: {
     list: (botId?: string) => ipcRenderer.invoke("sessions:list", botId),
+    page: (opts?: any) => ipcRenderer.invoke("sessions:page", opts),
+    archive: (sessionId: string, archived: boolean) => ipcRenderer.invoke("sessions:archive", sessionId, archived),
+    remove: (sessionId: string) => ipcRenderer.invoke("sessions:delete", sessionId),
   },
   messages: {
     list: (sessionId: string) => ipcRenderer.invoke("messages:list", sessionId),
+    page: (sessionId: string, opts?: any) => ipcRenderer.invoke("messages:page", sessionId, opts),
+    search: (opts?: any) => ipcRenderer.invoke("messages:search", opts),
   },
   memory: {
     list: (botId: string) => ipcRenderer.invoke("memory:list", botId),

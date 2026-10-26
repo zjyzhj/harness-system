@@ -54,29 +54,99 @@ async function selectBot(b) {
   $("#empty-state").style.display = "none";
   $("#messages").innerHTML = "";
   $("#input").placeholder = `给 ${b.name} 发消息，@bot名 可让 bot 互相通信…`;
-  const sessions = await api.sessions.list(b.id);
+  // G1：会话分页（每 bot 最新 30 个）
+  const { sessions } = await api.sessions.page({ botId: b.id, limit: 30 });
   if (sessions.length) {
     currentSession = sessions[0].id;
-    const msgs = await api.messages.list(sessions[0].id);
-    msgs.forEach((m) => appendMsg(m));
+    await loadSessionMessages(sessions[0].id, true);
   }
+}
+
+/** G1：加载会话消息（分页窗口，tail=最新 N 条；加载更早时 prepend） */
+async function loadSessionMessages(sid, initial = false) {
+  const r = await api.messages.page(sid, { limit: initial ? 40 : 40 });
+  const box = $("#messages");
+  if (initial) box.innerHTML = "";
+  // 若还有更早消息，顶部插「加载更早」
+  const exists = box.querySelector(`[data-loadmore="${sid}"]`);
+  if (exists) exists.remove();
+  if (r.hasMore) {
+    const btn = document.createElement("button");
+    btn.className = "load-more-btn";
+    btn.dataset.loadmore = sid;
+    btn.textContent = "↑ 加载更早消息";
+    btn.onclick = async () => {
+      const older = await api.messages.page(sid, { limit: 40, beforeId: r.msgs[0]?.id });
+      btn.remove();
+      const frag = document.createDocumentFragment();
+      older.msgs.forEach((m) => frag.appendChild(makeMsgEl(m)));
+      box.prepend(frag);
+      if (older.hasMore) {
+        const btn2 = document.createElement("button");
+        btn2.className = "load-more-btn";
+        btn2.dataset.loadmore = sid;
+        btn2.textContent = "↑ 加载更早消息";
+        btn2.onclick = btn.onclick;
+        btn2.dataset.before = older.msgs[0]?.id;
+        box.prepend(btn2);
+        btn2.onclick = (ev) => loadOlder(ev, sid);
+      }
+    };
+    btn.onclick = btn.onclick;
+    box.prepend(btn);
+  }
+  r.msgs.forEach((m) => appendMsg(m));
+  if (initial) box.scrollTop = box.scrollHeight;
+}
+
+async function loadOlder(ev, sid) {
+  const btn = ev.currentTarget;
+  const before = Number(btn.dataset.before) || (() => {
+    const first = box_first();
+    return first ? first.dataset.id : undefined;
+  })();
+  const r = await api.messages.page(sid, { limit: 40, beforeId: before });
+  btn.remove();
+  const frag = document.createDocumentFragment();
+  r.msgs.forEach((m) => frag.appendChild(makeMsgEl(m)));
+  const box = $("#messages");
+  box.prepend(frag);
+  if (r.hasMore) {
+    const btn2 = document.createElement("button");
+    btn2.className = "load-more-btn";
+    btn2.dataset.loadmore = sid;
+    btn2.dataset.before = (r.msgs[0]?.id);
+    btn2.textContent = "↑ 加载更早消息";
+    btn2.onclick = (e) => loadOlder(e, sid);
+    box.prepend(btn2);
+  }
+}
+
+function box_first() {
+  const box = $("#messages");
+  for (const el of box.children) if (el.dataset?.id) return el;
+  return null;
+}
+
+function makeMsgEl(m) {
+  const wrapper = document.createElement("div");
+  wrapper.dataset.id = m.id ?? "";
+  const fromName = m.from === "user" ? "我" : (bots.find((b) => b.id === m.from)?.name || m.from);
+  if (m.kind === "event") {
+    wrapper.className = "msg sys";
+    wrapper.innerHTML = `<div class="bubble">${esc(m.content)}</div>`;
+    return wrapper;
+  }
+  wrapper.className = "msg " + (m.from === "user" ? "user" : "bot");
+  const av = m.from === "user" ? `<div class="avatar">🧑</div>` : (() => { const b = bots.find((x) => x.id === m.from); return `<div class="avatar">${b?.avatarPath ? `<img src="file://${b.avatarPath}"/>` : "🤖"}</div>`; })();
+  const inner = typeof m.content === "string" ? renderMarkdown(esc(m.content)) : renderBlocks(m.content);
+  wrapper.innerHTML = `${m.from !== "user" ? `<div class="who">${esc(fromName)}</div>` : ""}${av}<div class="bubble">${inner}</div>${m.meta ? `<div class="msg-meta">${esc([m.meta.model, m.meta.latencyMs ? m.meta.latencyMs + "ms" : "", m.meta.tokensUsed ? m.meta.tokensUsed + " tok" : ""].filter(Boolean).join(" · "))}</div>` : ""}`;
+  return wrapper;
 }
 
 function appendMsg(m) {
   const box = $("#messages");
-  const el = document.createElement("div");
-  const fromName = m.from === "user" ? "我" : (bots.find((b) => b.id === m.from)?.name || m.from);
-  if (m.kind === "event") {
-    el.className = "msg sys";
-    el.innerHTML = `<div class="bubble">${esc(m.content)}</div>`;
-  } else {
-    el.className = "msg " + (m.from === "user" ? "user" : "bot");
-    const avatar = m.from === "user"
-      ? `<div class="avatar">🧑</div>`
-      : (() => { const b = bots.find((x) => x.id === m.from); return `<div class="avatar">${b?.avatarPath ? `<img src="file://${b.avatarPath}"/>` : "🤖"}</div>`; })();
-    const inner = typeof m.content === "string" ? renderMarkdown(esc(m.content)) : renderBlocks(m.content);
-    el.innerHTML = `${m.from !== "user" ? `<div class="who">${esc(fromName)}</div>` : ""}${avatar}<div class="bubble">${inner}</div>${m.meta ? `<div class="msg-meta">${esc([m.meta.model, m.meta.latencyMs ? m.meta.latencyMs + "ms" : "", m.meta.tokensUsed ? m.meta.tokensUsed + " tok" : ""].filter(Boolean).join(" · "))}</div>` : ""}`;
-  }
+  const el = makeMsgEl(m);
   box.appendChild(el);
   box.scrollTop = box.scrollHeight;
 }
@@ -605,6 +675,92 @@ $("#composer").addEventListener("drop", async (e) => {
   for (const f of files) {
     try { addPendingImage(await fileToDataUrl(f), f.name); } catch { /* ignore */ }
   }
+});
+
+// G1 搜索（防抖，输入即查，空词隐藏）
+let searchTimer = null;
+$("#search-input").addEventListener("input", async (e) => {
+  clearTimeout(searchTimer);
+  const v = e.target.value.trim();
+  const box = $("#search-results");
+  if (!v) { box.classList.add("hidden"); box.innerHTML = ""; return; }
+  searchTimer = setTimeout(async () => {
+    const hits = await api.messages.search({ q: v, limit: 20 });
+    box.innerHTML = "";
+    if (!hits.length) { box.innerHTML = `<div class="sr"><span class="sr-bot">无结果</span></div>`; box.classList.remove("hidden"); return; }
+    for (const h of hits) {
+      const el = document.createElement("div");
+      el.className = "sr";
+      const bot = bots.find((b) => b.id === h.botId);
+      el.innerHTML = `<div class="sr-bot">${esc(bot?.name || h.botId)} · ${esc(new Date(h.createdAt).toLocaleString())}</div><div class="sr-snippet">${esc(h.snippet)}</div>`;
+      el.onclick = () => openSessionById(h.sessionId);
+      box.appendChild(el);
+    }
+    box.classList.remove("hidden");
+  }, 250);
+});
+document.addEventListener("click", (e) => { if (!e.target.closest("#search-box")) $("#search-results")?.classList.add("hidden"); });
+
+/** G1：按 session 打开（搜索跳转 / 宠物跳转共用） */
+async function openSessionById(sid) {
+  const sessions = await api.sessions.page({ limit: 100 });
+  const s = sessions.sessions.find((x) => x.id === sid);
+  if (!s) return;
+  const bot = bots.find((b) => b.id === s.botId);
+  if (!bot) return;
+  currentBot = bot;
+  currentSession = sid;
+  document.querySelectorAll(".bot-item").forEach((el) => el.classList.remove("active"));
+  const item = [...document.querySelectorAll(".bot-item")].find((el) => el.textContent.includes(bot.name));
+  if (item) item.classList.add("active");
+  $("#empty-state").style.display = "none";
+  $("#messages").innerHTML = "";
+  await loadSessionMessages(sid, true);
+}
+
+// G1：会话右键（归档/取消归档/删除）
+$("#messages").addEventListener("contextmenu", async (e) => {
+  if (!currentSession) return;
+  e.preventDefault();
+  const sid = currentSession;
+  const sessions = await api.sessions.page({ limit: 100 });
+  const s = sessions.sessions.find((x) => x.id === sid);
+  if (!s) { // 可能已归档
+    const all = await api.sessions.page({ limit: 100, archived: true });
+    if (!all.sessions.some((x) => x.id === sid)) return;
+  }
+  const menu = document.createElement("div");
+  menu.className = "ctx-menu";
+  menu.style.cssText = "position:fixed;z-index:99;background:#17171c;border:1px solid #333;border-radius:8px;padding:4px;min-width:140px;font-size:12.5px;box-shadow:0 8px 30px rgba(0,0,0,.5)";
+  menu.style.left = Math.min(e.clientX, window.innerWidth - 160) + "px";
+  menu.style.top = Math.min(e.clientY, window.innerHeight - 120) + "px";
+  const archived = s?.archived;
+  menu.innerHTML = `
+    <div class="ctx-item" data-act="${archived ? "unarchive" : "archive"}">${archived ? "↩ 取消归档" : "🗂 归档会话"}</div>
+    <div class="ctx-item danger" data-act="delete">🗑 删除会话</div>`;
+  Object.assign(menu.style, {});
+  document.body.appendChild(menu);
+  menu.querySelectorAll(".ctx-item").forEach((it) => {
+    it.style.cssText = "padding:7px 12px;border-radius:6px;cursor:pointer";
+    it.onmouseenter = () => it.style.background = "#23232a";
+    it.onmouseleave = () => it.style.background = "transparent";
+    it.onclick = async () => {
+      menu.remove();
+      const act = it.dataset.act;
+      if (act === "archive" || act === "unarchive") {
+        await api.sessions.archive(sid, act === "archive");
+      } else if (act === "delete") {
+        if (!confirm("确定删除该会话及全部消息？")) return;
+        await api.sessions.remove(sid);
+        currentSession = null;
+        $("#messages").innerHTML = "";
+      }
+      // 刷新会话（无 UI 会话列表，仅清空/保留）
+      if (act === "delete" && currentBot) { /* 重新选 bot 刷新 */ }
+    };
+  });
+  const off = (e) => { if (!e.target.closest(".ctx-menu")) { menu.remove(); document.removeEventListener("click", off); } };
+  setTimeout(() => document.addEventListener("click", off), 0);
 });
 
 $("#input").addEventListener("keydown", (e) => {

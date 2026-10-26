@@ -89,7 +89,26 @@ export interface Session {
   title: string;
   createdAt: number;
   updatedAt: number;
+  /** G1：归档标记（软归档，不进列表） */
+  archived?: boolean;
+  /** G1：消息总数（SessionIndex 维护） */
+  messageCount?: number;
+  /** G1：已压缩边界 seq（增量摘要去重） */
+  lastSeq?: number;
+  /** G1：token 估算（累计） */
+  tokenEstimate?: number;
 }
+
+/** G1：搜索命中 */
+export interface SearchHit {
+  sessionId: string;
+  botId: string;
+  msgId: number;
+  snippet: string;
+  createdAt: number;
+  role: string;
+}
+
 
 export interface PetState {
   botId: string;
