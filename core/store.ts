@@ -1,4 +1,4 @@
-import type { Bot, ChatMessage, PetState, Provider, Session } from "./types";
+import { contentText, type Bot, type ChatMessage, type PetState, type Provider, type Session } from "./types";
 import { existsSync, mkdirSync, readFileSync, writeFileSync, chmodSync, rmSync, renameSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
@@ -117,7 +117,7 @@ export class Store {
   addMessage(m: ChatMessage) {
     const sid = m.sessionId;
     if (!this.sessions[sid]) {
-      this.sessions[sid] = { id: sid, botId: m.to, title: m.content.slice(0, 24) || "新会话", createdAt: Date.now(), updatedAt: Date.now() };
+      this.sessions[sid] = { id: sid, botId: m.to, title: contentText(m.content).slice(0, 24) || "新会话", createdAt: Date.now(), updatedAt: Date.now() };
     }
     const arr = this.messagesBySession[sid] || (this.messagesBySession[sid] = []);
     arr.push({ ...m, id: this.nextMsgId++ });

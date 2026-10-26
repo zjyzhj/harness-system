@@ -74,7 +74,8 @@ function appendMsg(m) {
     const avatar = m.from === "user"
       ? `<div class="avatar">🧑</div>`
       : (() => { const b = bots.find((x) => x.id === m.from); return `<div class="avatar">${b?.avatarPath ? `<img src="file://${b.avatarPath}"/>` : "🤖"}</div>`; })();
-    el.innerHTML = `${m.from !== "user" ? `<div class="who">${esc(fromName)}</div>` : ""}${avatar}<div class="bubble">${esc(m.content)}</div>`;
+    const inner = typeof m.content === "string" ? renderMarkdown(esc(m.content)) : renderBlocks(m.content);
+    el.innerHTML = `${m.from !== "user" ? `<div class="who">${esc(fromName)}</div>` : ""}${avatar}<div class="bubble">${inner}</div>${m.meta ? `<div class="msg-meta">${esc([m.meta.model, m.meta.latencyMs ? m.meta.latencyMs + "ms" : "", m.meta.tokensUsed ? m.meta.tokensUsed + " tok" : ""].filter(Boolean).join(" · "))}</div>` : ""}`;
   }
   box.appendChild(el);
   box.scrollTop = box.scrollHeight;
@@ -84,7 +85,7 @@ async function send() {
   const text = $("#input").value.trim();
   if (!text || !currentBot) return;
   $("#input").value = "";
-  // @bot名 → bot 间通信
+  // @bot名 → bot 间通信（保持非流式，走 bus）
   const atMatch = text.match(/^@(\S+)\s+([\s\S]+)/);
   if (atMatch) {
     const target = bots.find((b) => b.name === atMatch[1] || b.name.includes(atMatch[1]));
@@ -94,9 +95,58 @@ async function send() {
       return;
     }
   }
-  const msgs = await api.chat.send(currentBot.id, text, currentSession);
-  msgs.forEach((m) => appendMsg(m));
-  if (msgs.length && currentSession === null) currentSession = msgs[0].sessionId;
+  // 用户消息立即上屏（含当前会话 id 记录；有图片时以富块显示）
+  const rich = pendingImages.length ? [{ type: "text", text }, ...pendingImages] : text;
+  const userMsg = { sessionId: currentSession || null, from: "user", to: currentBot.id, role: "user", content: rich, kind: "chat", createdAt: Date.now() };
+  appendMsg(userMsg);
+  clearImgHint();
+  if (currentSession === null) currentSession = userMsg.sessionId = `s-${Date.now()}`;
+
+  // 流式回复：监听增量块 → 打字机
+  let streamBubble = null;
+  const off = api.onChatStream((chunk) => {
+    const box = $("#messages");
+    if (!streamBubble || streamBubble.classList.contains("user") || !streamBubble.dataset.streaming) {
+      // 开新助手气泡
+      const el = document.createElement("div");
+      el.className = "msg bot";
+      el.dataset.streaming = "1";
+      const bot = bots.find((b) => b.id === currentBot.id);
+      el.innerHTML = `${bot?.avatarPath ? `<div class="avatar"><img src="file://${bot.avatarPath}"/></div>` : `<div class="avatar">🤖</div>`}<div class="bubble"></div>`;
+      box.appendChild(el);
+      streamBubble = el;
+      box.scrollTop = box.scrollHeight;
+    }
+    const bubble = streamBubble.querySelector(".bubble");
+    if (chunk.type === "text" && chunk.text) {
+      bubble.innerHTML = renderMarkdown(esc((bubble.dataset.text || "") + chunk.text));
+      bubble.dataset.text = (bubble.dataset.text || "") + chunk.text;
+    } else if (chunk.type === "tool_call") {
+      bubble.insertAdjacentHTML("beforeend", renderBlock(chunk));
+    }
+    box.scrollTop = box.scrollHeight;
+  });
+  try {
+    const r = await api.chat.sendStream(currentBot.id, Array.isArray(rich) ? rich : text, currentSession);
+    off();
+    // 结束后刷新会话：最终落盘内容（含工具块 + meta）
+    const msgs = await api.messages.list(currentSession);
+    const lastBot = [...document.querySelectorAll("#messages .msg.bot")].pop();
+    const final = msgs.find((m) => m.from === currentBot.id && m.role === "assistant");
+    if (final) {
+      if (lastBot) lastBot.remove();
+      appendMsg(final);
+    }
+    if (r.result?.text && !final) {
+      if (lastBot) lastBot.remove();
+      appendMsg({ sessionId: currentSession, from: currentBot.id, to: "user", role: "assistant", content: [{ type: "text", text: r.result.text }], kind: "chat", createdAt: Date.now() });
+    }
+  } catch (e) {
+    off();
+    if (streamBubble) streamBubble.remove();
+    appendMsg({ sessionId: currentSession, from: currentBot.id, to: "user", role: "assistant", content: `❌ 回复失败：${e.message || e}`, kind: "chat", createdAt: Date.now() });
+  }
+  // 调用方无需 await 刷新列表（消息已落盘）
 }
 
 function openModal(html) {
@@ -412,6 +462,72 @@ function esc(s) {
   return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
 
+// ---- V3 渲染：内容块 + 轻量 markdown（白名单，安全转义） ----
+
+function renderBlocks(blocks) {
+  if (!Array.isArray(blocks)) return renderMarkdown(esc(String(blocks ?? "")));
+  return blocks.map(renderBlock).join("");
+}
+
+function renderBlock(b) {
+  switch (b.type) {
+    case "text": return renderMarkdown(esc(b.text ?? ""));
+    case "code": return `<pre class="code-block"><code${b.lang ? ` class="lang-${esc(b.lang)}"` : ""}>${esc(b.code)}</code></pre>`;
+    case "image": {
+      const src = b.dataUrl || (b.url || (b.path ? `file://${b.path}` : ""));
+      return src ? `<img class="msg-img" src="${esc(src)}" alt="${esc(b.alt || "image")}" />` : "";
+    }
+    case "tool_call": {
+      const args = b.args ? `<div class="tool-args">${esc(JSON.stringify(b.args))}</div>` : "";
+      const status = b.status ? `<span class="tool-status ${esc(b.status)}">${esc(b.status)}</span>` : "";
+      const result = b.result ? `<div class="tool-result">${esc(b.result)}</div>` : "";
+      return `<div class="tool-card"><div class="tool-head">🛠 ${esc(b.tool)} ${status}</div>${args}${result}</div>`;
+    }
+    case "file": return `<div class="file-card">📎 ${esc(b.name || b.path)}${b.size ? ` <span class="hint">${formatBytes(b.size)}</span>` : ""}</div>`;
+    case "thinking": return `<details class="thinking"><summary>💭 思考中…</summary><div>${renderMarkdown(esc(b.text))}</div></details>`;
+    default: return "";
+  }
+}
+
+/** 轻量 markdown 子集：行内 code / 粗斜体 / 链接 / 代码块 / 标题 / 列表 / 引用 */
+function renderMarkdown(src) {
+  if (!src) return "";
+  const lines = src.split(/\n/);
+  let out = "", i = 0, inCode = false, codeBuf = [], codeLang = "";
+  const inline = (t) => t
+    .replace(/`([^`]+)`/g, "<code>$1</code>")
+    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+    .replace(/\*([^*]+)\*/g, "<em>$1</em>")
+    .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+  while (i < lines.length) {
+    const line = lines[i];
+    if (/^```/.test(line)) {
+      if (!inCode) { inCode = true; codeBuf = []; codeLang = line.slice(3).trim(); }
+      else { inCode = false; out += `<pre class="code-block"><code${codeLang ? ` class="lang-${esc(codeLang)}"` : ""}>${esc(codeBuf.join("\n"))}</code></pre>`; }
+      i++; continue;
+    }
+    if (inCode) { codeBuf.push(line); i++; continue; }
+    if (/^###\s/.test(line)) { out += `<h3>${inline(line.slice(4))}</h3>`; }
+    else if (/^##\s/.test(line)) { out += `<h2>${inline(line.slice(3))}</h2>`; }
+    else if (/^#\s/.test(line)) { out += `<h1>${inline(line.slice(2))}</h1>`; }
+    else if (/^[-*]\s/.test(line)) { out += `<li>${inline(line.replace(/^[-*]\s/, ""))}</li>`; }
+    else if (/^>\s?/.test(line)) { out += `<blockquote>${inline(line.replace(/^>\s?/, ""))}</blockquote>`; }
+    else if (/^\d+\.\s/.test(line)) { out += `<li class="ol">${inline(line.replace(/^\d+\.\s/, ""))}</li>`; }
+    else if (!line.trim()) { out += "<br/>"; }
+    else { out += `<p>${inline(line)}</p>`; }
+    i++;
+  }
+  if (inCode) out += `<pre class="code-block"><code>${esc(codeBuf.join("\n"))}</code></pre>`;
+  return out;
+}
+
+function formatBytes(n) {
+  if (n < 1024) return n + " B";
+  if (n < 1048576) return (n / 1024).toFixed(1) + " KB";
+  return (n / 1048576).toFixed(1) + " MB";
+}
+
+
 async function mcpFlow() {
   const tools = await api.mcp.list();
   const modal = openModal(`
@@ -437,6 +553,60 @@ $("#skills-btn").onclick = skillsFlow;
 $("#tasks-btn").onclick = tasksFlow;
 $("#mcp-btn").onclick = mcpFlow;
 $("#send-btn").onclick = send;
+// V3：图片粘贴/拖入 → 消息以富块发送
+let pendingImages = [];
+
+function addPendingImage(dataUrl, name) {
+  const shown = dataUrl.length;
+  pendingImages.push({ type: "image", dataUrl, alt: name || "粘贴图片" });
+  const hint = $("#img-hint");
+  if (!hint) {
+    const el = document.createElement("div");
+    el.id = "img-hint";
+    el.style.cssText = "font-size:12px;color:var(--dim);padding:4px 8px;border:1px dashed #444;border-radius:8px;margin-bottom:4px;";
+    $("#composer").insertBefore(el, $("#input"));
+    el.textContent = `${pendingImages.length} 张图片待发送（可继续粘贴/输入文字）`;
+  } else {
+    hint.textContent = `${pendingImages.length} 张图片待发送`;
+  }
+}
+
+function clearImgHint() {
+  const hint = $("#img-hint");
+  if (hint) hint.remove();
+  pendingImages = [];
+}
+
+function fileToDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const rd = new FileReader();
+    rd.onload = () => resolve(rd.result);
+    rd.onerror = () => reject(rd.error);
+    rd.readAsDataURL(file);
+  });
+}
+
+document.addEventListener("paste", async (e) => {
+  const items = [...(e.clipboardData?.items ?? [])];
+  const imgs = items.filter((i) => i.type.startsWith("image/"));
+  if (!imgs.length) return;
+  e.preventDefault();
+  for (const item of imgs) {
+    const file = item.getAsFile();
+    if (!file) continue;
+    try { addPendingImage(await fileToDataUrl(file), file.name); } catch { /* ignore */ }
+  }
+});
+
+$("#composer").addEventListener("dragover", (e) => { e.preventDefault(); });
+$("#composer").addEventListener("drop", async (e) => {
+  e.preventDefault();
+  const files = [...(e.dataTransfer?.files ?? [])].filter((f) => f.type.startsWith("image/"));
+  for (const f of files) {
+    try { addPendingImage(await fileToDataUrl(f), f.name); } catch { /* ignore */ }
+  }
+});
+
 $("#input").addEventListener("keydown", (e) => {
   if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
 });

@@ -8,6 +8,7 @@ import { MemorySystem } from "../core/memory-system";
 import { SkillRegistry, BUILTIN_SKILL_TEMPLATES, parseSkill } from "../core/skill-registry";
 import { Scheduler, nextCronTime, isValidCron } from "../core/scheduler";
 import { BotRuntime, parseToolBlocks, skillFromText } from "../core/bot-runtime";
+import { contentText } from "../core/types";
 import { ProviderCenter } from "../core/provider-center";
 
 let home: string;
@@ -22,11 +23,22 @@ class FakeProviderCenter extends ProviderCenter {
   override async complete(p: any, req: any): Promise<any> {
     this.lastSystem = req.system ?? "";
     const user = req.user ?? "";
-    // 模拟工具回合：第一条消息要求调用技能，第二条给最终回复
     if (user.includes("调用 web-search") || (user.startsWith("执行工具") && user.includes("web-search"))) {
       return { text: "```tool\n{\"tool\":\"skill:web-search\",\"args\":{\"query\":\"最新AI新闻\"}}\n```" };
     }
     return { text: `回复：${req.user ?? ""}`.slice(0, 120) };
+  }
+  override async streamComplete(p: any, req: any): Promise<any> {
+    this.lastSystem = req.system ?? "";
+    const user = req.user ?? "";
+    const hasToolResult = (req.history ?? []).some((h: any) => contentText(h.content).includes("[工具执行返回]"));
+    if (!hasToolResult && (user.includes("调用 web-search") || (user.startsWith("执行工具") && user.includes("web-search")))) {
+      req._onChunk({ type: "tool_call", tool: "skill:web-search", callId: "c1", args: { query: "最新AI新闻" } });
+      return { text: "```tool\n{\"tool\":\"skill:web-search\",\"args\":{\"query\":\"最新AI新闻\"}}\n```", content: [] };
+    }
+    req._onChunk({ type: "text", text: "你" });
+    req._onChunk({ type: "text", text: "好" });
+    return { text: "你好", content: [{ type: "text", text: "你好" }], usage: { inputTokens: 11, outputTokens: 2 } };
   }
 }
 
@@ -136,5 +148,40 @@ describe("bot-runtime", () => {
     const r = await runtime.handle({ bot, from: "user", text: "记住：我喜欢喝美式咖啡", sessionId: "s3" });
     expect(r.memoryEvents!.length).toBeGreaterThan(0);
     expect(memory.list(bot.id).some((m) => m.content.includes("美式咖啡"))).toBe(true);
+  });
+});
+
+describe("bot-runtime handleStream（V3 流式 + 富消息）", () => {
+  test("流式：增量块回调 + 富消息落盘（含 meta）", async () => {
+    const bot = await reg.createBotFromText("创建 bot：流式助手");
+    const got: string[] = [];
+    const r = await runtime.handleStream(
+      { bot, from: "user", text: "调用 web-search 查最新AI新闻", sessionId: "s-stream-1", history: [] },
+      { onBlock: (b: any) => got.push(b.type === "text" ? `text:${b.text}` : `tool:${b.tool}`) },
+    );
+    // 工具回合结束 → 第二轮直接回复
+    expect(r.text).toContain("你好");
+    // 增量里应看到 tool_call 与 text 块
+    expect(got.some((g) => g.startsWith("tool:"))).toBe(true);
+    expect(got.some((g) => g.startsWith("text:"))).toBe(true);
+    // 富消息落盘：assistant 内容为块数组 + meta
+    const msgs = store.listMessages("s-stream-1");
+    const asst = msgs.find((m) => m.role === "assistant");
+    expect(Array.isArray(asst?.content)).toBe(true);
+    expect((asst as any)?.meta?.streamed).toBe(true);
+    expect((asst as any)?.meta?.tokensUsed).toBe(13);
+  });
+
+  test("流式：用户富内容（图片块）落盘保留", async () => {
+    const bot = await reg.createBotFromText("创建 bot：富消息助手");
+    const richUser = [{ type: "text", text: "看图说话" }, { type: "image", dataUrl: "data:image/png;base64,AAA" }];
+    await runtime.handleStream(
+      { bot, from: "user", text: "看图说话", content: richUser as any, sessionId: "s-rich-1", history: [] },
+      { onBlock: () => {} },
+    );
+    const msgs = store.listMessages("s-rich-1");
+    const userMsg = msgs.find((m) => m.role === "user");
+    expect(Array.isArray(userMsg?.content)).toBe(true);
+    expect((userMsg as any)?.content?.some((b: any) => b.type === "image")).toBe(true);
   });
 });

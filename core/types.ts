@@ -9,6 +9,8 @@ export interface Provider {
   model?: string;
   isDefault: boolean;
   cliName?: "codex" | "cursor" | "claude";
+  /** 手动指定 wire 协议（探测失败时兜底）：chat/completions 或 responses */
+  wireApi?: "chat" | "responses";
   createdAt: number;
 }
 
@@ -34,15 +36,51 @@ export interface PersonaCard {
   interactionStyle?: string;
 }
 
+// ---- V3 消息内容块（对齐 Claude/OpenAI content blocks）----
+
+export type ContentBlock =
+  | { type: "text"; text: string }
+  | { type: "code"; lang?: string; code: string }
+  | { type: "image"; path?: string; url?: string; dataUrl?: string; alt?: string }
+  | { type: "tool_call"; tool: string; args?: Record<string, unknown>; callId?: string; result?: string; status?: "ok" | "error" | "running" | "queued" }
+  | { type: "file"; path: string; name: string; size?: number }
+  | { type: "thinking"; text: string };
+
+export type MessageContent = string | ContentBlock[];
+
+/** 消息 meta（V3）：模型/耗时/token */
+export interface MessageMeta {
+  providerId?: string;
+  model?: string;
+  latencyMs?: number;
+  tokensUsed?: number;
+  streamed?: boolean;
+}
+
 export interface ChatMessage {
   id?: number;
   sessionId: string;
   from: string;
   to: string;
   role: "user" | "assistant" | "system";
-  content: string;
+  content: string | ContentBlock[];
   kind: "chat" | "bot-to-bot" | "event";
   createdAt: number;
+  meta?: MessageMeta;
+}
+
+/** 取消息可投递给 LLM 的纯文本（数组时拼接 text/thinking 块） */
+export function contentText(c: string | ContentBlock[]): string {
+  if (typeof c === "string") return c;
+  return c
+    .filter((b) => b.type === "text" || b.type === "thinking")
+    .map((b) => (b as { text?: string }).text ?? "")
+    .join("\n");
+}
+
+/** 消息是否含图片等非文本块 */
+export function hasRichContent(c: string | ContentBlock[]): boolean {
+  return Array.isArray(c) && c.some((b) => b.type !== "text" && b.type !== "thinking");
 }
 
 export interface Session {
@@ -72,6 +110,34 @@ export interface MigrationPayload {
   skills?: Record<string, string>;        // skill key -> SKILL.md 内容
   tasks?: ScheduledTask[];
 }
+
+// ---- V3 适配器抽象（对齐 CowAgent LLMModel）----
+
+export interface ToolDescription {
+  name: string;
+  description: string;
+  inputSchema?: Record<string, unknown>;
+}
+
+export interface LLMRequest {
+  model?: string;
+  system?: string;
+  history?: ChatMessage[];
+  user?: string | ContentBlock[];
+  tools?: ToolDescription[];
+  temperature?: number;
+  stream?: boolean;
+}
+
+export interface LLMResponse {
+  content: ContentBlock[];
+  raw?: unknown;
+  usage?: { inputTokens?: number; outputTokens?: number };
+  model?: string;
+  finishReason?: string;
+}
+
+export type StreamChunk = ContentBlock | { type: "done"; usage?: LLMResponse["usage"] } | { type: "error"; message: string };
 
 // ---- Bot 底层运行时扩展 ----
 

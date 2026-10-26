@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Store } from "../core/store";
 import { AgentRegistry } from "../core/agent-registry";
+import { contentText } from "../core/types";
 import { MessageBus } from "../core/message-bus";
 import { LocalTransport, HttpTransport } from "../core/transport";
 
@@ -38,7 +39,7 @@ describe("transport", () => {
     const bus = new MessageBus(store);
     bus.register(a.id, async () => "ok");
     const msgs = await bus.send(a, b, "ping");
-    expect(msgs.some((m) => m.content.includes("未注册"))).toBe(true);
+    expect(msgs.some((m) => contentText(m.content).includes("未注册"))).toBe(true);
   });
 
   test("HttpTransport ping 坏地址返回 false", async () => {

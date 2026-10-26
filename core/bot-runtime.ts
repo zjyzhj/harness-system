@@ -1,4 +1,4 @@
-import type { Bot, ChatMessage, MemoryEntry, RuntimeResult, ToolCall, ToolInvocation } from "./types";
+import { contentText, type Bot, type ChatMessage, type ContentBlock, type MemoryEntry, type MessageMeta, type RuntimeResult, type ToolCall, type ToolInvocation } from "./types";
 import type { Store } from "./store";
 import type { ProviderCenter } from "./provider-center";
 import type { MemorySystem } from "./memory-system";
@@ -97,6 +97,87 @@ export class BotRuntime {
     return { text: fallback, toolCalls, memoryEvents, usedSkills };
   }
 
+  /**
+   * 流式主入口：处理一条用户/bot 消息，工具循环 + 增量块回推。
+   * onBlock(chunk) 实时收到 text/tool_call 增量；结束时记录完整富消息并返回。
+   */
+  async handleStream(
+    input: { bot: Bot; from: string; text: string; content?: string | ContentBlock[]; sessionId: string; history?: ChatMessage[] },
+    opts: RuntimeOptions & { onBlock: (b: ContentBlock) => void },
+  ): Promise<RuntimeResult> {
+    const { bot, text, sessionId } = input;
+    const userContent: string | ContentBlock[] = input.content ?? text;
+    const maxRounds = opts?.maxToolRounds ?? 3;
+    const provider = this.deps.providers.get(bot.providerId) || this.deps.providers.getDefault();
+    const started = Date.now();
+    if (!provider) {
+      const offline = this.deps.offline ?? new OfflinePersona();
+      const reply = offline.reply(bot, text, this.deps.memory.list(bot.id));
+      opts.onBlock({ type: "text", text: reply });
+      this.recordRich(bot.id, sessionId, userContent, [{ type: "text", text: reply }], { latencyMs: Date.now() - started });
+      return { text: reply, toolCalls: [], usedSkills: [] };
+    }
+
+    let context = this.buildContext(bot, text, opts);
+    const conversation: { role: string; content: string }[] = this.buildHistory(bot, text, input.history, opts);
+    const toolCalls: ToolCall[] = [];
+    const usedSkills: string[] = [];
+    const memoryEvents: MemoryEntry[] = [];
+    const acc: ContentBlock[] = [];
+    const push = (b: ContentBlock) => { opts.onBlock(b); acc.push(b); };
+
+    for (let round = 0; round < maxRounds; round++) {
+      const r = await this.deps.providers.streamComplete(provider, {
+        model: bot.model,
+        system: context,
+        history: conversation.map((m) => ({ sessionId, from: m.role === "assistant" ? bot.id : "user", to: bot.id, role: m.role as any, content: m.content, kind: "chat" as const, createdAt: Date.now() })),
+        user: text,
+        stream: true,
+        _onChunk: (b: ContentBlock) => push(b),
+      });
+
+      // 结构化 tool_call 块（适配器返回）优先；否则解析 ```tool``` 文本块
+      const structCalls = (r.content ?? []).filter((b: ContentBlock): b is ContentBlock & { type: "tool_call" } => b.type === "tool_call");
+      const textReply = r.text || acc.filter((b) => b.type === "text").map((b) => (b as { text: string }).text).join("");
+      let tools: ToolInvocation[] = [];
+      if (structCalls.length) {
+        tools = structCalls.map((b) => ({ callId: b.callId ?? `c${Date.now()}-${toolCalls.length}`, tool: b.tool, args: b.args ?? {} }));
+      } else {
+        tools = parseToolBlocks(textReply);
+      }
+      if (!tools.length) {
+        const blocks = r.content?.length ? r.content : [{ type: "text" as const, text: textReply }];
+        const meta: MessageMeta = { providerId: provider.id, model: bot.model ?? provider.model, latencyMs: Date.now() - started, tokensUsed: r.usage ? (r.usage.inputTokens ?? 0) + (r.usage.outputTokens ?? 0) : undefined, streamed: true };
+        this.recordRich(bot.id, sessionId, userContent, blocks, meta);
+        const events = this.extractMemory(bot.id, text, textReply);
+        memoryEvents.push(...events);
+        return { text: textReply, toolCalls, memoryEvents, usedSkills };
+      }
+
+      // 执行工具并回填
+      let results: string[] = [];
+      for (const t of tools) {
+        const r2 = await this.executeTool(bot, t, text);
+        results.push(`工具 ${t.tool} 结果：${r2.output}`);
+        toolCalls.push({ id: t.callId, tool: t.tool, args: t.args });
+        if (t.tool.startsWith("skill:")) usedSkills.push(t.tool.slice(6));
+        push({ type: "tool_call", tool: t.tool, callId: t.callId, args: t.args, result: r2.output.slice(0, 500), status: "ok" });
+      }
+      conversation.push({ role: "user", content: `[工具执行返回]\n${results.join("\n")}` });
+      context = this.buildContext(bot, text, opts) + "\n\n[继续：根据上面工具执行结果生成最终回复或再次调用工具]";
+    }
+    const fallback = "（工具调用轮数已达上限，请简化任务或减少调用）";
+    const blocks: ContentBlock[] = [{ type: "text", text: fallback }];
+    this.recordRich(bot.id, sessionId, userContent, blocks, { latencyMs: Date.now() - started, streamed: true });
+    return { text: fallback, toolCalls, memoryEvents, usedSkills };
+  }
+
+  /** 记录富消息（用户 + 助手内容块数组 + meta） */
+  private recordRich(botId: string, sessionId: string, userText: string | ContentBlock[], blocks: ContentBlock[], meta?: MessageMeta) {
+    this.deps.store.addMessage({ sessionId, from: "user", to: botId, role: "user", content: userText, kind: "chat", createdAt: Date.now() });
+    this.deps.store.addMessage({ sessionId, from: botId, to: "user", role: "assistant", content: blocks, kind: "chat", createdAt: Date.now(), meta });
+  }
+
   /** 组装系统上下文：角色 + 记忆 + 技能 */
   private buildContext(bot: Bot, query: string, opts?: RuntimeOptions): string {
     const parts: string[] = [];
@@ -127,9 +208,9 @@ export class BotRuntime {
     const msgs: { role: string; content: string }[] = [];
     const recent = (history ?? []).slice(-10);
     for (const m of recent) {
-      if (m.from === bot.id) msgs.push({ role: "assistant", content: m.content });
-      else if (m.from !== "user") msgs.push({ role: "user", content: `[${m.from}] ${m.content}` });
-      else msgs.push({ role: "user", content: m.content });
+      if (m.from === bot.id) msgs.push({ role: "assistant", content: contentText(m.content) });
+      else if (m.from !== "user") msgs.push({ role: "user", content: `[${m.from}] ${contentText(m.content)}` });
+      else msgs.push({ role: "user", content: contentText(m.content) });
     }
     msgs.push({ role: "user", content: text });
     return msgs;

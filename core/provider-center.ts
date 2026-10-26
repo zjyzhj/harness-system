@@ -18,6 +18,7 @@ export class ProviderCenter {
     apiKey?: string;
     model?: string;
     cliName?: CliName;
+    wireApi?: "chat" | "responses";
     isDefault?: boolean;
   }): Provider {
     const p: Provider = {
@@ -28,6 +29,7 @@ export class ProviderCenter {
       apiKey: input.apiKey,
       model: input.model,
       cliName: input.cliName,
+      wireApi: input.wireApi,
       isDefault: input.isDefault ?? false,
       createdAt: Date.now(),
     };
@@ -55,8 +57,30 @@ export class ProviderCenter {
     const p = this.store.getProvider(id);
     if (!p) return { ok: false, detail: "provider 不存在" };
     if (p.kind === "openai-compat") return testOpenAICompat(p);
+    // CLI provider：若配了 base url + key，真测 API 连通性（模拟 codex 会用的端点）
+    if (p.baseUrl && p.apiKey) {
+      return testOpenAICompat(p);
+    }
     const cap = await detectCli(p.cliName ?? "claude");
     return { ok: cap.installed, detail: cap.installed ? `已安装 ${cap.version}` : `${p.cliName} 未安装` };
+  }
+
+  async streamComplete(p: Provider, req: CompletionRequest & { _onChunk: (b: import("./types").ContentBlock) => void }): Promise<CompletionResult> {
+    if (p.kind === "cli" && !p.baseUrl) {
+      const r = await completeCli(p, req.user ?? "", req.system, req.model);
+      req._onChunk({ type: "text", text: r });
+      return { text: r, content: [{ type: "text", text: r }] };
+    }
+    if (p.kind === "openai-compat") {
+      return completeOpenAICompat(p, { ...req, stream: true });
+    }
+    try {
+      return completeOpenAICompat({ ...p, kind: "openai-compat" }, { ...req, stream: true });
+    } catch (e) {
+      const r = await completeCli(p, req.user ?? "", req.system, req.model);
+      req._onChunk({ type: "text", text: r });
+      return { text: r, content: [{ type: "text", text: r }] };
+    }
   }
 
   async complete(p: Provider, req: CompletionRequest): Promise<CompletionResult> {
@@ -65,7 +89,7 @@ export class ProviderCenter {
     }
     // CLI 适配；失败则降级到同 provider 的 API 配置（若有 baseUrl/apiKey）
     try {
-      const text = await completeCli(p, req.user ?? "", req.system);
+      const text = await completeCli(p, req.user ?? "", req.system, req.model);
       return { text };
     } catch (e) {
       if (p.baseUrl && p.apiKey) {
@@ -84,3 +108,6 @@ export class ProviderCenter {
     return out;
   }
 }
+
+
+

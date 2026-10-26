@@ -12,6 +12,8 @@ const api = {
   },
   chat: {
     send: (botId: string, text: string, sessionId?: string) => ipcRenderer.invoke("chat:send", botId, text, sessionId),
+    sendStream: (botId: string, content: string, sessionId?: string) => ipcRenderer.invoke("chat:sendStream", botId, content, sessionId),
+    sendRich: (botId: string, content: unknown[], sessionId?: string) => ipcRenderer.invoke("chat:sendStream", botId, content, sessionId),
   },
   bus: {
     send: (fromId: string, toId: string, text: string) => ipcRenderer.invoke("bus:send", fromId, toId, text),
@@ -76,11 +78,21 @@ const api = {
   },
 };
 
+type StreamBlock = { type: string; text?: string; tool?: string; callId?: string; args?: any; result?: string; status?: string };
+
 const onPetEvent = (cb: (event: { type: string; text?: string; title?: string }) => void) => {
   const listener = (_e: IpcRendererEvent, ev: { type: string; text?: string; title?: string }) => cb(ev);
   ipcRenderer.on("pet:event", listener);
   return () => ipcRenderer.removeListener("pet:event", listener);
 };
 
-contextBridge.exposeInMainWorld("harness", { ...api, onPetEvent });
+/** 流式会话：注册增量块回调（text/tool_call），返回取消函数 */
+const onChatStream = (cb: (chunk: StreamBlock) => void) => {
+  const listener = (_e: IpcRendererEvent, ev: StreamBlock) => cb(ev);
+  ipcRenderer.on("chat:stream", listener);
+  return () => ipcRenderer.removeListener("chat:stream", listener);
+};
+
+contextBridge.exposeInMainWorld("harness", { ...api, onPetEvent, onChatStream });
+export type { StreamBlock };
 export type HarnessApi = typeof api;

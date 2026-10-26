@@ -248,6 +248,28 @@ ipcMain.handle("chat:send", async (_e, botId: string, text: string, sessionId?: 
   if (!bot) throw new Error("bot 不存在");
   return bus.chat(bot, text, sessionId);
 });
+ipcMain.handle("chat:sendStream", async (_e, botId: string, content: string | import("../core/types").ContentBlock[], sessionId?: string) => {
+  const bot = store.getBot(botId);
+  if (!bot) throw new Error("bot 不存在");
+  const sid = sessionId || `s-${Date.now()}`;
+  const text = typeof content === "string" ? content : (content.filter((b) => b.type === "text").map((b) => (b as any).text ?? "").join(""));
+  statuses.set(botId, { botId, state: "running", lastRunAt: Date.now(), currentTask: text.slice(0, 60) });
+  const push = (b: import("../core/types").ContentBlock) => {
+    if (mainWin && !mainWin.isDestroyed()) mainWin.webContents.send("chat:stream", b);
+  };
+  try {
+    const r = await runtime.handleStream({ bot, from: "user", text, content: content as any, sessionId: sid, history: store.listMessages(sid).slice(-10) }, { onBlock: push });
+    statuses.set(botId, { botId, state: "idle", lastRunAt: Date.now() });
+    pushPetEvent(botId, { type: "reply", text: r.text.slice(0, 120) });
+    return { ok: true, sessionId: sid, result: r };
+  } catch (e) {
+    statuses.set(botId, { botId, state: "error", lastRunAt: Date.now(), lastError: e instanceof Error ? e.message : String(e) });
+    const err = e instanceof Error ? e.message : String(e);
+    store.addMessage({ sessionId: sid, from: "user", to: botId, role: "user", content: content as any, kind: "chat", createdAt: Date.now() });
+    store.addMessage({ sessionId: sid, from: botId, to: "user", role: "assistant", content: `❌ 回复失败：${err}`, kind: "chat", createdAt: Date.now() });
+    throw e;
+  }
+});
 ipcMain.handle("bus:send", async (_e, fromId: string, toId: string, text: string) => {
   const from = store.getBot(fromId), to = store.getBot(toId);
   if (!from || !to) throw new Error("bot 不存在");

@@ -21,10 +21,11 @@ export async function detectCli(name: CliName): Promise<CliCapability> {
  * CLI 适配器：spawn 子进程调用。
  * 不同 CLI 参数差异封装在 cliArgs 中；失败抛出可读错误，由上层降级到 API。
  */
-export async function completeCli(p: Provider, user: string, system?: string): Promise<string> {
+export async function completeCli(p: Provider, user: string, system?: string, model?: string): Promise<string> {
   const cli = p.cliName ?? "claude";
-  const args = cliArgs(cli, user, system);
-  const r = await runQuiet(cli, args, { timeoutMs: 120_000 });
+  const args = cliArgs(cli, user, system, model ?? p.model);
+  const env = cliEnv(cli, p);
+  const r = await runQuiet(cli, args, { timeoutMs: 120_000, env });
   if (r.code !== 0) {
     throw new Error(`${cli} CLI 调用失败(${r.code}): ${r.stderr.trim().slice(0, 300) || r.stdout.trim().slice(0, 300)}`);
   }
@@ -33,10 +34,29 @@ export async function completeCli(p: Provider, user: string, system?: string): P
   return text;
 }
 
-function cliArgs(cli: CliName, user: string, system?: string): string[] {
+/**
+ * CLI 环境变量：把面板配置的 base url / api key 透传给 CLI 子进程。
+ * codex 支持 OPENAI_BASE_URL + OPENAI_API_KEY（覆盖 ~/.codex 里的配置），
+ * 这样面板统一管理 url/key，codex 只当「会写代码的工具外壳」。
+ */
+function cliEnv(cli: CliName, p: Provider): NodeJS.ProcessEnv | undefined {
+  if (!p.baseUrl && !p.apiKey) return undefined;
+  const env: NodeJS.ProcessEnv = {};
+  if (p.baseUrl) {
+    env.OPENAI_BASE_URL = p.baseUrl;
+    env.CODEX_BASE_URL = p.baseUrl; // codex 也认这个
+  }
+  if (p.apiKey) {
+    env.OPENAI_API_KEY = p.apiKey;
+    env.CODEX_API_KEY = p.apiKey;
+  }
+  return env;
+}
+
+function cliArgs(cli: CliName, user: string, system?: string, model?: string): string[] {
   switch (cli) {
     case "codex":
-      return ["exec", "--skip-git-repo-check", "--sandbox", "read-only", "-f", `system: ${system ?? ""}`, `user: ${user}`];
+      return ["exec", "--skip-git-repo-check", "--sandbox", "read-only", ...(model ? ["--model", model] : []), "-f", `system: ${system ?? ""}`, `user: ${user}`];
     case "cursor":
       return ["--spawn", user];
     case "claude":
@@ -55,11 +75,11 @@ function extractOutput(cli: CliName, stdout: string): string {
   }
 }
 
-function runQuiet(cmd: string, args: string[], opts?: { timeoutMs?: number }): Promise<{ code: number; stdout: string; stderr: string }> {
+function runQuiet(cmd: string, args: string[], opts?: { timeoutMs?: number; env?: NodeJS.ProcessEnv }): Promise<{ code: number; stdout: string; stderr: string }> {
   return new Promise((resolve) => {
     let proc: ReturnType<typeof spawn>;
     try {
-      proc = spawn(cmd, args, { stdio: ["ignore", "pipe", "pipe"] });
+      proc = spawn(cmd, args, { stdio: ["ignore", "pipe", "pipe"], env: opts?.env ? { ...process.env, ...opts.env } : undefined });
     } catch (e) {
       resolve({ code: -1, stdout: "", stderr: String(e) });
       return;
