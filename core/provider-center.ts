@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { Provider } from "./types";
+import { contentText, type Provider } from "./types";
 import type { Store } from "./store";
 import { completeOpenAICompat, testOpenAICompat, type CompletionRequest, type CompletionResult } from "./adapters/openai-compat";
 import { completeCli, detectCli, type CliName } from "./adapters/cli";
@@ -67,7 +67,7 @@ export class ProviderCenter {
 
   async streamComplete(p: Provider, req: CompletionRequest & { _onChunk: (b: import("./types").ContentBlock) => void }): Promise<CompletionResult> {
     if (p.kind === "cli" && !p.baseUrl) {
-      const r = await completeCli(p, req.user ?? "", req.system, req.model);
+      const r = await completeCli(p, contentText(req.user ?? ""), req.system, req.model);
       req._onChunk({ type: "text", text: r });
       return { text: r, content: [{ type: "text", text: r }] };
     }
@@ -77,7 +77,7 @@ export class ProviderCenter {
     try {
       return completeOpenAICompat({ ...p, kind: "openai-compat" }, { ...req, stream: true });
     } catch (e) {
-      const r = await completeCli(p, req.user ?? "", req.system, req.model);
+      const r = await completeCli(p, contentText(req.user ?? ""), req.system, req.model);
       req._onChunk({ type: "text", text: r });
       return { text: r, content: [{ type: "text", text: r }] };
     }
@@ -89,7 +89,7 @@ export class ProviderCenter {
     }
     // CLI 适配；失败则降级到同 provider 的 API 配置（若有 baseUrl/apiKey）
     try {
-      const text = await completeCli(p, req.user ?? "", req.system, req.model);
+      const text = await completeCli(p, contentText(req.user ?? ""), req.system, req.model);
       return { text };
     } catch (e) {
       if (p.baseUrl && p.apiKey) {

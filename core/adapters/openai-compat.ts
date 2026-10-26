@@ -3,7 +3,7 @@ import { contentText, type Provider, type ChatMessage, type LLMRequest, type LLM
 export interface CompletionRequest {
   model?: string;
   system?: string;
-  user?: string;
+  user?: string | ContentBlock[];
   history?: ChatMessage[];
   tools?: ToolDescription[];
   stream?: boolean;
@@ -181,12 +181,12 @@ function postJSON(p: Provider, url: string, body: Record<string, unknown>): Prom
 }
 
 function buildResponsesMessages(req: CompletionRequest) {
-  const msgs: { role: string; content: string }[] = [];
+  const msgs: Array<{ role: string; content: string | Array<Record<string, unknown>> }> = [];
   for (const m of req.history ?? []) {
     const role = m.role === "assistant" ? "assistant" : "user";
     msgs.push({ role, content: contentText(m.content) });
   }
-  if (req.user) msgs.push({ role: "user", content: contentText(req.user as any) });
+  if (req.user) msgs.push({ role: "user", content: contentToWire(req.user) });
   return msgs;
 }
 
@@ -244,13 +244,45 @@ export async function testOpenAICompat(p: Provider): Promise<{ ok: boolean; deta
   }
 }
 
+type WireMessage = { role: string; content: string | Array<Record<string, unknown>> };
+
+/** 把内容块转成 OpenAI chat/completions 多模态 content（text + image_url） */
+function contentToWire(content: string | ContentBlock[]): string | Array<Record<string, unknown>> {
+  if (typeof content === "string") return content;
+  const parts: Array<Record<string, unknown>> = [];
+  let textBuf = "";
+  const flush = () => { if (textBuf) { parts.push({ type: "text", text: textBuf }); textBuf = ""; } };
+  for (const b of content) {
+    if (b.type === "text" || b.type === "thinking") {
+      textBuf += (b as { text?: string }).text ?? "";
+      continue;
+    }
+    if (b.type === "image" && (b.dataUrl || b.url || b.path)) {
+      flush();
+      const url = b.dataUrl || b.url || `file://${b.path}`;
+      parts.push({ type: "image_url", image_url: { url } });
+      continue;
+    }
+    if (b.type === "code" || b.type === "tool_call" || b.type === "file") {
+      // 非文本/图片块 → 文本占位
+      if (b.type === "code") textBuf += `\n\`\`\`${(b as any).lang ?? ""}\n${(b as any).code}\n\`\`\``;
+      if (b.type === "file") textBuf += ` [文件:${(b as any).name ?? (b as any).path}]`;
+    }
+  }
+  flush();
+  if (!parts.length) return textBuf;
+  if (parts.length === 1 && parts[0].type === "text") return String(parts[0].text);
+  return parts;
+}
+
 function buildMessages(req: CompletionRequest) {
-  const msgs: { role: string; content: string }[] = [];
+  const msgs: WireMessage[] = [];
   if (req.system) msgs.push({ role: "system", content: req.system });
   for (const m of req.history ?? []) {
     const role = m.role === "assistant" ? "assistant" : "user";
+    // 历史保持文本（当前轮次图片已足够；历史多模态后续升级）
     msgs.push({ role, content: contentText(m.content) || (Array.isArray(m.content) ? "[图片]" : "") });
   }
-  msgs.push({ role: "user", content: typeof req.user === "string" ? req.user : contentText(req.user ?? []) || "[图片]" });
+  msgs.push({ role: "user", content: contentToWire(req.user ?? "") });
   return msgs;
 }

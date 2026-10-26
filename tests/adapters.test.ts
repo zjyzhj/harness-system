@@ -6,11 +6,12 @@ import { completeOpenAICompat } from "../core/adapters/openai-compat";
 
 let server: Server | null = null;
 let getPort = () => 0;
+let captured: any[] = [];
 
 function startMock(routes: {
   models?: (req: any, res: any) => void;
-  chat?: (body: unknown) => { status?: number; sse?: boolean; data?: unknown; chunks?: string[] };
-  responses?: (body: unknown) => { data?: unknown };
+  chat?: (body: unknown, raw?: any) => { status?: number; sse?: boolean; data?: unknown; chunks?: string[] };
+  responses?: (body: unknown, raw?: any) => { data?: unknown };
 }) {
   server = createServer((req, res) => {
     const url = req.url ?? "";
@@ -26,6 +27,7 @@ function startMock(routes: {
         return;
       }
       if (url.endsWith("/chat/completions")) {
+        captured.push({ path: url, body });
         const h = routes.chat?.(body) ?? { data: {} };
         if (h.status) { res.statusCode = h.status; res.end(); return; }
         if (h.sse) {
@@ -39,6 +41,7 @@ function startMock(routes: {
         return;
       }
       if (url.endsWith("/responses")) {
+        captured.push({ path: url, body });
         const h = routes.responses?.(body) ?? { data: {} };
         res.setHeader("Content-Type", "application/json");
         res.end(JSON.stringify(h.data));
@@ -48,6 +51,7 @@ function startMock(routes: {
     });
   });
   return new Promise<void>((resolve) => {
+    captured = [];
     server!.listen(0, "127.0.0.1", () => {
       getPort = () => (server!.address() as AddressInfo).port;
       resolve();
@@ -131,5 +135,42 @@ describe("openai-compat adapter (V3)", () => {
     });
     const r = await completeOpenAICompat(provider({ wireApi: "responses" }), { user: "hi" });
     expect(r.text).toBe("直接走 responses");
+  });
+});
+
+describe("openai-compat 多模态 wire（V3-6）", () => {
+  test("chat/completions：user 图片块 → image_url content", async () => {
+    await startMock({ chat: () => ({ data: { choices: [{ message: { role: "assistant", content: "收到图片" } }] } }) });
+    const user: any[] = [
+      { type: "text", text: "看这张图" },
+      { type: "image", dataUrl: "data:image/png;base64,AAAA" },
+    ];
+    await completeOpenAICompat(provider(), { user });
+    const req = captured.find((c) => c.path.endsWith("/chat/completions"));
+    const lastMsg = req.body.messages[req.body.messages.length - 1];
+    expect(Array.isArray(lastMsg.content)).toBe(true);
+    expect(lastMsg.content[0]).toMatchObject({ type: "text", text: "看这张图" });
+    expect(lastMsg.content[1]).toMatchObject({ type: "image_url", image_url: { url: "data:image/png;base64,AAAA" } });
+  });
+
+  test("responses：user 图片块 → input 多模态 content", async () => {
+    await startMock({
+      models: (req, res) => { res.setHeader("Content-Type", "application/json"); res.end(JSON.stringify({ data: [{ id: "m", name: "m", capabilities: ["responses"] }] })); },
+      responses: () => ({ data: { output: [{ type: "message", content: [{ type: "output_text", text: "图收到了" }] }] } }),
+    });
+    const user: any[] = [{ type: "text", text: "描述图" }, { type: "image", url: "https://x/y.png" }];
+    await completeOpenAICompat(provider(), { user });
+    const req = captured.find((c) => c.path.endsWith("/responses"));
+    const last = req.body.input[req.body.input.length - 1];
+    expect(Array.isArray(last.content)).toBe(true);
+    expect(last.content[1]).toMatchObject({ type: "image_url", image_url: { url: "https://x/y.png" } });
+  });
+
+  test("纯文本 user 保持字符串（不破坏 wire）", async () => {
+    await startMock({ chat: () => ({ data: { choices: [{ message: { content: "ok" } }] } }) });
+    await completeOpenAICompat(provider(), { user: "你好" });
+    const req = captured.find((c) => c.path.endsWith("/chat/completions"));
+    const lastMsg = req.body.messages[req.body.messages.length - 1];
+    expect(lastMsg.content).toBe("你好");
   });
 });

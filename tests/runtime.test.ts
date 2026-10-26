@@ -22,7 +22,7 @@ class FakeProviderCenter extends ProviderCenter {
   lastSystem = "";
   override async complete(p: any, req: any): Promise<any> {
     this.lastSystem = req.system ?? "";
-    const user = req.user ?? "";
+    const user = contentText(req.user ?? "");
     if (user.includes("调用 web-search") || (user.startsWith("执行工具") && user.includes("web-search"))) {
       return { text: "```tool\n{\"tool\":\"skill:web-search\",\"args\":{\"query\":\"最新AI新闻\"}}\n```" };
     }
@@ -30,7 +30,7 @@ class FakeProviderCenter extends ProviderCenter {
   }
   override async streamComplete(p: any, req: any): Promise<any> {
     this.lastSystem = req.system ?? "";
-    const user = req.user ?? "";
+    const user = contentText(req.user ?? "");
     const hasToolResult = (req.history ?? []).some((h: any) => contentText(h.content).includes("[工具执行返回]"));
     if (!hasToolResult && (user.includes("调用 web-search") || (user.startsWith("执行工具") && user.includes("web-search")))) {
       req._onChunk({ type: "tool_call", tool: "skill:web-search", callId: "c1", args: { query: "最新AI新闻" } });

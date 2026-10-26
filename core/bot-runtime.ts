@@ -131,7 +131,7 @@ export class BotRuntime {
         model: bot.model,
         system: context,
         history: conversation.map((m) => ({ sessionId, from: m.role === "assistant" ? bot.id : "user", to: bot.id, role: m.role as any, content: m.content, kind: "chat" as const, createdAt: Date.now() })),
-        user: text,
+        user: userContent,
         stream: true,
         _onChunk: (b: ContentBlock) => push(b),
       });

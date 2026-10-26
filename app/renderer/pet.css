@@ -46,3 +46,59 @@ body { display: flex; align-items: center; justify-content: center; }
 @keyframes bounce { 0%,100% { transform: translateY(0); } 40% { transform: translateY(-14px); } }
 @keyframes pop { 0% { transform: scale(.85); } 70% { transform: scale(1.08); } 100% { transform: scale(1); } }
 @keyframes arrive { 0% { opacity: 0; transform: translate(-50%, 8px); } 100% { opacity: 1; transform: translate(-50%, 0); } }
+
+/* ---- V4 情绪 + 动画 + 菜单 ---- */
+#pet[data-mood="happy"] #pet-avatar { animation: happyWiggle 1.2s ease-in-out infinite; }
+#pet[data-mood="excited"] #pet-avatar { animation: excitedSpin .7s ease-in-out; transform-origin: center; }
+#pet[data-mood="working"] #pet-avatar { animation: breathe 1s ease-in-out infinite; box-shadow: 0 0 0 4px rgba(250,204,21,.35), 0 8px 30px rgba(80,70,229,.45); }
+#pet[data-mood="tired"] { filter: saturate(.8); }
+#pet[data-mood="tired"] #pet-avatar { animation: tiredSway 2.4s ease-in-out infinite; }
+#pet[data-mood="sleepy"] #pet-avatar { animation: breathe 4s ease-in-out infinite; filter: brightness(.9); }
+
+@keyframes happyWiggle {
+  0%, 100% { transform: rotate(-4deg) scale(1); }
+  50% { transform: rotate(4deg) scale(1.06); }
+}
+@keyframes excitedSpin {
+  0% { transform: rotate(0deg) scale(1); }
+  50% { transform: rotate(10deg) scale(1.14); }
+  100% { transform: rotate(0deg) scale(1); }
+}
+@keyframes tiredSway {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(4px); }
+}
+
+.typing-dots::after {
+  content: ""; display: inline-block; width: 1em; text-align: left;
+  animation: dots 1.2s steps(4, end) infinite;
+}
+@keyframes dots { 0% { content: ""; } 25% { content: "."; } 50% { content: ".."; } 75% { content: "..."; } }
+
+#bubble-text p { margin: .3em 0; }
+#bubble-text p:first-child { margin-top: 0; }
+#bubble-text code { background: rgba(255,255,255,.1); padding: 1px 4px; border-radius: 4px; font-size: .9em; font-family: ui-monospace, Menlo, monospace; }
+#bubble-text a { color: #6ea8fe; }
+
+#pet-menu {
+  position: fixed; z-index: 999; min-width: 130px; background: rgba(24,24,32,.98);
+  border: 1px solid #3a3a4a; border-radius: 10px; padding: 4px; color: #eee; font-size: 13px;
+  box-shadow: 0 10px 34px rgba(0,0,0,.6); -webkit-app-region: no-drag; user-select: none;
+}
+#pet-menu .menu-item { padding: 7px 12px; border-radius: 6px; cursor: pointer; }
+#pet-menu .menu-item:hover { background: rgba(255,255,255,.08); }
+#pet-menu .menu-item.danger { color: #ff9d9d; }
+#pet-menu .menu-item.danger:hover { background: rgba(255,80,80,.15); }
+
+#pet-avatar { position: relative; }
+#pet-mood-badge {
+  position: absolute; right: -6px; bottom: -2px; width: 26px; height: 26px;
+  background: rgba(20,20,28,.92); border: 2px solid rgba(255,255,255,.25); border-radius: 50%;
+  font-size: 14px; display: flex; align-items: center; justify-content: center;
+  box-shadow: 0 3px 10px rgba(0,0,0,.5); transition: transform .2s ease;
+}
+#pet[data-mood="happy"] #pet-mood-badge { animation: moodPop .6s ease; }
+#pet[data-mood="excited"] #pet-mood-badge { animation: moodPop .4s ease 2; }
+#pet[data-mood="working"] #pet-mood-badge { animation: moodSpin 1.2s linear infinite; }
+@keyframes moodPop { 0% { transform: scale(.6); } 60% { transform: scale(1.25); } 100% { transform: scale(1); } }
+@keyframes moodSpin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
