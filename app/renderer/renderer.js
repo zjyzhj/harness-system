@@ -27,11 +27,18 @@ function renderBotList() {
         <div class="bot-name">${esc(b.name)} ${b.petEnabled ? '<span class="bot-pet-badge">🐾</span>' : ""}</div>
         <div class="bot-role">${esc(b.role || "通用助手")}</div>
       </div>
-      <button class="ghost-btn pet-toggle" title="${b.petEnabled ? "隐藏宠物" : "变成桌面宠物"}">${b.petEnabled ? "✕" : "🐾"}</button>`;
+      <div style="display:flex;flex-direction:column;gap:2px">
+        <button class="ghost-btn pet-toggle" title="桌面宠物" style="padding:2px 6px;font-size:11px">${b.petEnabled ? "🐾开" : "🐾关"}</button>
+        <button class="ghost-btn detail-btn" title="详情" style="padding:2px 6px;font-size:11px">⋯</button>
+      </div>`;
     el.querySelector(".pet-toggle").onclick = async (e) => {
       e.stopPropagation();
       await api.bots.setPet(b.id, !b.petEnabled);
       await refreshBots();
+    };
+    el.querySelector(".detail-btn").onclick = (e) => {
+      e.stopPropagation();
+      botDetailFlow(b);
     };
     el.onclick = () => selectBot(b);
     list.appendChild(el);
@@ -245,6 +252,46 @@ async function migrateFlow() {
     await refreshBots();
   };
   modal.querySelector("#mm-close").onclick = closeModal;
+}
+
+async function botDetailFlow(b) {
+  const mem = await api.memory.list(b.id);
+  const stats = await api.memory.stats(b.id);
+  const skills = await api.skills.list();
+  const tasks = await api.tasks.list(b.id);
+  const st = statuses[b.id] || { state: "idle" };
+  const card = b.personaCard;
+  const modal = openModal(`
+    <h2>${esc(b.name)} ${b.petEnabled ? "🐾" : ""}
+      <span class="status-dot st-${st.state}" title="${esc(st.state)}"></span>
+    </h2>
+    <div class="kv">
+      <label>角色</label><span>${esc(b.role || "通用助手")}</span>
+      <label>人设</label><span>${esc(b.persona || "—")}</span>
+      ${card ? `<label>性格</label><span>${esc(card.traits?.join("、") || "—")}</span>
+      ${card.catchphrase ? `<label>口头禅</label><span>${esc(card.catchphrase)}</span>` : ""}
+      ${card.background ? `<label>背景</label><span>${esc(card.background)}</span>` : ""}` : ""}
+      <label>状态</label><span>${esc(st.state)}${st.currentTask ? " · " + esc(st.currentTask) : ""}</span>
+      <label>记忆</label><span>${Object.entries(stats || {}).map(([k, v]) => `${k}:${v}`).join("、") || "无"}</span>
+      <label>技能</label><span>${skills.filter((x) => x.enabled).map((x) => esc(x.name)).join("、") || "无"}</span>
+      <label>定时</label><span>${tasks.length ? tasks.map((t) => esc(t.name) + "(" + esc(t.cron) + ")").join("、") : "无"}</span>
+    </div>
+    <div class="actions">
+      <button class="ghost-btn" id="bd-persona">✨ 生成形象</button>
+      <button class="primary-btn" id="bd-chat">去对话</button>
+      <button class="ghost-btn" id="bd-close">关闭</button>
+    </div>
+    <div class="hint" id="bd-tip"></div>`);
+  modal.querySelector("#bd-persona").onclick = async () => {
+    const desc = prompt("一句话描述形象（如：一只蓝色狐狸，可爱）", "一只蓝色狐狸，可爱");
+    if (desc) {
+      closeModal();
+      await api.persona.generate(b.id, desc);
+      await refreshBots();
+    }
+  };
+  modal.querySelector("#bd-chat").onclick = () => { closeModal(); selectBot(b); };
+  modal.querySelector("#bd-close").onclick = closeModal;
 }
 
 async function memoryFlow() {

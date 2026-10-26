@@ -6,6 +6,7 @@ import type { SkillRegistry } from "./skill-registry";
 import type { SystemKit } from "./system-kit";
 import { ToolExecutor, BUILTIN_TOOL_DESCRIPTIONS } from "./tool-executor";
 import { OfflinePersona } from "./offline-persona";
+import type { McpClient } from "./mcp-client";
 
 export interface RuntimeDeps {
   store: Store;
@@ -15,6 +16,7 @@ export interface RuntimeDeps {
   system?: SystemKit;
   executor?: ToolExecutor;
   offline?: OfflinePersona;
+  mcp?: McpClient;
 }
 
 export interface RuntimeOptions {
@@ -107,7 +109,12 @@ export class BotRuntime {
     }
     if (opts?.injectSkills !== false) {
       const skills = this.deps.skills.toolDescriptions();
-      const tools = [BUILTIN_TOOL_DESCRIPTIONS, skills ? `【技能】\n${skills}` : ""].filter(Boolean).join("\n\n");
+      const mcpTools = this.deps.mcp?.listTools().map((t) => `- mcp:${t.serverId}/${t.name}: ${t.description ?? t.name}`).join("\n") ?? "";
+      const tools = [
+        BUILTIN_TOOL_DESCRIPTIONS,
+        skills ? `【技能】\n${skills}` : "",
+        mcpTools ? `【MCP 工具】\n${mcpTools}` : "",
+      ].filter(Boolean).join("\n\n");
       if (tools) {
         parts.push(`【可用工具与技能】当需要以下能力时，在回复中输出工具块调用。\n${tools}\n工具块格式：\n\`\`\`tool\n{"tool":"<工具或技能key>","args":{...}}\n\`\`\``);
       }
@@ -152,6 +159,17 @@ export class BotRuntime {
     if (t.tool === "notify") {
       if (this.deps.system) await this.deps.system.notify(String(args.title ?? bot.name), String(args.body ?? ""));
       return { output: `已发送通知：${args.title ?? bot.name}` };
+    }
+    if (t.tool.startsWith("mcp:")) {
+      if (!this.deps.mcp) return { output: "MCP 未启用" };
+      const [serverId, ...rest] = t.tool.slice(4).split("/");
+      const toolName = rest.join("/");
+      try {
+        const out = await this.deps.mcp.callTool(serverId, toolName, args);
+        return { output: out.slice(0, 4000) };
+      } catch (e) {
+        return { output: `MCP 调用失败: ${e instanceof Error ? e.message : String(e)}` };
+      }
     }
     if (t.tool === "skill" || t.tool.startsWith("skill:")) {
       const key = t.tool === "skill" ? String(args.key ?? args.name ?? "") : t.tool.slice(6);

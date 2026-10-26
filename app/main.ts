@@ -59,7 +59,7 @@ const executor = new ToolExecutor({ allowedRoots: [workspace] }, system, memory)
 const mcp = new McpClient(loadMcpServers());
 void mcp.init();
 const statuses = new Map<string, AgentStatus>();
-const runtime = new BotRuntime({ store, providers, memory, skills, system, executor, offline: new OfflinePersona() });
+const runtime = new BotRuntime({ store, providers, memory, skills, system, executor, offline: new OfflinePersona(), mcp });
 
 // 形象生成：有图像 provider 时用真 API，否则降级
 function personaWithImage() {
