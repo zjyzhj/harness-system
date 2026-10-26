@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: file:;" />
+<title>Harness Bot</title>
+<link rel="stylesheet" href="./style.css" />
+</head>
+<body>
+<div id="app">
+  <aside id="sidebar">
+    <div class="brand"><span class="logo">🤖</span><h1>Harness Bot</h1></div>
+    <button id="new-bot-btn" class="primary-btn">＋ 一句话创建 bot</button>
+    <div id="quick-templates" class="chips">
+      <button class="chip" data-tpl="创建 bot：翻译助手，用 claude，风格专业">翻译</button>
+      <button class="chip" data-tpl="创建 bot：代码助手，用 codex，风格严谨">代码</button>
+      <button class="chip" data-tpl="创建 bot：写作助手，用 gpt-4o，风格文艺">写作</button>
+      <button class="chip" data-tpl="创建 bot：灵感小助手，用 deepseek-chat，风格活泼">灵感</button>
+    </div>
+    <div id="bot-list" class="bot-list"></div>
+    <div class="sidebar-foot">
+      <button id="settings-btn" class="ghost-btn">⚙ 设置</button>
+      <button id="migrate-btn" class="ghost-btn">⇄ 迁移</button>
+    </div>
+  </aside>
+  <main id="chat">
+    <div id="empty-state">
+      <div class="empty-icon">🦊</div>
+      <p>选一个 bot，或一句话创建一个新 bot</p>
+      <p class="sub">试着说：「创建 bot：一只负责提醒我的小狐狸，可爱一点」</p>
+    </div>
+    <div id="messages" class="messages"></div>
+    <div id="composer">
+      <textarea id="input" rows="1" placeholder="给 bot 发消息，@bot名 可让 bot 互相通信…"></textarea>
+      <button id="send-btn" class="primary-btn send">发送</button>
+    </div>
+  </main>
+  <div id="modal-root"></div>
+</div>
+<script src="./renderer.js"></script>
+</body>
+</html>

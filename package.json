@@ -1,0 +1,23 @@
+{
+  "name": "harness-bot",
+  "version": "0.1.0",
+  "description": "Harness Bot — macOS 桌面端 AI 智能体指挥中心（Grok-Bot 风格 + 桌面宠物）",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "dev": "bun run scripts/build-shell.ts && electron . ",
+    "dev:core": "bun run --watch tests/demo.ts",
+    "test": "bun test",
+    "typecheck": "bunx tsc --noEmit",
+    "build": "bun run scripts/gen-icon.ts && bun run scripts/build-shell.ts",
+    "start": "bun run build && electron ."
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.6.0"
+  },
+  "dependencies": {
+    "electron": "^33.0.0"
+  },
+  "main": "dist/main.cjs"
+}
