@@ -408,15 +408,21 @@ api.onOpenSession(async (sid) => {
 }
 
 async function botDetailFlow(b) {
-  const mem = await api.memory.list(b.id);
-  const stats = await api.memory.stats(b.id);
-  const skills = await api.skills.list();
-  const tasks = await api.tasks.list(b.id);
-  const st = statuses[b.id] || { state: "idle" };
+  const [mem, stats, skills, tasks, stList, skins, grants] = await Promise.all([
+    api.memory.list(b.id),
+    api.memory.stats(b.id),
+    api.skills.list(),
+    api.tasks.list(b.id),
+    api.status.list().catch(() => []),
+    api.skins.list(),
+    api.consent.list(b.id).catch(() => []),
+  ]);
+  const st = stList.find((x) => x.botId === b.id) || { state: "idle" };
   const card = b.personaCard;
+  const caps = await api.consent.caps().catch(() => []);
   const modal = openModal(`
     <h2>${esc(b.name)} ${b.petEnabled ? "🐾" : ""}
-      <span class="status-dot st-${st.state}" title="${esc(st.state)}"></span>
+      <span class="status-dot st-${esc(st.state)}" title="${esc(st.state)}"></span>
     </h2>
     <div class="kv">
       <label>角色</label><span>${esc(b.role || "通用助手")}</span>
@@ -428,6 +434,10 @@ async function botDetailFlow(b) {
       <label>记忆</label><span>${Object.entries(stats || {}).map(([k, v]) => `${k}:${v}`).join("、") || "无"}</span>
       <label>技能</label><span>${skills.filter((x) => x.enabled).map((x) => esc(x.name)).join("、") || "无"}</span>
       <label>定时</label><span>${tasks.length ? tasks.map((t) => esc(t.name) + "(" + esc(t.cron) + ")").join("、") : "无"}</span>
+      <label>宠物皮肤</label>
+      <span><select id="bd-skin" class="skin-select">${skins.map((s) => `<option value="${esc(s.id)}"${b.skinId === s.id ? " selected" : ""}>${esc(s.name)}${s.desc ? " — " + esc(s.desc) : ""}</option>`).join("")}</select></span>
+      <label>授权能力</label>
+      <span>${grants.length ? grants.map((g) => `<span class="cap-badge">${esc(caps.find((c) => c.id === g.cap)?.label || g.cap)}${g.once ? "·1次" : ""}</span>`).join(" ") : "无（默认拒绝，bot 请求时弹窗）"}</span>
     </div>
     <div class="actions">
       <button class="ghost-btn" id="bd-persona">✨ 生成形象</button>
@@ -435,18 +445,18 @@ async function botDetailFlow(b) {
       <button class="ghost-btn" id="bd-close">关闭</button>
     </div>
     <div class="hint" id="bd-tip"></div>`);
+  modal.querySelector("#bd-skin").onchange = async (e) => {
+    await api.bots.setSkin(b.id, e.target.value);
+    const tip = modal.querySelector("#bd-tip");
+    tip.textContent = "✅ 已切换皮肤，桌面宠物会立即换上";
+    setTimeout(() => (tip.textContent = ""), 2500);
+  };
   modal.querySelector("#bd-persona").onclick = async () => {
-    const desc = prompt("一句话描述形象（如：一只蓝色狐狸，可爱）", "一只蓝色狐狸，可爱");
+    const desc = await askInput("一句话描述形象", "如：一只蓝色狐狸，可爱", "一只蓝色狐狸，可爱");
     if (desc) {
       closeModal();
       await api.persona.generate(b.id, desc);
       await refreshBots();
-
-// G3：宠物「打开完整会话」→ 主面板聚焦并跳转
-api.onOpenSession(async (sid) => {
-  if (!sid) { alert("没有可打开的会话，先和宠物聊一句吧"); return; }
-  await openSessionById(sid);
-});
     }
   };
   modal.querySelector("#bd-chat").onclick = () => { closeModal(); selectBot(b); };
@@ -678,7 +688,7 @@ async function groupsFlow() {
         <button class="ghost-btn" data-del="${g.id}" style="flex:none">✕</button>
       </div>`).join("") : `<span class="hint">还没有群组</span>`;
     box.querySelectorAll("[data-bcast]").forEach((b) => (b.onclick = async () => {
-      const text = prompt("广播内容（会发给组内其他成员）：", "大家好，@早会时间到");
+      const text = await askInput("广播内容（会发给组内其他成员）", "", "大家好，@早会时间到");
       if (text) { await api.groups.broadcast(b.dataset.bcast, currentBot.id, text); render(); }
     }));
     box.querySelectorAll("[data-del]").forEach((b) => (b.onclick = async () => { await api.groups.remove(b.dataset.del); render(); }));
@@ -797,7 +807,7 @@ async function sysaccessFlow() {
 
   modal.querySelector("#sa-audit-refresh").onclick = renderAudit;
   modal.querySelector("#sa-audit-export").onclick = async () => {
-    const path = prompt("导出审计日志到（绝对路径）：", "/tmp/harness-audit-export.json");
+    const path = await askInput("导出审计日志到（绝对路径）", "/tmp/harness-audit-export.json", "/tmp/harness-audit-export.json");
     if (path) {
       const n = await api.audit.export(path);
       alert(`已导出 ${n} 条审计日志 → ${path}`);

@@ -144,3 +144,58 @@ body { display: flex; align-items: center; justify-content: center; }
 }
 #bubble-text .file-card { color: #7dd3fc; }
 #bubble-text img.msg-img { max-width: 100%; border-radius: 8px; margin: 4px 0; }
+
+/* ---- G5.5 品牌皮肤 + HUD 卡 + 社区皮肤 ---- */
+#pet-avatar { border-color: color-mix(in srgb, var(--pet-color, #4F46E5) 60%, transparent); }
+.skin-dot {
+  display: inline-block; width: 10px; height: 10px; border-radius: 50%;
+  margin-right: 6px; vertical-align: middle; box-shadow: 0 0 4px rgba(0,0,0,.4);
+}
+.menu-sep {
+  padding: 4px 12px; font-size: 11px; color: #888; font-weight: 600;
+  border-top: 1px solid rgba(255,255,255,.06); margin-top: 4px;
+}
+.sprite-playing {
+  display: inline-block;
+  image-rendering: pixelated;
+}
+
+/* HUD 状态卡（AgentPet 风格右键卡） */
+#pet-hud {
+  position: fixed; right: 12px; bottom: 12px; z-index: 999;
+  width: 240px; background: rgba(18,18,26,.96); border: 1px solid #3a3a4a;
+  border-radius: 14px; padding: 14px; color: #eee; font-size: 13px;
+  box-shadow: 0 14px 44px rgba(0,0,0,.65); -webkit-app-region: no-drag;
+  backdrop-filter: blur(12px);
+}
+#pet-hud .hud-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 10px; }
+#pet-hud .hud-name { font-weight: 700; font-size: 15px; }
+#pet-hud .hud-skin { color: #9ca3ff; font-size: 12px; }
+#pet-hud .hud-row { display: flex; justify-content: space-between; margin: 5px 0; color: #c8c8d4; }
+#pet-hud .hud-row b { color: #fff; }
+#pet-hud .hud-bar { height: 6px; background: #2a2a36; border-radius: 4px; margin: 6px 0; overflow: hidden; }
+#pet-hud .hud-bar-fill { height: 100%; background: linear-gradient(90deg, #4F46E5, #9333EA); border-radius: 4px; }
+#pet-hud .hud-foot { margin-top: 10px; padding-top: 8px; border-top: 1px solid rgba(255,255,255,.08); color: #888; font-size: 11px; }
+
+/* 输入浮层（替代 window.prompt —— Electron 沙箱渲染进程不支持 prompt()） */
+.ask-input-mask {
+  position: fixed; inset: 0; background: rgba(0,0,0,.5); z-index: 9999;
+  display: flex; align-items: center; justify-content: center; -webkit-app-region: no-drag;
+}
+.ask-input-box {
+  min-width: 320px; max-width: 88vw; background: rgba(22,22,30,.98); border: 1px solid #3a3a4a;
+  border-radius: 14px; padding: 14px; display: flex; flex-direction: column; gap: 10px;
+  box-shadow: 0 18px 50px rgba(0,0,0,.6);
+}
+.ask-input-label { font-size: 12.5px; color: #eaeaf2; }
+.ask-input-field {
+  width: 100%; background: #15151c; color: #eaeaea; border: 1px solid #3a3a4a;
+  border-radius: 8px; padding: 8px 10px; font-size: 12.5px; font-family: inherit;
+}
+.ask-input-field:focus { border-color: #4F46E5; outline: none; }
+.ask-input-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.ask-input-actions .ghost-btn, .ask-input-actions .primary-btn {
+  padding: 6px 14px; border-radius: 8px; font-size: 12px; cursor: pointer; border: 1px solid #444;
+  background: transparent; color: #ddd;
+}
+.ask-input-actions .primary-btn { background: #4F46E5; border-color: #4F46E5; color: #fff; }

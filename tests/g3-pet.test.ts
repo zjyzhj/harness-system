@@ -97,3 +97,52 @@ describe("G3 persona skin link", () => {
     expect(inferSkin("蓝色狐狸")).toBe("default");
   });
 });
+
+describe("G5.5 brand skins", () => {
+  test("品牌预设皮肤齐全且帧可用", () => {
+    const ids = petSkins.list().map((s) => s.id);
+    for (const id of ["deepseek", "claude", "doro", "guga", "grok", "default", "pixel", "cute"]) {
+      expect(ids).toContain(id);
+    }
+    for (const id of ["deepseek", "claude", "doro", "guga", "grok"]) {
+      const sk = petSkins.get(id);
+      expect(sk.frames.idle.length).toBeGreaterThan(0);
+      expect(sk.color).toBeTruthy();
+      expect(petSkins.frame(id, "idle", 0)).toBeTruthy();
+    }
+  });
+
+  test("品牌皮肤动作帧非空", () => {
+    for (const a of ["idle", "walk", "jump", "sleep", "celebrate", "work", "think"] as PetAction[]) {
+      for (const id of ["deepseek", "claude", "doro", "guga", "grok"]) {
+        expect(petSkins.frameCount(id, a)).toBeGreaterThan(0);
+      }
+    }
+  });
+});
+
+describe("G5.5 skin persistence (community sprite)", () => {
+  test("下载注册 → 落盘 index.json → 新建 registry 恢复", () => {
+    const dir = mkdtempSync(join(tmpdir(), "harness-skins-"));
+    const reg = new PetSkinRegistry(dir);
+    const sprite = { url: "https://example.test/claude/spritesheet.webp", path: join(dir, "skins", "claude-x", "spritesheet.webp"), rows: 9, cols: 8 };
+    reg.register({ id: "claude-x", name: "Claude 测试", color: "#D97757", desc: "社区皮肤", fps: 8, sprite, frames: { idle: ["🙂"], walk: ["🚶"], jump: ["🤸"], sleep: ["😴"], celebrate: ["🎉"], work: ["🤔"], think: ["💭"] } });
+    // 新实例从 index.json 恢复
+    const reg2 = new PetSkinRegistry(dir);
+    const restored = reg2.get("claude-x");
+    expect(restored.id).toBe("claude-x");
+    expect(restored.name).toBe("Claude 测试");
+    expect(restored.sprite?.path).toBe(sprite.path);
+    expect(restored.sprite?.rows).toBe(9);
+    // 内置品牌不受影响
+    expect(reg2.list().map((s) => s.id)).toContain("deepseek");
+  });
+
+  test("内置皮囊不需要 assetsDir 也能工作", () => {
+    const reg = new PetSkinRegistry();
+    expect(reg.get("default").id).toBe("default");
+    // 无 assetsDir 时 register 不落盘也不报错
+    reg.register({ id: "x", name: "X", frames: { idle: ["A"], walk: ["B"], jump: ["C"], sleep: ["D"], celebrate: ["E"], work: ["F"], think: ["G"] }, fps: 2 });
+    expect(reg.get("x").name).toBe("X");
+  });
+});

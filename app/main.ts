@@ -5,7 +5,7 @@
  */
 import { app, BrowserWindow, Tray, Menu, ipcMain, dialog, clipboard, Notification, screen, nativeImage } from "electron";
 import { join } from "node:path";
-import { writeFileSync } from "node:fs";
+import { writeFileSync, mkdirSync, readFileSync, existsSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
 // 应用根：electron . 运行时 getAppPath() 返回项目根目录
@@ -25,6 +25,7 @@ import { Scheduler } from "../core/scheduler";
 import { GroupRegistry } from "../core/group-registry";
 import { Orchestrator, planFromText } from "../core/orchestrator";
 import { GatewayServer } from "../core/gateway-server";
+import { PetSkinRegistry, EMOJI_FALLBACK } from "../core/pet-skin";
 import { ConsentCenter, CAP_LABELS } from "../core/consent-center";
 import { AuditLog } from "../core/audit-log";
 import { SystemAccess } from "../core/system-access";
@@ -38,6 +39,7 @@ import { AgentStatus } from "../core/types";
 const home = process.env.HARNESS_HOME || join(app.getPath("userData"), "..", "harness-bot");
 const store = new Store(home);
 const assetsDir = join(home, "assets");
+const petSkins = new PetSkinRegistry(assetsDir);
 const registry = new AgentRegistry(store);
 const bus = new MessageBus(store);
 const providers = new ProviderCenter(store);
@@ -370,6 +372,37 @@ ipcMain.handle("bots:delete", (_e, id: string) => { registry.deleteBot(id); bus.
 ipcMain.handle("bots:setPet", (_e, id: string, enabled: boolean) => {
   registry.setPetEnabled(id, enabled);
   if (enabled) createPetWindow(id); else petWins.get(id)?.close();
+});
+ipcMain.handle("skins:list", () => petSkins.list().map((s) => ({ id: s.id, name: s.name, color: s.color, desc: s.desc, fps: s.fps, sprite: s.sprite })));
+// G5.5：下载 openpets/petdex spritesheet 皮肤 → 存本地 assets/skins/<id>/
+ipcMain.handle("skins:download", async (_e, input: { id: string; name: string; url: string; rows?: number; cols?: number }) => {
+  const dir = join(assetsDir, "skins", input.id);
+  mkdirSync(dir, { recursive: true });
+  const res = await fetch(input.url);
+  if (!res.ok) throw new Error(`下载失败 HTTP ${res.status}`);
+  const buf = Buffer.from(await res.arrayBuffer());
+  const path = join(dir, "spritesheet.webp");
+  writeFileSync(path, buf);
+  const rows = input.rows ?? 9, cols = input.cols ?? 8;
+  const dataUrl = `data:image/webp;base64,${buf.toString("base64")}`;
+  // 注册为 sprite 皮肤（emoji 帧兜底 + sprite 播放）
+  petSkins.register({
+    id: input.id,
+    name: input.name,
+    color: "#888",
+    desc: `openpets 社区皮肤（${rows}×${cols} 帧）`,
+    fps: 8,
+    sprite: { url: input.url, path, rows, cols },
+    frames: EMOJI_FALLBACK,
+  });
+  return { ok: true, path, sprite: { path, rows, cols }, dataUrl: dataUrl.slice(0, 50) + "…" };
+});
+// G5.5：回写 spritesheet 每格尺寸（pet 窗口 Image 探测后持久化，重启直接播放）
+ipcMain.handle("skins:setMeta", (_e, id: string, meta: { cellW: number; cellH: number }) => {
+  const sk = petSkins.get(id);
+  if (!sk?.sprite?.path) throw new Error("皮肤不存在或非 sprite 皮肤");
+  petSkins.register({ ...sk, sprite: { ...sk.sprite, cellW: meta.cellW, cellH: meta.cellH } });
+  return { ok: true };
 });
 ipcMain.handle("bots:setSkin", (_e, id: string, skinId: string) => {
   const bot = store.getBot(id);

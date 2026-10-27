@@ -161,3 +161,32 @@ body {
 #search-results .sr .sr-bot { color: #9db4ff; font-size: 11px; }
 .load-more-btn { width: 100%; padding: 6px; font-size: 12px; color: var(--dim); background: transparent; border: 1px dashed #333; border-radius: 8px; cursor: pointer; margin: 4px 0; }
 .load-more-btn:hover { color: #eaeaea; border-color: #555; }
+
+/* bot 详情：宠物皮肤下拉 + 授权能力徽章 */
+.skin-select {
+  background: #1a1a1a; color: #eaeaea; border: 1px solid #333; border-radius: 6px;
+  padding: 4px 6px; font-size: 12.5px; max-width: 260px;
+}
+.cap-badge {
+  display: inline-block; background: rgba(79, 70, 229, .15); color: #a5b4fc;
+  border: 1px solid rgba(79, 70, 229, .4); border-radius: 10px;
+  padding: 1px 8px; font-size: 11px; margin: 1px 2px 1px 0;
+}
+
+/* 输入浮层（替代 window.prompt，Electron 沙箱渲染进程不支持 prompt()） */
+.ask-input-mask {
+  position: fixed; inset: 0; background: rgba(0,0,0,.65); z-index: 999;
+  display: flex; align-items: center; justify-content: center;
+}
+.ask-input-box {
+  min-width: 420px; max-width: 90vw; background: var(--panel);
+  border: 1px solid var(--border); border-radius: 14px; padding: 16px;
+  display: flex; flex-direction: column; gap: 12px; box-shadow: 0 18px 50px rgba(0,0,0,.5);
+}
+.ask-input-label { font-size: 13.5px; color: var(--text); }
+.ask-input-field {
+  width: 100%; background: #1a1a1a; color: #eaeaea; border: 1px solid #333;
+  border-radius: 8px; padding: 8px 10px; font-size: 13px; font-family: inherit;
+}
+.ask-input-field:focus { border-color: var(--acc); outline: none; }
+.ask-input-actions { display: flex; justify-content: flex-end; gap: 10px; }

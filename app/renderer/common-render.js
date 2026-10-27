@@ -69,3 +69,31 @@ function formatBytes(n) {
   if (n < 1048576) return (n / 1024).toFixed(1) + " KB";
   return (n / 1048576).toFixed(1) + " MB";
 }
+
+/** 输入浮层（替代 window.prompt —— Electron 沙箱渲染进程不支持 prompt()）。
+ * 返回 Promise<string | null>：确定返回输入值（空串返回 null），取消返回 null。
+ */
+function askInput(label, placeholder, defaultValue) {
+  return new Promise((resolve) => {
+    const mask = document.createElement("div");
+    mask.className = "ask-input-mask";
+    mask.innerHTML = `
+      <div class="ask-input-box">
+        <div class="ask-input-label">${esc(label)}</div>
+        <input class="ask-input-field" type="text" placeholder="${esc(placeholder || "")}" value="${esc(defaultValue || "")}" />
+        <div class="ask-input-actions">
+          <button class="ghost-btn ask-input-cancel">取消</button>
+          <button class="primary-btn ask-input-ok">确定</button>
+        </div>
+      </div>`;
+    document.body.appendChild(mask);
+    const input = mask.querySelector(".ask-input-field");
+    const done = (val) => { mask.remove(); resolve(val); };
+    mask.querySelector(".ask-input-ok").onclick = () => done(input.value.trim() || null);
+    mask.querySelector(".ask-input-cancel").onclick = () => done(null);
+    mask.onclick = (e) => { if (e.target === mask) done(null); };
+    input.addEventListener("keydown", (e) => { if (e.key === "Enter") done(input.value.trim() || null); if (e.key === "Escape") done(null); });
+    input.focus();
+    input.select();
+  });
+}

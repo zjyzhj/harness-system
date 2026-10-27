@@ -41,7 +41,28 @@ function setAction(a, { hold } = {}) {
 }
 function refreshFrame() {
   if (document.hidden) return; // 后台窗口暂停轮播（性能）
-  const frames = SKINS_FRAMES[action] || SKINS_FRAMES.idle;
+  const sk = SKINS.find((x) => x.id === bot?.skinId);
+  // 优先：spritesheet 皮肤（openpets 生态）—— background-position 播放
+  if (sk?.sprite?.path && window.__spriteSkin?.[sk.id]) {
+    const meta = window.__spriteSkin[sk.id];
+    const spr = sk.sprite;
+    const stateRow = SKIN_ACTION_ROW[action] ?? 0;
+    const idx = frameIndex % spr.cols;
+    const cellW = meta.cellW, cellH = meta.cellH;
+    spriteEl.innerHTML = "";
+    spriteEl.className = "sprite-playing";
+    spriteEl.style.backgroundImage = `url(file://${spr.path})`;
+    spriteEl.style.backgroundSize = `${cellW * spr.cols}px ${cellH * spr.rows}px`;
+    spriteEl.style.backgroundPosition = `-${idx * cellW}px -${stateRow * cellH}px`;
+    spriteEl.style.width = cellW + "px";
+    spriteEl.style.height = cellH + "px";
+    return;
+  }
+  spriteEl.className = "";
+  spriteEl.style.backgroundImage = "";
+  spriteEl.style.width = "";
+  spriteEl.style.height = "";
+  const frames = skinFramesFor(bot?.skinId, action);
   const idx = frameIndex % frames.length;
   const frame = frames[idx] || "🙂";
   if (bot?.avatarPath && action === "idle") {
@@ -59,6 +80,8 @@ function refreshFrame() {
     spriteEl.textContent = frame;
   }
 }
+// spritesheet 状态行映射（openpets 9 行协议：idle=0 walk=1 jump=2 sleep=3 celebrate=4 work=5 think=6）
+const SKIN_ACTION_ROW = { idle: 0, walk: 1, jump: 2, sleep: 3, celebrate: 4, work: 5, think: 6 };
 
 function setMood(m, { seconds } = {}) {
   if (mood === m && !seconds) return;
@@ -204,12 +227,8 @@ function refreshAppearance() {
   updateSkin();
 }
 
-const SKINS = [
-  { id: "default", name: "默认" },
-  { id: "pixel", name: "像素" },
-  { id: "cute", name: "圆润" },
-];
-// 皮肤帧表（与前端的 core/pet-skin.ts 对齐）
+let SKINS = [];
+// 品牌/主题皮肤帧表（与 core/pet-skin.ts 单一数据源一致；core 是权威，这里保留帧兜底）
 const SKINS_FRAMES = {
   idle: ["🙂", "😊", "🙂"],
   walk: ["🚶", "🏃"],
@@ -219,9 +238,24 @@ const SKINS_FRAMES = {
   work: ["🤔", "🧠", "📝"],
   think: ["💭", "🤔", "💭"],
 };
+const BRAND_FRAMES = {
+  deepseek: { idle: ["🐳", "🐋", "🐳"], walk: ["🐳", "🐋"], jump: ["🐳", "💦", "🐳"], sleep: ["😴", "💤"], celebrate: ["🎉", "🐳", "🎉"], work: ["🧠", "📊", "🧠"], think: ["💭", "🐳", "💭"] },
+  claude: { idle: ["🟧", "🙂", "🟧"], walk: ["🟧", "🟨"], jump: ["🟧", "⭐"], sleep: ["😴", "🟧"], celebrate: ["🟧", "🎉", "🟧"], work: ["🟧", "🤖", "🟧"], think: ["💭", "🟧", "💭"] },
+  doro: { idle: ["🍡", "🌸", "🍡"], walk: ["🍡", "🍡"], jump: ["🍡", "🌸"], sleep: ["😴", "💤"], celebrate: ["🎀", "🍡", "🎀"], work: ["💻", "🍡", "💻"], think: ["💭", "🍡", "💭"] },
+  guga: { idle: ["👾", "🐸", "👾"], walk: ["👾", "👾"], jump: ["👾", "💚"], sleep: ["😴", "💤"], celebrate: ["🎉", "👾", "🎉"], work: ["🛠", "👾", "🛠"], think: ["💭", "👾", "💭"] },
+  grok: { idle: ["🌌", "🤖", "🌌"], walk: ["🌌", "⭐"], jump: ["🤖", "✨"], sleep: ["😴", "💤"], celebrate: ["🎉", "✨", "🎉"], work: ["🧠", "🔮", "🧠"], think: ["💭", "🤖", "💭"] },
+};
+function skinFramesFor(id, action) {
+  const brand = BRAND_FRAMES[id];
+  if (brand && brand[action]) return brand[action];
+  return SKINS_FRAMES[action] || SKINS_FRAMES.idle;
+}
 function updateSkin() {
   frameIndex = 0;
   refreshFrame();
+  // 主题色：品牌皮肤给头像描边/徽章上色
+  const sk = SKINS.find((x) => x.id === bot?.skinId);
+  petEl.style.setProperty("--pet-color", sk?.color || "#4F46E5");
 }
 
 // ---- 彩蛋交互（T3.7）：摸摸/双击 ----
@@ -249,12 +283,19 @@ async function doubleClickAction() {
 function buildContextMenu() {
   const menu = document.createElement("div");
   menu.id = "pet-menu";
-  const skinBtns = SKINS.map((s) => `<div class="menu-item" data-act="skin" data-skin="${s.id}">🎨 皮肤：${s.name}${bot?.skinId === s.id ? " ✓" : ""}</div>`).join("");
+  const brandSkins = SKINS.filter((s) => ["deepseek", "claude", "doro", "guga", "grok"].includes(s.id));
+  const otherSkins = SKINS.filter((s) => !["deepseek", "claude", "doro", "guga", "grok"].includes(s.id));
+  const skinGroup = (list) => list.map((s) => `<div class="menu-item" data-act="skin" data-skin="${s.id}"><span class="skin-dot" style="background:${s.color || "#888"}"></span> ${s.name}${bot?.skinId === s.id ? " ✓" : ""}</div>`).join("");
   menu.innerHTML = `
     <div class="menu-item" data-act="chat">💬 对话</div>
     <div class="menu-item" data-act="open">📂 打开最近会话</div>
     <div class="menu-item" data-act="avatar">✨ 换形象</div>
-    ${skinBtns}
+    <div class="menu-item" data-act="stats">📊 状态</div>
+    <div class="menu-sep">🎨 品牌形象</div>
+    ${skinGroup(brandSkins)}
+    <div class="menu-sep">其他</div>
+    ${skinGroup(otherSkins)}
+    <div class="menu-item" data-act="import">🌐 从社区导入形象</div>
     <div class="menu-item" data-act="hide">🙈 隐藏</div>
     <div class="menu-item danger" data-act="close">✕ 关闭宠物</div>`;
   document.body.appendChild(menu);
@@ -269,8 +310,13 @@ function buildContextMenu() {
       } else if (act === "open") {
         await openMainSession();
       } else if (act === "avatar") {
-        const desc = prompt("一句话描述新形象（如：一只戴围巾的橘猫，可爱）", "一只蓝色狐狸，可爱");
+        const desc = await askInput("一句话描述新形象", "如：一只戴围巾的橘猫，可爱", "一只蓝色狐狸，可爱");
         if (desc) await api.persona.generate(bot.id, desc);
+      } else if (act === "stats") {
+        await showStatsHud();
+      } else if (act === "import") {
+        const url = await askInput("输入 openpets/petdex spritesheet URL（可到 agentpet 社区形象库找）", "https://pets.thenightwatcher.online/pets/claude-f187e74a/spritesheet.webp");
+        if (url) await importCommunitySkin(url);
       } else if (act === "skin") {
         await api.bots.setSkin(bot.id, item.dataset.skin);
         bot = { ...bot, skinId: item.dataset.skin };
@@ -289,6 +335,86 @@ function buildContextMenu() {
 }
 
 // 打开主面板并选中会话
+// 状态 HUD 卡（借鉴 AgentPet 右键 stats card）：bot 数据 + 记忆 + 任务 + 成长
+async function showStatsHud() {
+  const [mem, tasks, statuses] = await Promise.all([
+    api.memory.list(bot.id).catch(() => []),
+    api.tasks.list(bot.id).catch(() => []),
+    api.status.list().catch(() => []),
+  ]);
+  const st = statuses.find((x) => x.botId === bot.id);
+  const card = document.createElement("div");
+  card.id = "pet-hud";
+  const xp = (bot.xp || 0);
+  const level = Math.floor(Math.sqrt(xp / 100)) + 1;
+  const nextAt = level * level * 100;
+  card.innerHTML = `
+    <div class="hud-head">
+      <span class="hud-name">${esc(bot.name)}</span>
+      <span class="hud-skin">${esc(SKINS.find((s) => s.id === bot.skinId)?.name || "默认")}</span>
+    </div>
+    <div class="hud-row"><span>等级</span><b>Lv.${level}</b></div>
+    <div class="hud-bar"><div class="hud-bar-fill" style="width:${Math.min(100, (xp % nextAt) / nextAt * 100)}%"></div></div>
+    <div class="hud-row"><span>经验</span><b>${xp} / ${nextAt}</b></div>
+    <div class="hud-row"><span>状态</span><b>${st ? esc(st.state) : "idle"}</b></div>
+    <div class="hud-row"><span>记忆</span><b>${mem.length} 条</b></div>
+    <div class="hud-row"><span>定时任务</span><b>${tasks.filter((t) => t.enabled).length} 个</b></div>
+    <div class="hud-foot">右键菜单可切形象/皮肤 · 双击互动</div>`;
+  document.body.appendChild(card);
+  const close = () => card.remove();
+  card.addEventListener("mouseleave", close);
+  setTimeout(() => { if (document.getElementById("pet-hud")) card.remove(); }, 20000);
+  return card;
+}
+
+
+// 探测 spritesheet 每格尺寸：优先用已持久化的 cellW/cellH，否则加载本地图片探测并回写
+function probeSpriteSkin(id, spr) {
+  return new Promise((resolve) => {
+    if (!spr?.path) return resolve(false);
+    if (spr.cellW && spr.cellH) {
+      window.__spriteSkin = window.__spriteSkin || {};
+      window.__spriteSkin[id] = { cellW: spr.cellW, cellH: spr.cellH };
+      return resolve(true);
+    }
+    const img = new Image();
+    img.onload = () => {
+      const cellW = Math.floor(img.width / (spr.cols || 8));
+      const cellH = Math.floor(img.height / (spr.rows || 9));
+      if (cellW > 0 && cellH > 0) {
+        window.__spriteSkin = window.__spriteSkin || {};
+        window.__spriteSkin[id] = { cellW, cellH };
+        api.skins.setMeta(id, { cellW, cellH }).catch(() => {});
+      }
+      resolve(true);
+    };
+    img.onerror = () => resolve(false);
+    img.src = `file://${spr.path}`;
+  });
+}
+
+// 导入社区 spritesheet 皮肤（openpets/petdex 生态）
+async function importCommunitySkin(url) {
+  const id = "c-" + Date.now().toString(36);
+  const name = await askInput("给这个形象起个名字", "如：Claude 橙块", "社区宠物");
+  try {
+    showBubble(`正在下载社区形象…${name ? "「" + name + "」" : ""}`, {});
+    const r = await api.skins.download({ id, name: name || "社区宠物", url, rows: 9, cols: 8 });
+    // 下载本地路径已注册，刷新皮肤列表并应用
+    SKINS = await api.skins.list();
+    await api.bots.setSkin(bot.id, id);
+    bot = { ...bot, skinId: id };
+    // 探测 sprite 尺寸（本地文件 → 回写持久化，重启直接播放）
+    const spr = SKINS.find((x) => x.id === id)?.sprite;
+    await probeSpriteSkin(id, spr);
+    updateSkin();
+    showBubble(`已导入社区形象「${name || "社区宠物"}」！右键可继续切换 🎨`);
+    pop();
+  } catch (e) {
+    showBubble("导入失败：" + (e.message || e), {});
+  }
+}
+
 async function openMainSession() {
   const sid = lastReplySession || (await api.pets.getLastSession?.(bot.id)) || null;
   await api.window.openSession(sid);
@@ -299,17 +425,22 @@ async function openMainSession() {
 }
 
 async function init() {
-  const [bots, pets] = await Promise.all([api.bots.list(), api.pets.list()]);
+  const [bots, pets, skins] = await Promise.all([api.bots.list(), api.pets.list(), api.skins.list()]);
   bot = bots.find((b) => b.id === botId);
+  SKINS = skins;
   if (!bot) return;
   refreshAppearance();
+  // 社区 sprite 皮肤：重启后自动探测/恢复每格尺寸（保证 sprite 播放而非 emoji 兜底）
+  const sprSk = SKINS.find((x) => x.id === bot.skinId);
+  if (sprSk?.sprite?.path) probeSpriteSkin(bot.skinId, sprSk.sprite).then(() => refreshFrame());
   // 帧动画主循环：fps 由皮肤决定，document.hidden 暂停
   const tick = () => {
     if (document.hidden) return;
     frameIndex++;
     refreshFrame();
   };
-  const fps = bot.skinId === "pixel" ? 4 : 2;
+  const sk = SKINS.find((x) => x.id === bot.skinId);
+  const fps = sk?.fps || 2;
   frameTimer = setInterval(tick, 1000 / fps);
   document.addEventListener("visibilitychange", () => {
     if (!document.hidden) refreshFrame();

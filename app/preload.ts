@@ -1,6 +1,10 @@
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from "electron";
 
 const api = {
+  skins: {
+    list: () => ipcRenderer.invoke("skins:list"),
+    setMeta: (id: string, meta: { cellW: number; cellH: number }) => ipcRenderer.invoke("skins:setMeta", id, meta),
+  },
   bots: {
     list: () => ipcRenderer.invoke("bots:list"),
     create: (text: string) => ipcRenderer.invoke("bots:create", text),
