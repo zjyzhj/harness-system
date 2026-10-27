@@ -203,6 +203,7 @@ function createPetWindow(botId: string) {
   const bot = store.getBot(botId);
   if (!bot) return;
   const saved = store.listPets().find((p) => p.botId === botId);
+  const PW = 320, PH = 360; // 宠物窗口：容纳完整 180px 形象 + 气泡/HUD/菜单
   let x: number, y: number;
   if (saved) {
     // 多显示器记忆：优先恢复到记录所在显示器（displayId），坐标换算到该屏
@@ -210,19 +211,19 @@ function createPetWindow(botId: string) {
     const target = disp || screen.getDisplayNearestPoint({ x: saved.x, y: saved.y });
     x = saved.x;
     y = saved.y;
-    if (disp && (x < disp.workArea.x || x > disp.workArea.x + disp.workArea.width - 100 || y < disp.workArea.y || y > disp.workArea.y + disp.workArea.height - 100)) {
-      x = disp.workArea.x + disp.workArea.width - 260;
-      y = disp.workArea.y + disp.workArea.height - 340;
+    if (disp && (x < disp.workArea.x || x > disp.workArea.x + disp.workArea.width - PW || y < disp.workArea.y || y > disp.workArea.y + disp.workArea.height - PH)) {
+      x = disp.workArea.x + disp.workArea.width - PW - 8;
+      y = disp.workArea.y + disp.workArea.height - PH - 8;
     }
     void target;
   } else {
     const wa = screen.getPrimaryDisplay().workArea;
-    x = wa.x + wa.width - 260;
-    y = wa.y + wa.height - 340;
+    x = wa.x + wa.width - PW - 8;
+    y = wa.y + wa.height - PH - 8;
   }
   const win = new BrowserWindow({
-    width: 220,
-    height: 240,
+    width: PW,
+    height: PH,
     x, y,
     transparent: true,
     frame: false,

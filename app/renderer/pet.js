@@ -39,6 +39,7 @@ function setAction(a, { hold } = {}) {
   if (actionTimer) { clearTimeout(actionTimer); actionTimer = null; }
   if (hold) actionTimer = setTimeout(() => setAction("idle"), hold * 1000);
 }
+let spriteBgSet = false; // 已设置过 background-image/size（避免每帧重设 url 引起重解码闪烁）
 function refreshFrame() {
   if (document.hidden) return; // 后台窗口暂停轮播（性能）
   const sk = SKINS.find((x) => x.id === bot?.skinId);
@@ -49,19 +50,28 @@ function refreshFrame() {
     const stateRow = SKIN_ACTION_ROW[action] ?? 0;
     const idx = frameIndex % spr.cols;
     const cellW = meta.cellW, cellH = meta.cellH;
-    spriteEl.innerHTML = "";
-    spriteEl.className = "sprite-playing";
-    spriteEl.style.backgroundImage = `url(file://${spr.path})`;
-    spriteEl.style.backgroundSize = `${cellW * spr.cols}px ${cellH * spr.rows}px`;
-    spriteEl.style.backgroundPosition = `-${idx * cellW}px -${stateRow * cellH}px`;
-    spriteEl.style.width = cellW + "px";
-    spriteEl.style.height = cellH + "px";
+    if (!spriteBgSet) {
+      spriteEl.innerHTML = "";
+      spriteEl.className = "sprite-playing";
+      // 等比缩放显示完整帧：容器内 max 160px，宽高比保持
+      const scale = Math.min(160 / cellW, 160 / cellH, 1);
+      const w = Math.round(cellW * scale), h = Math.round(cellH * scale);
+      spriteEl.style.backgroundImage = `url(file://${spr.path})`;
+      spriteEl.style.backgroundSize = `${w * spr.cols}px ${h * spr.rows}px`;
+      spriteEl.style.width = w + "px";
+      spriteEl.style.height = h + "px";
+      spriteBgSet = true;
+    }
+    // 按缩放后的帧尺寸移动背景
+    const sw = parseFloat(spriteEl.style.width), sh = parseFloat(spriteEl.style.height);
+    spriteEl.style.backgroundPosition = `-${Math.round(idx * sw)}px -${Math.round(stateRow * sh)}px`;
     return;
   }
   spriteEl.className = "";
   spriteEl.style.backgroundImage = "";
   spriteEl.style.width = "";
   spriteEl.style.height = "";
+  spriteBgSet = false;
   const frames = skinFramesFor(bot?.skinId, action);
   const idx = frameIndex % frames.length;
   const frame = frames[idx] || "🙂";
@@ -189,6 +199,7 @@ api.onPetEvent(async (ev) => {
       bubbleText.innerHTML = (badge.length ? `<div class="bubble-head">${badge.join("")}</div>` : "") + renderBlocks(blocks);
       setStatus("idle");
       saying = false;
+      maybeEvolve(ev.xp);
     } else {
       eventQueue.push(ev);
       poke();
@@ -223,8 +234,21 @@ function poke() {
       setStatus(ev.type === "task-error" ? "error" : "idle");
       setAction(ev.type === "task-error" ? "think" : "celebrate", { hold: 3 });
       bounce();
+      maybeEvolve(ev.xp);
     }
   }, 4000);
+}
+
+// 检查 XP 是否跨级 → 播进化特效（只在等级提升时）
+let lastKnownLevel = null;
+function maybeEvolve(xp) {
+  if (xp == null) return;
+  const lv = levelFromXp(xp);
+  if (lastKnownLevel != null && lv > lastKnownLevel) {
+    const stage = evoStage(lv);
+    celebrateEvo(lv, stage.name);
+  }
+  lastKnownLevel = lv;
 }
 
 // ---- 外观：头像/皮肤联动（T3.6） ----
@@ -354,22 +378,32 @@ async function showStatsHud() {
   card.id = "pet-hud";
   const petState = (await api.pets.list().catch(() => [])).find((x) => x.botId === bot.id);
   const xp = (petState?.xp || 0);
-  const level = Math.floor(Math.sqrt(xp / 100)) + 1;
-  const nextAt = level * level * 100;
+  const level = levelFromXp(xp);
+  const stage = evoStage(level);
+  const next = evoStageNext(level);
+  const nextAt = next ? next.min : level * level * 100;
+  const barPct = next ? Math.min(100, ((xp - stage.min) / (next.min - stage.min)) * 100) : 100;
   card.innerHTML = `
     <div class="hud-head">
       <span class="hud-name">${esc(bot.name)}</span>
-      <span class="hud-skin">${esc(SKINS.find((s) => s.id === bot.skinId)?.name || "默认")}</span>
+      <span class="hud-stage">${stage.name}</span>
     </div>
     <div class="hud-row"><span>等级</span><b>Lv.${level}</b></div>
-    <div class="hud-bar"><div class="hud-bar-fill" style="width:${Math.min(100, (xp % nextAt) / nextAt * 100)}%"></div></div>
-    <div class="hud-row"><span>经验</span><b>${xp} / ${nextAt}</b></div>
+    <div class="hud-bar"><div class="hud-bar-fill" style="width:${barPct}%"></div></div>
+    <div class="hud-row"><span>经验</span><b>${xp}${next ? " / " + next.min : "（满级）"}</b></div>
+    <div class="hud-row"><span>皮肤</span><b>${esc(SKINS.find((s) => s.id === bot.skinId)?.name || "默认")}</b></div>
     <div class="hud-row"><span>状态</span><b>${st ? esc(st.state) : "idle"}</b></div>
     <div class="hud-row"><span>记忆</span><b>${mem.length} 条</b></div>
     <div class="hud-row"><span>定时任务</span><b>${tasks.filter((t) => t.enabled).length} 个</b></div>
-    <div class="hud-foot">右键菜单可切形象/皮肤 · 双击互动</div>`;
+    <div class="hud-actions">
+      <button class="hud-btn hud-open">📂 打开会话</button>
+      <button class="hud-btn hud-close">关闭</button>
+    </div>
+    <div class="hud-foot">右键可切形象/皮肤 · 双击互动 · 对话/任务增长经验</div>`;
   document.body.appendChild(card);
   const close = () => card.remove();
+  card.querySelector(".hud-open").onclick = () => { close(); openMainSession(); };
+  card.querySelector(".hud-close").onclick = close;
   card.addEventListener("mouseleave", close);
   setTimeout(() => { if (document.getElementById("pet-hud")) card.remove(); }, 20000);
   return card;
@@ -423,6 +457,47 @@ async function importCommunitySkin(url) {
   }
 }
 
+
+// G5.5：宠物成长等级与进化阶段（5 阶段，对齐 AgentPet 进化）
+const EVO_STAGES = [
+  { level: 1, name: "🥚 蛋生", min: 0 },
+  { level: 2, name: "🌱 幼年", min: 200 },
+  { level: 3, name: "✨ 成长", min: 500 },
+  { level: 4, name: "🔥 成熟", min: 1000 },
+  { level: 5, name: "👑 传说", min: 2000 },
+];
+function levelFromXp(xp) { return Math.floor(Math.sqrt((xp || 0) / 100)) + 1; }
+function evoStage(level) {
+  let stage = EVO_STAGES[0];
+  for (const st of EVO_STAGES) if (level >= st.level) stage = st;
+  return stage;
+}
+function evoStageNext(level) {
+  return EVO_STAGES.find((st) => st.level > level) || null;
+}
+
+// 升级/进化特效：光环 + 弹跳 + 气泡提示
+function celebrateEvo(level, stageName) {
+  petEl.classList.remove("evo-ring");
+  void petEl.offsetWidth;
+  petEl.classList.add("evo-ring");
+  setAction("celebrate", { hold: 4 });
+  bounce();
+  pop();
+  showBubble(`✨ 进化！Lv.${level} ${stageName}`, {});
+  setTimeout(hideBubble, 4000);
+  // 洒落粒子
+  for (let i = 0; i < 8; i++) {
+    const p = document.createElement("span");
+    p.className = "evo-particle";
+    p.textContent = ["⭐", "✨", "🌟", "💫"][i % 4];
+    p.style.left = (30 + Math.random() * 140) + "px";
+    p.style.animationDuration = (0.8 + Math.random() * 0.6) + "s";
+    document.body.appendChild(p);
+    setTimeout(() => p.remove(), 1600);
+  }
+}
+
 async function openMainSession() {
   const sid = lastReplySession || (await api.pets.getLastSession?.(bot.id)) || null;
   await api.window.openSession(sid);
@@ -437,10 +512,19 @@ async function init() {
   bot = bots.find((b) => b.id === botId);
   SKINS = skins;
   if (!bot) return;
+  // 初始化当前等级（避免重启后首次回复误触发进化特效）
+  const petInit = pets.find((x) => x.botId === botId);
+  if (petInit?.xp) lastKnownLevel = levelFromXp(petInit.xp);
   refreshAppearance();
   // 社区 sprite 皮肤：重启后自动探测/恢复每格尺寸（保证 sprite 播放而非 emoji 兜底）
   const sprSk = SKINS.find((x) => x.id === bot.skinId);
-  if (sprSk?.sprite?.path) probeSpriteSkin(bot.skinId, sprSk.sprite).then(() => refreshFrame());
+  if (sprSk?.sprite?.path) {
+    // 先以 emoji 帧稳定显示，探测完成后再切 sprite（避免加载瞬间闪切）
+    probeSpriteSkin(bot.skinId, sprSk.sprite).then(() => {
+      spriteBgSet = false;
+      refreshFrame();
+    });
+  }
   // 帧动画主循环：fps 由皮肤决定，document.hidden 暂停
   const tick = () => {
     if (document.hidden) return;
@@ -476,7 +560,10 @@ async function init() {
     if (old) old.remove();
     const menu = buildContextMenu();
     menu.style.left = Math.min(e.clientX, window.innerWidth - 150) + "px";
-    menu.style.top = Math.min(e.clientY, window.innerHeight - 210) + "px";
+    menu.style.top = Math.min(e.clientY, window.innerHeight - 40) + "px";
+    // 菜单比窗口高时上移，保证顶部可见（内容由 CSS max-height 滚动）
+    const mh = menu.offsetHeight;
+    if (mh > 0) menu.style.top = Math.max(0, Math.min(parseFloat(menu.style.top), window.innerHeight - mh)) + "px";
   });
 
   // 彩蛋：双击 = 摸头 / 弹跳
