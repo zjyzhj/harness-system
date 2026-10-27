@@ -394,7 +394,7 @@ async function migrateFlow() {
   };
   modal.querySelector("#mm-import").onclick = async () => {
     const r = await api.migration.import(modal.querySelector("#mm-path").value.trim());
-    result.textContent = `✅ 导入完成：providers ${r.importedProviders} / bots ${r.importedBots} / pets ${r.importedPets}`;
+    result.textContent = `✅ 导入完成：providers ${r.importedProviders} / bots ${r.importedBots} / pets ${r.importedPets} / skins ${r.importedSkins ?? 0}`;
     closeModal();
     await refreshBots();
 

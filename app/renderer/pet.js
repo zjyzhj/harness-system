@@ -104,9 +104,13 @@ function setStatus(state) {
 }
 
 // ---- 富渲染气泡（T3.2 共用渲染器 + T3.5 工具卡） ----
-function showBubble(text, { title, rich, sessionId, actions } = {}) {
+function showBubble(text, { title, rich, sessionId, actions, model, xp } = {}) {
   const parts = [];
-  if (title) parts.push(`<div class="bubble-title">${esc("【" + title + "】")}</div>`);
+  const badge = [];
+  if (title) badge.push(`<div class="bubble-title">${esc("【" + title + "】")}</div>`);
+  if (model) badge.push(`<span class="model-badge">${esc(model)}</span>`);
+  if (xp) badge.push(`<span class="xp-badge">+${xp} XP</span>`);
+  if (badge.length) parts.push(`<div class="bubble-head">${badge.join("")}</div>`);
   if (rich) parts.push(renderBlocks(rich));
   else if (text) parts.push(renderBlocks([{ type: "text", text }]));
   bubbleText.innerHTML = parts.join("");
@@ -179,7 +183,10 @@ api.onPetEvent(async (ev) => {
     if (saying) {
       const blocks = [{ type: "text", text: ev.text }];
       if (ev.rich) blocks.push(...ev.rich);
-      bubbleText.innerHTML = renderBlocks(blocks);
+      const badge = [];
+      if (ev.model) badge.push(`<span class="model-badge">${esc(ev.model)}</span>`);
+      if (ev.xp) badge.push(`<span class="xp-badge">+${ev.xp} XP</span>`);
+      bubbleText.innerHTML = (badge.length ? `<div class="bubble-head">${badge.join("")}</div>` : "") + renderBlocks(blocks);
       setStatus("idle");
       saying = false;
     } else {
@@ -187,7 +194,7 @@ api.onPetEvent(async (ev) => {
       poke();
     }
   } else if (ev.type === "task-done" || ev.type === "task-error") {
-    eventQueue.push({ ...ev, rich: ev.rich, sessionId: ev.sessionId });
+    eventQueue.push({ ...ev, rich: ev.rich, sessionId: ev.sessionId, model: ev.model, xp: ev.xp });
     poke();
   } else if (ev.type === "avatar-updated") {
     const list = await api.bots.list();
@@ -212,7 +219,7 @@ function poke() {
     }
     const ev = eventQueue.shift();
     if (ev) {
-      showBubble(ev.text || "", { title: ev.title || (ev.type === "task-error" ? "任务失败 ❌" : "任务完成 ✅"), rich: ev.rich, sessionId: ev.sessionId });
+      showBubble(ev.text || "", { title: ev.title || (ev.type === "task-error" ? "任务失败 ❌" : "任务完成 ✅"), rich: ev.rich, sessionId: ev.sessionId, model: ev.model, xp: ev.xp });
       setStatus(ev.type === "task-error" ? "error" : "idle");
       setAction(ev.type === "task-error" ? "think" : "celebrate", { hold: 3 });
       bounce();
@@ -345,7 +352,8 @@ async function showStatsHud() {
   const st = statuses.find((x) => x.botId === bot.id);
   const card = document.createElement("div");
   card.id = "pet-hud";
-  const xp = (bot.xp || 0);
+  const petState = (await api.pets.list().catch(() => [])).find((x) => x.botId === bot.id);
+  const xp = (petState?.xp || 0);
   const level = Math.floor(Math.sqrt(xp / 100)) + 1;
   const nextAt = level * level * 100;
   card.innerHTML = `

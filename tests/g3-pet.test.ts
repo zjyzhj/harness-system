@@ -3,6 +3,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PetSkinRegistry, DEFAULT_SKIN, petSkins, type PetAction } from "../core/pet-skin";
+import { Store } from "../core/store";
 import { Scheduler } from "../core/scheduler";
 
 describe("G3 pet-skin", () => {
@@ -144,5 +145,20 @@ describe("G5.5 skin persistence (community sprite)", () => {
     // 无 assetsDir 时 register 不落盘也不报错
     reg.register({ id: "x", name: "X", frames: { idle: ["A"], walk: ["B"], jump: ["C"], sleep: ["D"], celebrate: ["E"], work: ["F"], think: ["G"] }, fps: 2 });
     expect(reg.get("x").name).toBe("X");
+  });
+});
+
+describe("G5.5 pet xp persistence", () => {
+  test("savePet 合并语义：移动保存不丢 xp", () => {
+    const dir = mkdtempSync(join(tmpdir(), "harness-petxp-"));
+    const st = new Store(join(dir, "h"));
+    // 先给宠物加经验
+    st.savePet({ botId: "b1", x: 10, y: 20, visible: true, xp: 120 });
+    // 模拟宠物窗口移动：只提交坐标
+    st.savePet({ botId: "b1", x: 300, y: 400, visible: true });
+    const pet = st.listPets().find((p) => p.botId === "b1");
+    expect(pet?.xp).toBe(120); // xp 不丢
+    expect(pet?.x).toBe(300);  // 坐标已更新
+    st.close();
   });
 });

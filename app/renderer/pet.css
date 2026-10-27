@@ -199,3 +199,16 @@ body { display: flex; align-items: center; justify-content: center; }
   background: transparent; color: #ddd;
 }
 .ask-input-actions .primary-btn { background: #4F46E5; border-color: #4F46E5; color: #fff; }
+
+/* 气泡头部：模型徽章 + XP 增长 */
+.bubble-head { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 4px; }
+.model-badge {
+  display: inline-block; background: rgba(79,70,229,.16); color: #a5b4fc;
+  border: 1px solid rgba(79,70,229,.4); border-radius: 8px;
+  padding: 1px 7px; font-size: 10.5px; font-family: ui-monospace, Menlo, monospace;
+}
+.xp-badge {
+  display: inline-block; background: rgba(163,230,53,.14); color: #bef264;
+  border: 1px solid rgba(163,230,53,.35); border-radius: 8px;
+  padding: 1px 7px; font-size: 10.5px; font-weight: 700;
+}

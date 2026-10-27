@@ -307,8 +307,10 @@ export class Store {
   }
 
   // ---- pets ----
+  /** upsert：与已有记录合并（保留 xp/displayId 等未提供的字段，避免移动保存冲掉成长值） */
   savePet(p: PetState) {
-    this.pets[p.botId] = p;
+    const prev = this.pets[p.botId];
+    this.pets[p.botId] = prev ? { ...prev, ...p } : p;
     this.persist("pets.json", this.pets);
   }
   listPets(): PetState[] {

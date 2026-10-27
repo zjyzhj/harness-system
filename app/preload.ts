@@ -72,6 +72,7 @@ const api = {
   pets: {
     list: () => ipcRenderer.invoke("pets:list"),
     save: (p: { botId: string; x: number; y: number; visible: boolean }) => ipcRenderer.invoke("pets:save", p),
+    addXp: (botId: string, n: number) => ipcRenderer.invoke("pets:addXp", botId, n),
     getLastSession: (botId: string) => ipcRenderer.invoke("pets:getLastSession", botId),
   },
   sessions: {

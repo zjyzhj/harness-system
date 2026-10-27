@@ -113,7 +113,12 @@ async function defaultHandler(from: any, to: any, text: string, ctx: any): Promi
       history: store.listMessages(ctx.sessionId).slice(-10),
     });
     statuses.set(bot.id, { botId: bot.id, state: "idle", lastRunAt: Date.now() });
-    pushPetEvent(bot.id, { type: "reply", text: r.text.slice(0, 120) });
+    if (bot.petEnabled) {
+      const xp = grantPetXp(bot.id, 10);
+      pushPetEvent(bot.id, { type: "reply", text: r.text.slice(0, 120), model: bot.model || providers.get(bot.providerId)?.model || providers.getDefault()?.model, xp });
+    } else {
+      pushPetEvent(bot.id, { type: "reply", text: r.text.slice(0, 120) });
+    }
     return r.text;
   } catch (e) {
     statuses.set(bot.id, { botId: bot.id, state: "error", lastRunAt: Date.now(), lastError: e instanceof Error ? e.message : String(e) });
@@ -131,8 +136,16 @@ let tray: Tray | null = null;
 let mainWin: BrowserWindow | null = null;
 const petWins = new Map<string, BrowserWindow>();
 
+/** G5.5：宠物成长经验 +n（落盘 pets.json，返回新 xp） */
+function grantPetXp(botId: string, n: number): number {
+  const pet = store.listPets().find((p) => p.botId === botId) || { botId, x: 0, y: 0, visible: true };
+  const xp = (pet.xp || 0) + n;
+  store.savePet({ ...pet, xp });
+  return xp;
+}
+
 /** 向某 bot 的宠物窗口推送事件（不存在则跳过） */
-function pushPetEvent(botId: string, event: { type: string; text?: string; title?: string; rich?: import("../core/types").ContentBlock[]; sessionId?: string }) {
+function pushPetEvent(botId: string, event: { type: string; text?: string; title?: string; rich?: import("../core/types").ContentBlock[]; sessionId?: string; model?: string; xp?: number }) {
   const win = petWins.get(botId);
   if (win && !win.isDestroyed()) {
     win.webContents.send("pet:event", event);
@@ -327,7 +340,8 @@ app.whenReady().then(() => {
       const r = await runtime.handle({ bot, from: "scheduler", text: task.prompt ?? task.name, sessionId: sid });
       statuses.set(task.botId, { botId: task.botId, state: "idle", lastRunAt: Date.now() });
       system.notify(`⏰ ${bot.name} 定时任务`, task.name);
-      pushPetEvent(task.botId, { type: "task-done", title: task.name, text: r.text.slice(0, 120), rich: r.content, sessionId: sid });
+      const xp = bot.petEnabled ? grantPetXp(task.botId, 20) : undefined;
+      pushPetEvent(task.botId, { type: "task-done", title: task.name, text: r.text.slice(0, 120), rich: r.content, sessionId: sid, model: bot.model || providers.get(bot.providerId)?.model || providers.getDefault()?.model, xp });
     } catch (e) {
       const err = e instanceof Error ? e.message : String(e);
       statuses.set(task.botId, { botId: task.botId, state: "error", lastError: err });
@@ -437,7 +451,12 @@ ipcMain.handle("chat:sendStream", async (_e, botId: string, content: string | im
   try {
     const r = await runtime.handleStream({ bot, from: "user", text, content: content as any, sessionId: sid, history: store.listMessages(sid).slice(-10) }, { onBlock: push });
     statuses.set(botId, { botId, state: "idle", lastRunAt: Date.now() });
-    pushPetEvent(botId, { type: "reply", text: r.text.slice(0, 120), rich: r.content, sessionId: sid });
+    if (bot.petEnabled) {
+      const xp = grantPetXp(botId, 10);
+      pushPetEvent(botId, { type: "reply", text: r.text.slice(0, 120), rich: r.content, sessionId: sid, model: bot.model || providers.get(bot.providerId)?.model || providers.getDefault()?.model, xp });
+    } else {
+      pushPetEvent(botId, { type: "reply", text: r.text.slice(0, 120), rich: r.content, sessionId: sid });
+    }
     return { ok: true, sessionId: sid, result: r };
   } catch (e) {
     statuses.set(botId, { botId, state: "error", lastRunAt: Date.now(), lastError: e instanceof Error ? e.message : String(e) });
@@ -519,6 +538,7 @@ ipcMain.handle("pets:getLastSession", (_e, botId: string) => {
   return s.length ? s[s.length - 1].id : null;
 });
 ipcMain.handle("pets:save", (_e, p: { botId: string; x: number; y: number; visible: boolean }) => store.savePet(p));
+ipcMain.handle("pets:addXp", (_e, botId: string, n: number) => grantPetXp(botId, n));
 ipcMain.handle("sessions:list", (_e, botId?: string) => store.listSessions(botId));
 ipcMain.handle("sessions:page", (_e, opts?: { botId?: string; archived?: boolean; offset?: number; limit?: number }) => store.listSessionsPage(opts));
 ipcMain.handle("sessions:archive", (_e, sessionId: string, archived: boolean) => store.archiveSession(sessionId, archived));

@@ -119,6 +119,22 @@ export interface PetState {
   visible: boolean;
   /** G3：多显示器记忆 — 记录所在显示器 id，重启后恢复到同一屏幕 */
   displayId?: number;
+  /** G5.5：宠物成长经验（回复/任务完成触发，展示等级与经验条） */
+  xp?: number;
+}
+
+export interface SkinExport {
+  name: string;
+  color?: string;
+  desc?: string;
+  fps: number;
+  url?: string;
+  rows: number;
+  cols: number;
+  cellW?: number;
+  cellH?: number;
+  /** 源 spritesheet 文件绝对路径 */
+  path: string;
 }
 
 export interface MigrationPayload {
@@ -131,6 +147,8 @@ export interface MigrationPayload {
   /** V2：全量迁移 */
   memory?: Record<string, MemoryEntry[]>;
   skills?: Record<string, string>;        // skill key -> SKILL.md 内容
+  /** G5.5：社区宠物皮肤元数据 + 源文件路径，随迁移往返（导入端重建注册并复制文件） */
+  skins?: Record<string, SkinExport>;
   tasks?: ScheduledTask[];
   /** G4：群组与编排计划随迁移往返 */
   groups?: Group[];

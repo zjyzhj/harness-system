@@ -1,5 +1,5 @@
 import { describe, test, expect, beforeAll, afterAll } from "bun:test";
-import { mkdtempSync, writeFileSync, readFileSync, existsSync } from "node:fs";
+import { mkdtempSync, writeFileSync, readFileSync, existsSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Store } from "../core/store";
@@ -80,5 +80,56 @@ describe("mcp-client", () => {
     await c.init();
     expect(c.listTools().length).toBe(0);
     c.close();
+  });
+});
+
+describe("migration-v2 skins", () => {
+  test("导出含 skins 元数据与文件，导入后还原注册 + bot.skinId 映射", async () => {
+    // 构造带皮肤的迁移源
+    const srcHome = mkdtempSync(join(tmpdir(), "harness-v2-skin-"));
+    const srcStore = new Store(join(srcHome, "h"));
+    const srcMem = new MemorySystem(join(srcHome, "h"));
+    const srcSkills = new SkillRegistry(join(srcHome, "h", "skills"));
+    const srcSched = new Scheduler(join(srcHome, "h"));
+    const srcAssets = join(srcHome, "h", "assets");
+    const skinDir = join(srcAssets, "skins", "claude-x");
+    mkdirSync(skinDir, { recursive: true });
+    const sprites = join(skinDir, "spritesheet.webp");
+    writeFileSync(sprites, "fake-webp-bytes");
+    // 写 index.json（注册）
+    writeFileSync(join(srcAssets, "skins", "index.json"), JSON.stringify([{
+      id: "claude-x", name: "Claude 测试", color: "#D97757", desc: "社区皮肤", fps: 8,
+      frames: { idle: ["🙂"], walk: ["🚶"], jump: ["🤸"], sleep: ["😴"], celebrate: ["🎉"], work: ["🤔"], think: ["💭"] },
+      sprite: { url: "https://example.test/claude/spritesheet.webp", path: sprites, rows: 9, cols: 8, cellW: 192, cellH: 208 },
+    }], null, 2), "utf8");
+    // bot 使用该皮肤
+    const reg = new AgentRegistry(srcStore);
+    const bot = await reg.createBotFromText("创建 bot：皮肤迁移测试");
+    srcStore.saveBot({ ...bot, skinId: "claude-x" });
+    const srcMig = new MigrationV2(srcStore, srcAssets, srcMem, srcSkills, srcSched);
+
+    const payload = srcMig.exportPayload();
+    expect(payload.skins?.["claude-x"]?.rows).toBe(9);
+    expect(payload.skins?.["claude-x"]?.path).toBe(sprites);
+
+    // 导入到新 home
+    const dstHome = mkdtempSync(join(tmpdir(), "harness-v2-skin-dst-"));
+    const dstStore = new Store(join(dstHome, "h"));
+    const dstMem = new MemorySystem(join(dstHome, "h"));
+    const dstSkills = new SkillRegistry(join(dstHome, "h", "skills"));
+    const dstSched = new Scheduler(join(dstHome, "h"));
+    const dstAssets = join(dstHome, "h", "assets");
+    const dstMig = new MigrationV2(dstStore, dstAssets, dstMem, dstSkills, dstSched);
+    const r = dstMig.importFromPayload(payload);
+    expect(r.importedSkins).toBe(1);
+    // 皮肤文件复制 + index 还原
+    expect(existsSync(join(dstAssets, "skins", "claude-x", "spritesheet.webp"))).toBe(true);
+    const idx = JSON.parse(readFileSync(join(dstAssets, "skins", "index.json"), "utf8"));
+    expect(idx[0].id).toBe("claude-x");
+    expect(idx[0].sprite.cellW).toBe(192);
+    // bot.skinId 映射到新 bot id
+    const newBot = dstStore.listBots()[0];
+    expect(newBot.skinId).toBe("claude-x");
+    dstStore.close(); srcStore.close();
   });
 });
