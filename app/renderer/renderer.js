@@ -35,6 +35,12 @@ function renderBotList() {
       e.stopPropagation();
       await api.bots.setPet(b.id, !b.petEnabled);
       await refreshBots();
+
+// G3：宠物「打开完整会话」→ 主面板聚焦并跳转
+api.onOpenSession(async (sid) => {
+  if (!sid) { alert("没有可打开的会话，先和宠物聊一句吧"); return; }
+  await openSessionById(sid);
+});
     };
     el.querySelector(".detail-btn").onclick = (e) => {
       e.stopPropagation();
@@ -243,6 +249,12 @@ async function createBotFlow() {
     const bot = await api.bots.create(text);
     closeModal();
     await refreshBots();
+
+// G3：宠物「打开完整会话」→ 主面板聚焦并跳转
+api.onOpenSession(async (sid) => {
+  if (!sid) { alert("没有可打开的会话，先和宠物聊一句吧"); return; }
+  await openSessionById(sid);
+});
     selectBot(bot);
   };
   modal.querySelector("#mb-cancel").onclick = closeModal;
@@ -263,6 +275,12 @@ async function personaFlow() {
     await api.persona.generate(currentBot.id, desc || "一只蓝色狐狸，可爱");
     closeModal();
     await refreshBots();
+
+// G3：宠物「打开完整会话」→ 主面板聚焦并跳转
+api.onOpenSession(async (sid) => {
+  if (!sid) { alert("没有可打开的会话，先和宠物聊一句吧"); return; }
+  await openSessionById(sid);
+});
     selectBot(currentBot);
   };
   modal.querySelector("#mp-cancel").onclick = closeModal;
@@ -370,6 +388,12 @@ async function migrateFlow() {
     result.textContent = `✅ 导入完成：providers ${r.importedProviders} / bots ${r.importedBots} / pets ${r.importedPets}`;
     closeModal();
     await refreshBots();
+
+// G3：宠物「打开完整会话」→ 主面板聚焦并跳转
+api.onOpenSession(async (sid) => {
+  if (!sid) { alert("没有可打开的会话，先和宠物聊一句吧"); return; }
+  await openSessionById(sid);
+});
   };
   modal.querySelector("#mm-close").onclick = closeModal;
 }
@@ -408,6 +432,12 @@ async function botDetailFlow(b) {
       closeModal();
       await api.persona.generate(b.id, desc);
       await refreshBots();
+
+// G3：宠物「打开完整会话」→ 主面板聚焦并跳转
+api.onOpenSession(async (sid) => {
+  if (!sid) { alert("没有可打开的会话，先和宠物聊一句吧"); return; }
+  await openSessionById(sid);
+});
     }
   };
   modal.querySelector("#bd-chat").onclick = () => { closeModal(); selectBot(b); };
@@ -533,7 +563,13 @@ async function tasksFlow() {
       <label>cron</label><input id="mt-cron" placeholder="0 9 * * *" value="0 9 * * *" />
       <label>执行指令</label><input id="mt-prompt" placeholder="给 bot 的指令" value="生成今日早报，用中文总结" />
     </div>
-    <div class="actions"><button class="primary-btn" id="mt-add">为 ${esc(currentBot.name)} 添加</button></div>` : `<span class="hint">先选一个 bot 再添加定时任务</span>`}
+    <div class="actions"><button class="primary-btn" id="mt-add">为 ${esc(currentBot.name)} 添加</button></div>
+    <div class="kv" style="border-top:1px solid #222; padding-top:10px; margin-top:6px">
+      <label>⏰ 一次性提醒</label><input id="mt-alarm-min" type="number" min="1" value="15" style="width:70px" />
+      <label>提醒我</label><input id="mt-alarm-text" placeholder="喝水、站起来活动…" value="喝水时间到！" />
+      <label class="chk"><input id="mt-alarm-pet" type="checkbox" checked /> 宠物弹气泡提醒</label>
+    </div>
+    <div class="actions"><button class="ghost-btn" id="mt-alarm-add">添加提醒</button></div>` : `<span class="hint">先选一个 bot 再添加定时任务</span>`}
     <div id="mt-list"></div>
     <div class="actions"><button class="ghost-btn" id="mt-close">关闭</button></div>`);
   const render = async () => {
@@ -543,7 +579,7 @@ async function tasksFlow() {
       <div class="row" style="margin:4px 0">
         <button class="ghost-btn" style="flex:none" data-toggle="${t.id}">${t.enabled ? "▶️" : "⏸"}</button>
         <span style="flex:1"><b>${esc(t.name)}</b>
-          <span class="hint">${esc(t.cron)} · 已跑${t.runCount}次${t.nextRunAt ? " · 下次 " + new Date(t.nextRunAt).toLocaleString("zh-CN", { hour12: false }) : ""}</span>
+          <span class="hint">${t.kind === "once" ? "🔔 一次性" : "⏱ " + esc(t.cron)}${t.notifyPet ? " 🐾" : ""} · 已跑${t.runCount}次${t.nextRunAt ? " · " + (t.kind === "once" ? "触发时间 " : "下次 ") + new Date(t.nextRunAt).toLocaleString("zh-CN", { hour12: false }) : ""}</span>
           ${t.lastResult ? `<div class="hint">${t.lastResult === "ok" ? "✅" : "❌"} ${esc(t.lastRunLog || "")}</div>` : ""}
         </span>
         <button class="ghost-btn" data-run="${t.id}">⚡</button>
@@ -567,77 +603,23 @@ async function tasksFlow() {
     });
     render();
   };
+  const alarmBtn = modal.querySelector("#mt-alarm-add");
+  if (alarmBtn) alarmBtn.onclick = async () => {
+    const mins = parseInt(modal.querySelector("#mt-alarm-min")?.value || "15", 10);
+    await api.tasks.create({
+      botId: currentBot.id,
+      name: "🔔 " + (modal.querySelector("#mt-alarm-text")?.value.trim() || "提醒"),
+      cron: "* * * * *",
+      prompt: modal.querySelector("#mt-alarm-text")?.value.trim() || "时间到了",
+      kind: "once",
+      alarmAt: Date.now() + Math.max(1, mins) * 60_000,
+      notifyPet: modal.querySelector("#mt-alarm-pet")?.checked ?? true,
+    });
+    render();
+  };
   modal.querySelector("#mt-close").onclick = closeModal;
 }
 
-function esc(s) {
-  return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-}
-
-// ---- V3 渲染：内容块 + 轻量 markdown（白名单，安全转义） ----
-
-function renderBlocks(blocks) {
-  if (!Array.isArray(blocks)) return renderMarkdown(esc(String(blocks ?? "")));
-  return blocks.map(renderBlock).join("");
-}
-
-function renderBlock(b) {
-  switch (b.type) {
-    case "text": return renderMarkdown(esc(b.text ?? ""));
-    case "code": return `<pre class="code-block"><code${b.lang ? ` class="lang-${esc(b.lang)}"` : ""}>${esc(b.code)}</code></pre>`;
-    case "image": {
-      const src = b.dataUrl || (b.url || (b.path ? `file://${b.path}` : ""));
-      return src ? `<img class="msg-img" src="${esc(src)}" alt="${esc(b.alt || "image")}" />` : "";
-    }
-    case "tool_call": {
-      const args = b.args ? `<div class="tool-args">${esc(JSON.stringify(b.args))}</div>` : "";
-      const status = b.status ? `<span class="tool-status ${esc(b.status)}">${esc(b.status)}</span>` : "";
-      const result = b.result ? `<div class="tool-result">${esc(b.result)}</div>` : "";
-      return `<div class="tool-card"><div class="tool-head">🛠 ${esc(b.tool)} ${status}</div>${args}${result}</div>`;
-    }
-    case "file": return `<div class="file-card">📎 ${esc(b.name || b.path)}${b.size ? ` <span class="hint">${formatBytes(b.size)}</span>` : ""}</div>`;
-    case "thinking": return `<details class="thinking"><summary>💭 思考中…</summary><div>${renderMarkdown(esc(b.text))}</div></details>`;
-    default: return "";
-  }
-}
-
-/** 轻量 markdown 子集：行内 code / 粗斜体 / 链接 / 代码块 / 标题 / 列表 / 引用 */
-function renderMarkdown(src) {
-  if (!src) return "";
-  const lines = src.split(/\n/);
-  let out = "", i = 0, inCode = false, codeBuf = [], codeLang = "";
-  const inline = (t) => t
-    .replace(/`([^`]+)`/g, "<code>$1</code>")
-    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
-    .replace(/\*([^*]+)\*/g, "<em>$1</em>")
-    .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
-  while (i < lines.length) {
-    const line = lines[i];
-    if (/^```/.test(line)) {
-      if (!inCode) { inCode = true; codeBuf = []; codeLang = line.slice(3).trim(); }
-      else { inCode = false; out += `<pre class="code-block"><code${codeLang ? ` class="lang-${esc(codeLang)}"` : ""}>${esc(codeBuf.join("\n"))}</code></pre>`; }
-      i++; continue;
-    }
-    if (inCode) { codeBuf.push(line); i++; continue; }
-    if (/^###\s/.test(line)) { out += `<h3>${inline(line.slice(4))}</h3>`; }
-    else if (/^##\s/.test(line)) { out += `<h2>${inline(line.slice(3))}</h2>`; }
-    else if (/^#\s/.test(line)) { out += `<h1>${inline(line.slice(2))}</h1>`; }
-    else if (/^[-*]\s/.test(line)) { out += `<li>${inline(line.replace(/^[-*]\s/, ""))}</li>`; }
-    else if (/^>\s?/.test(line)) { out += `<blockquote>${inline(line.replace(/^>\s?/, ""))}</blockquote>`; }
-    else if (/^\d+\.\s/.test(line)) { out += `<li class="ol">${inline(line.replace(/^\d+\.\s/, ""))}</li>`; }
-    else if (!line.trim()) { out += "<br/>"; }
-    else { out += `<p>${inline(line)}</p>`; }
-    i++;
-  }
-  if (inCode) out += `<pre class="code-block"><code>${esc(codeBuf.join("\n"))}</code></pre>`;
-  return out;
-}
-
-function formatBytes(n) {
-  if (n < 1024) return n + " B";
-  if (n < 1048576) return (n / 1024).toFixed(1) + " KB";
-  return (n / 1048576).toFixed(1) + " MB";
-}
 
 
 async function mcpFlow() {
@@ -811,6 +793,12 @@ $("#input").addEventListener("keydown", (e) => {
 document.querySelectorAll(".chip").forEach((c) => (c.onclick = async () => {
   const bot = await api.bots.create(c.dataset.tpl);
   await refreshBots();
+
+// G3：宠物「打开完整会话」→ 主面板聚焦并跳转
+api.onOpenSession(async (sid) => {
+  if (!sid) { alert("没有可打开的会话，先和宠物聊一句吧"); return; }
+  await openSessionById(sid);
+});
   selectBot(bot);
 }));
 // 双击 bot 头像 → 生成形象
@@ -820,3 +808,9 @@ $("#bot-list").addEventListener("dblclick", (e) => {
 });
 
 refreshBots();
+
+// G3：宠物「打开完整会话」→ 主面板聚焦并跳转
+api.onOpenSession(async (sid) => {
+  if (!sid) { alert("没有可打开的会话，先和宠物聊一句吧"); return; }
+  await openSessionById(sid);
+});

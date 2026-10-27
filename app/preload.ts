@@ -6,9 +6,10 @@ const api = {
     create: (text: string) => ipcRenderer.invoke("bots:create", text),
     remove: (id: string) => ipcRenderer.invoke("bots:delete", id),
     setPet: (id: string, enabled: boolean) => ipcRenderer.invoke("bots:setPet", id, enabled),
+    setSkin: (id: string, skinId: string) => ipcRenderer.invoke("bots:setSkin", id, skinId),
   },
   persona: {
-    generate: (id: string, desc: string) => ipcRenderer.invoke("persona:generate", id, desc),
+    generate: (id: string, desc: string, style?: string) => ipcRenderer.invoke("persona:generate", id, desc, style),
   },
   chat: {
     send: (botId: string, text: string, sessionId?: string) => ipcRenderer.invoke("chat:send", botId, text, sessionId),
@@ -31,6 +32,9 @@ const api = {
     readFile: (path: string) => ipcRenderer.invoke("system:readFile", path),
     writeFile: (path: string, content: string) => ipcRenderer.invoke("system:writeFile", path, content),
   },
+  window: {
+    openSession: (sessionId?: string) => ipcRenderer.invoke("window:openSession", sessionId),
+  },
   migration: {
     export: (filePath: string, mask?: boolean) => ipcRenderer.invoke("migration:export", filePath, mask),
     import: (filePath: string) => ipcRenderer.invoke("migration:import", filePath),
@@ -38,6 +42,7 @@ const api = {
   pets: {
     list: () => ipcRenderer.invoke("pets:list"),
     save: (p: { botId: string; x: number; y: number; visible: boolean }) => ipcRenderer.invoke("pets:save", p),
+    getLastSession: (botId: string) => ipcRenderer.invoke("pets:getLastSession", botId),
   },
   sessions: {
     list: (botId?: string) => ipcRenderer.invoke("sessions:list", botId),
@@ -105,6 +110,13 @@ const onChatStream = (cb: (chunk: StreamBlock) => void) => {
   return () => ipcRenderer.removeListener("chat:stream", listener);
 };
 
-contextBridge.exposeInMainWorld("harness", { ...api, onPetEvent, onChatStream });
+/** 宠物请求打开主面板会话（聚焦 + 跳转） */
+const onOpenSession = (cb: (sessionId: string | null) => void) => {
+  const listener = (_e: IpcRendererEvent, sid: string | null) => cb(sid);
+  ipcRenderer.on("window:open-session", listener);
+  return () => ipcRenderer.removeListener("window:open-session", listener);
+};
+
+contextBridge.exposeInMainWorld("harness", { ...api, onPetEvent, onChatStream, onOpenSession });
 export type { StreamBlock };
 export type HarnessApi = typeof api;

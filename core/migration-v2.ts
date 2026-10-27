@@ -106,7 +106,7 @@ export class MigrationV2 {
       const newBotId = idMap.get(t.botId) ?? t.botId;
       if (!this.store.getBot(newBotId)) continue;
       try {
-        this.scheduler.create({ botId: newBotId, name: t.name, cron: t.cron, prompt: t.prompt });
+        this.scheduler.create({ botId: newBotId, name: t.name, cron: t.cron, prompt: t.prompt, kind: t.kind, alarmAt: t.alarmAt, notifyPet: t.notifyPet });
         importedTasks++;
       } catch {}
     }

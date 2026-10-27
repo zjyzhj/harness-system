@@ -1,6 +1,6 @@
 # G3-DESIGN — 桌面宠物深度化
 
-> Goal：G3 · 状态：⏳ 待实现 · 上游：[G3-spec](./G3-spec.md) · 下游：[G3-tasks](./G3-tasks.md)
+> Goal：G3 · 状态：✅ 已实现 · 上游：[G3-spec](./G3-spec.md) · 下游：[G3-tasks](./G3-tasks.md)
 
 ## 1. 现状与方案
 

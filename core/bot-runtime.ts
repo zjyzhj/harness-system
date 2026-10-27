@@ -117,7 +117,7 @@ export class BotRuntime {
       const reply = offline.reply(bot, text, this.deps.memory.list(bot.id));
       opts.onBlock({ type: "text", text: reply });
       this.recordRich(bot.id, sessionId, userContent, [{ type: "text", text: reply }], { latencyMs: Date.now() - started });
-      return { text: reply, toolCalls: [], usedSkills: [] };
+      return { text: reply, toolCalls: [], usedSkills: [], content: [{ type: "text", text: reply }] };
     }
 
     let context = this.buildContext(bot, text, opts);
@@ -170,7 +170,7 @@ export class BotRuntime {
         this.recordRich(bot.id, sessionId, userContent, blocks, meta);
         const events = this.extractMemory(bot.id, text, textReply);
         memoryEvents.push(...events);
-        return { text: textReply, toolCalls, memoryEvents, usedSkills };
+        return { text: textReply, toolCalls, memoryEvents, usedSkills, content: blocks };
       }
 
       // 执行工具并回填
@@ -188,7 +188,7 @@ export class BotRuntime {
     const fallback = "（工具调用轮数已达上限，请简化任务或减少调用）";
     const blocks: ContentBlock[] = [{ type: "text", text: fallback }];
     this.recordRich(bot.id, sessionId, userContent, blocks, { latencyMs: Date.now() - started, streamed: true });
-    return { text: fallback, toolCalls, memoryEvents, usedSkills };
+    return { text: fallback, toolCalls, memoryEvents, usedSkills, content: blocks };
   }
 
   /** 记录富消息（用户 + 助手内容块数组 + meta） */

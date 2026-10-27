@@ -107,7 +107,7 @@ let mainWin: BrowserWindow | null = null;
 const petWins = new Map<string, BrowserWindow>();
 
 /** 向某 bot 的宠物窗口推送事件（不存在则跳过） */
-function pushPetEvent(botId: string, event: { type: string; text?: string; title?: string }) {
+function pushPetEvent(botId: string, event: { type: string; text?: string; title?: string; rich?: import("../core/types").ContentBlock[]; sessionId?: string }) {
   const win = petWins.get(botId);
   if (win && !win.isDestroyed()) {
     win.webContents.send("pet:event", event);
@@ -144,7 +144,24 @@ function createPetWindow(botId: string) {
   if (petWins.has(botId)) return petWins.get(botId);
   const bot = store.getBot(botId);
   if (!bot) return;
-  const [x, y] = (store.listPets().find((p) => p.botId === botId) ? [store.listPets().find((p) => p.botId === botId)!.x, store.listPets().find((p) => p.botId === botId)!.y] : [screen.getPrimaryDisplay().workAreaSize.width - 260, screen.getPrimaryDisplay().workAreaSize.height - 340]);
+  const saved = store.listPets().find((p) => p.botId === botId);
+  let x: number, y: number;
+  if (saved) {
+    // 多显示器记忆：优先恢复到记录所在显示器（displayId），坐标换算到该屏
+    const disp = saved.displayId != null ? screen.getAllDisplays().find((d) => d.id === saved.displayId) : undefined;
+    const target = disp || screen.getDisplayNearestPoint({ x: saved.x, y: saved.y });
+    x = saved.x;
+    y = saved.y;
+    if (disp && (x < disp.workArea.x || x > disp.workArea.x + disp.workArea.width - 100 || y < disp.workArea.y || y > disp.workArea.y + disp.workArea.height - 100)) {
+      x = disp.workArea.x + disp.workArea.width - 260;
+      y = disp.workArea.y + disp.workArea.height - 340;
+    }
+    void target;
+  } else {
+    const wa = screen.getPrimaryDisplay().workArea;
+    x = wa.x + wa.width - 260;
+    y = wa.y + wa.height - 340;
+  }
   const win = new BrowserWindow({
     width: 220,
     height: 240,
@@ -162,10 +179,17 @@ function createPetWindow(botId: string) {
     },
   });
   win.loadURL(pathToFileURL(join(DIST_DIR, "renderer", "pet.html")).toString() + `?botId=${botId}`);
+  win.webContents.on("did-finish-load", () => {
+    console.log(`[harness] 宠物窗口渲染完成 🐾 ${bot.name}`);
+    win?.webContents.executeJavaScript("typeof window.harness !== 'undefined' ? 'pet-bridge-ok' : 'pet-bridge-missing'")
+      .then((r) => console.log("[harness] pet preload bridge:", r))
+      .catch(() => console.log("[harness] pet bridge check skipped"));
+  });
   win.on("closed", () => petWins.delete(botId));
   win.on("moved", () => {
     const [bx, by] = win.getPosition();
-    store.savePet({ botId, x: bx, y: by, visible: true });
+    const displayId = screen.getDisplayNearestPoint({ x: bx, y: by }).id;
+    store.savePet({ botId, x: bx, y: by, visible: true, displayId });
   });
   petWins.set(botId, win);
   return win;
@@ -190,6 +214,9 @@ app.whenReady().then(() => {
   refreshTray();
   createMainWindow();
 
+  // G3：启动时恢复已启用的宠物窗口（多显示器记忆位置）
+  for (const b of store.listBots().filter((x) => x.petEnabled)) createPetWindow(b.id);
+
   // 定时任务：到期时唤醒对应 bot（走运行时）
   scheduler.onRun = async (task) => {
     const bot = store.getBot(task.botId);
@@ -197,15 +224,26 @@ app.whenReady().then(() => {
     const sid = `sched-${task.id}-${Date.now()}`;
     try {
       statuses.set(task.botId, { botId: task.botId, state: "running", lastRunAt: Date.now(), currentTask: `⏰ ${task.name}` });
-      const r = await runtime.handle({ bot, from: "scheduler", text: task.prompt, sessionId: sid });
+      const r = await runtime.handle({ bot, from: "scheduler", text: task.prompt ?? task.name, sessionId: sid });
       statuses.set(task.botId, { botId: task.botId, state: "idle", lastRunAt: Date.now() });
       system.notify(`⏰ ${bot.name} 定时任务`, task.name);
-      pushPetEvent(task.botId, { type: "task-done", title: task.name, text: r.text.slice(0, 120) });
+      pushPetEvent(task.botId, { type: "task-done", title: task.name, text: r.text.slice(0, 120), rich: r.content, sessionId: sid });
     } catch (e) {
       const err = e instanceof Error ? e.message : String(e);
       statuses.set(task.botId, { botId: task.botId, state: "error", lastError: err });
-      pushPetEvent(task.botId, { type: "task-error", title: task.name, text: err.slice(0, 120) });
+      pushPetEvent(task.botId, { type: "task-error", title: task.name, text: err.slice(0, 120), sessionId: sid });
     }
+  };
+  scheduler.onAlarm = (task) => {
+    const bot = store.getBot(task.botId);
+    if (!bot) return;
+    system.notify(`⏰ ${bot.name} 提醒`, task.name);
+    pushPetEvent(task.botId, {
+      type: "alarm",
+      title: task.name,
+      text: task.prompt ?? "时间到啦！⏰",
+      sessionId: task.sessionId,
+    });
   };
   scheduler.start();
 
@@ -235,10 +273,18 @@ ipcMain.handle("bots:setPet", (_e, id: string, enabled: boolean) => {
   registry.setPetEnabled(id, enabled);
   if (enabled) createPetWindow(id); else petWins.get(id)?.close();
 });
-ipcMain.handle("persona:generate", async (_e, id: string, desc: string) => {
+ipcMain.handle("bots:setSkin", (_e, id: string, skinId: string) => {
   const bot = store.getBot(id);
   if (!bot) throw new Error("bot 不存在");
-  const result = await personaWithImage().generate(bot, desc);
+  const next = { ...bot, skinId };
+  store.saveBot(next);
+  pushPetEvent(id, { type: "skin-updated", text: `皮肤已切换为「${skinId}」` });
+  return next;
+});
+ipcMain.handle("persona:generate", async (_e, id: string, desc: string, style?: "default" | "pixel" | "cute") => {
+  const bot = store.getBot(id);
+  if (!bot) throw new Error("bot 不存在");
+  const result = await personaWithImage().generate(bot, desc, style);
   // 宠物立即刷新形象（头像 + 名字 + 性格）
   pushPetEvent(id, { type: "avatar-updated", text: desc, title: result.card?.name || bot.name });
   return result;
@@ -260,7 +306,7 @@ ipcMain.handle("chat:sendStream", async (_e, botId: string, content: string | im
   try {
     const r = await runtime.handleStream({ bot, from: "user", text, content: content as any, sessionId: sid, history: store.listMessages(sid).slice(-10) }, { onBlock: push });
     statuses.set(botId, { botId, state: "idle", lastRunAt: Date.now() });
-    pushPetEvent(botId, { type: "reply", text: r.text.slice(0, 120) });
+    pushPetEvent(botId, { type: "reply", text: r.text.slice(0, 120), rich: r.content, sessionId: sid });
     return { ok: true, sessionId: sid, result: r };
   } catch (e) {
     statuses.set(botId, { botId, state: "error", lastRunAt: Date.now(), lastError: e instanceof Error ? e.message : String(e) });
@@ -286,7 +332,22 @@ ipcMain.handle("system:readFile", (_e, path: string) => system.readFile(path));
 ipcMain.handle("system:writeFile", (_e, path: string, content: string) => system.writeFile(path, content));
 ipcMain.handle("migration:export", (_e, filePath: string, mask?: boolean) => migration.exportToFile(filePath, { maskKeys: mask }));
 ipcMain.handle("migration:import", (_e, filePath: string) => { const r = migration.importFromFile(filePath); registerAll(); return r; });
+ipcMain.handle("window:openSession", (_e, sessionId?: string) => {
+  if (mainWin && !mainWin.isDestroyed()) {
+    mainWin.show();
+    mainWin.focus();
+    mainWin.webContents.send("window:open-session", sessionId ?? null);
+  } else {
+    createMainWindow();
+    mainWin?.webContents.once("did-finish-load", () => mainWin?.webContents.send("window:open-session", sessionId ?? null));
+  }
+  return true;
+});
 ipcMain.handle("pets:list", () => store.listPets());
+ipcMain.handle("pets:getLastSession", (_e, botId: string) => {
+  const s = store.listSessions(botId);
+  return s.length ? s[s.length - 1].id : null;
+});
 ipcMain.handle("pets:save", (_e, p: { botId: string; x: number; y: number; visible: boolean }) => store.savePet(p));
 ipcMain.handle("sessions:list", (_e, botId?: string) => store.listSessions(botId));
 ipcMain.handle("sessions:page", (_e, opts?: { botId?: string; archived?: boolean; offset?: number; limit?: number }) => store.listSessionsPage(opts));

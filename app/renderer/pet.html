@@ -8,15 +8,23 @@
 </head>
 <body>
 <div id="pet" class="draggable">
-  <div id="pet-avatar"><span id="pet-emoji">🤖</span><span id="pet-mood-badge">🙂</span></div>
+  <div id="pet-avatar">
+    <span id="pet-sprite">🤖</span>
+    <span id="pet-mood-badge">🙂</span>
+  </div>
   <div id="pet-name"></div>
   <div id="pet-status" class="status-idle"></div>
 </div>
 <div id="bubble" class="bubble hidden">
   <div id="bubble-text"></div>
+  <div id="bubble-actions" class="bubble-actions hidden">
+    <button id="bubble-open" class="bubble-btn">📂 查看完整会话</button>
+    <button id="bubble-close" class="bubble-btn">✕</button>
+  </div>
   <textarea id="bubble-input" placeholder="发消息…"></textarea>
   <button id="bubble-send">发送</button>
 </div>
+<script src="./common-render.js"></script>
 <script src="./pet.js"></script>
 </body>
 </html>

@@ -26,6 +26,8 @@ export interface Bot {
   avatarPath?: string;
   personaCard?: PersonaCard;
   createdAt: number;
+  /** G3：宠物皮肤 id（pixel/cute/default…） */
+  skinId?: string;
 }
 
 export interface PersonaCard {
@@ -115,6 +117,8 @@ export interface PetState {
   x: number;
   y: number;
   visible: boolean;
+  /** G3：多显示器记忆 — 记录所在显示器 id，重启后恢复到同一屏幕 */
+  displayId?: number;
 }
 
 export interface MigrationPayload {
@@ -193,7 +197,7 @@ export interface ScheduledTask {
   botId: string;
   name: string;
   cron: string;                // 5 段 cron
-  prompt: string;              // 到期时给 bot 的指令
+  prompt?: string;              // 到期时给 bot 的指令（once 闹钟可省略）
   enabled: boolean;
   lastRunAt?: number;
   nextRunAt?: number;
@@ -205,6 +209,13 @@ export interface ScheduledTask {
   lastResult?: string;
   lastError?: string;
   lastRunLog?: string;
+  /** G3：一次性闹钟（kind="once"） */
+  kind?: "cron" | "once";
+  alarmAt?: number;
+  /** G3：到期是否推送到宠物气泡 */
+  notifyPet?: boolean;
+  /** G3：一次性闹钟关联的会话 id（用于宠物「打开会话」跳转） */
+  sessionId?: string;
 }
 
 export interface ToolCall {
@@ -225,6 +236,8 @@ export interface RuntimeResult {
   toolCalls: ToolCall[];       // 本次回复前的工具调用记录
   memoryEvents?: MemoryEntry[]; // 本次产生的记忆事件（自动写入）
   usedSkills: string[];        // 实际用到的技能 key
+  /** G3：富内容块（工具卡/代码/图片），供宠物/面板展示 */
+  content?: ContentBlock[];
 }
 
 // ---- V2 扩展 ----

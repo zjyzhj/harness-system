@@ -24,7 +24,7 @@ export class PersonaGenerator {
     private imageGen?: ImageGenProvider,
   ) {}
 
-  async generate(bot: Bot, description: string): Promise<{ avatarPath?: string; card: PersonaCard }> {
+  async generate(bot: Bot, description: string, style?: "default" | "pixel" | "cute"): Promise<{ avatarPath?: string; card: PersonaCard }> {
     const avatarPath = join(this.assetsDir, `${bot.id}.png`);
     const card = buildCard(bot, description);
 
@@ -40,7 +40,9 @@ export class PersonaGenerator {
       avatarPathOut = fallbackAvatar(bot, description, avatarPath);
     }
 
-    const next = { ...bot, avatarPath: avatarPathOut, personaCard: card };
+    // G3：形象→皮肤联动（默认兜底）
+    const skinId = style ?? inferSkin(description);
+    const next = { ...bot, avatarPath: avatarPathOut, personaCard: card, skinId };
     this.store.saveBot(next);
     return { avatarPath: avatarPathOut, card };
   }
@@ -130,4 +132,12 @@ function pickEmoji(desc: string): string {
   ];
   for (const [re, e] of map) if (re.test(desc)) return e;
   return "🤖";
+}
+
+
+/** 从一句话形象描述推断皮肤风格（无显式 style 时） */
+export function inferSkin(desc: string): "default" | "pixel" | "cute" {
+  if (/像素|马赛克|复古|游戏/.test(desc)) return "pixel";
+  if (/圆润|可爱|软萌|萌|卡通|圆/.test(desc)) return "cute";
+  return "default";
 }

@@ -102,3 +102,45 @@ body { display: flex; align-items: center; justify-content: center; }
 #pet[data-mood="working"] #pet-mood-badge { animation: moodSpin 1.2s linear infinite; }
 @keyframes moodPop { 0% { transform: scale(.6); } 60% { transform: scale(1.25); } 100% { transform: scale(1); } }
 @keyframes moodSpin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+
+/* ---- G3 帧动画 + 富气泡 + 皮肤 ---- */
+#pet-sprite {
+  position: relative;
+  display: flex; align-items: center; justify-content: center;
+  width: 100%; height: 100%; font-size: 44px;
+}
+#pet-sprite img { width: 100%; height: 100%; object-fit: cover; }
+#pet-sprite .action-badge {
+  position: absolute; right: -2px; top: -2px; font-size: 18px;
+  filter: drop-shadow(0 2px 4px rgba(0,0,0,.6));
+  pointer-events: none;
+}
+#pet[data-mood="working"] #pet-sprite { animation: workBob 1s ease-in-out infinite; }
+#pet[data-mood="happy"] #pet-sprite { animation: happyWiggle 1.2s ease-in-out infinite; }
+#pet[data-mood="excited"] #pet-sprite { animation: excitedSpin .7s ease-in-out; transform-origin: center; }
+#pet[data-mood="sleepy"] #pet-sprite { filter: brightness(.9); }
+#pet[data-mood="tired"] #pet-sprite { filter: saturate(.8); }
+
+@keyframes workBob {
+  0%, 100% { transform: translateY(0) rotate(0deg); }
+  50% { transform: translateY(-3px) rotate(2deg); }
+}
+
+.bubble-title { color: #9ca3ff; font-weight: 600; margin-bottom: 4px; }
+.bubble-actions { display: flex; gap: 6px; margin-bottom: 6px; }
+.bubble-actions.hidden { display: none; }
+.bubble-btn {
+  flex: 1; background: #2a2a36; color: #cbd5ff; border: 1px solid #44445a;
+  border-radius: 8px; padding: 6px 10px; font-size: 12px; cursor: pointer;
+}
+.bubble-btn:hover { background: #34344a; }
+#bubble-text .tool-card, #bubble-text .file-card, #bubble-text .code-block {
+  margin: 6px 0; background: rgba(255,255,255,.06); border-radius: 8px; padding: 8px;
+}
+#bubble-text .tool-head { font-weight: 600; color: #fbbf24; }
+#bubble-text .tool-args, #bubble-text .tool-result {
+  margin-top: 4px; font-size: 11px; color: #b8b8c8; white-space: pre-wrap;
+  font-family: ui-monospace, Menlo, monospace; word-break: break-all;
+}
+#bubble-text .file-card { color: #7dd3fc; }
+#bubble-text img.msg-img { max-width: 100%; border-radius: 8px; margin: 4px 0; }

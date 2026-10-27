@@ -17,6 +17,8 @@ export class Scheduler {
 
   /** 到期触发回调：task → 交给 BotRuntime 执行 */
   onRun: ((task: ScheduledTask) => Promise<void>) | null = null;
+  /** G3：一次性闹钟到期回调（notifyPet 时才由上层接宠物推送） */
+  onAlarm: ((task: ScheduledTask) => void) | null = null;
 
   constructor(private home: string) {
     this.file = join(home, "tasks.json");
@@ -39,19 +41,23 @@ export class Scheduler {
     return this.tasks.filter((t) => t.botId === botId);
   }
 
-  create(input: { botId: string; name: string; cron: string; prompt: string; maxRetries?: number }): ScheduledTask {
-    if (!isValidCron(input.cron)) throw new Error(`cron 表达式无效: ${input.cron}（应为 5 段：分 时 日 月 周）`);
+  create(input: { botId: string; name: string; cron: string; prompt?: string; maxRetries?: number; kind?: "cron" | "once"; alarmAt?: number; notifyPet?: boolean }): ScheduledTask {
+    const kind = input.kind ?? "cron";
+    if (kind === "cron" && !isValidCron(input.cron)) throw new Error(`cron 表达式无效: ${input.cron}（应为 5 段：分 时 日 月 周）`);
     const t: ScheduledTask = {
       id: randomUUID(),
       botId: input.botId,
       name: input.name,
       cron: input.cron,
-      prompt: input.prompt,
+      prompt: input.prompt ?? input.name,
       enabled: true,
       maxRetries: input.maxRetries ?? 2,
-      nextRunAt: nextCronTime(input.cron, Date.now()),
+      nextRunAt: kind === "once" ? (input.alarmAt ?? Date.now() + 60_000) : nextCronTime(input.cron, Date.now()),
       runCount: 0,
       createdAt: Date.now(),
+      kind,
+      alarmAt: input.alarmAt,
+      notifyPet: input.notifyPet,
     };
     this.tasks.push(t);
     this.persist();
@@ -94,6 +100,12 @@ export class Scheduler {
     try {
       const due = this.tasks.filter((t) => t.enabled && t.nextRunAt && t.nextRunAt <= now);
       for (const t of due) {
+        if (t.kind === "once") {
+          // 一次性闹钟：触发一次即禁用；通知宠物
+          this.update(t.id, { lastRunAt: now, runCount: t.runCount + 1, enabled: false, lastResult: "ok", lastRunLog: `⏰ ${new Date(now).toISOString()} 闹钟触发` });
+          if (t.notifyPet && this.onAlarm) this.onAlarm(t);
+          continue;
+        }
         const next = nextCronTime(t.cron, now);
         this.update(t.id, { lastRunAt: now, nextRunAt: next, runCount: t.runCount + 1, lastResult: "running" });
         if (this.onRun) {
