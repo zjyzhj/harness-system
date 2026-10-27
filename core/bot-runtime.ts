@@ -4,6 +4,7 @@ import type { ProviderCenter } from "./provider-center";
 import type { MemorySystem } from "./memory-system";
 import type { SkillRegistry } from "./skill-registry";
 import type { SystemKit } from "./system-kit";
+import type { SystemAccess } from "./system-access";
 import { ToolExecutor, BUILTIN_TOOL_DESCRIPTIONS } from "./tool-executor";
 import { trimHistoryToBudget } from "./context-budget";
 import { OfflinePersona } from "./offline-persona";
@@ -15,6 +16,7 @@ export interface RuntimeDeps {
   memory: MemorySystem;
   skills: SkillRegistry;
   system?: SystemKit;
+  systemAccess?: SystemAccess;
   executor?: ToolExecutor;
   offline?: OfflinePersona;
   mcp?: McpClient;
@@ -40,6 +42,7 @@ const TOOL_BLOCK_RE = /```tool\s*\n([\s\S]*?)\n```/g;
  * 对 OpenAI 兼容 API 和 CLI 适配器都通用，兼容性最好（成熟 CLI bot 常用方案）。
  */
 export class BotRuntime {
+  private lastSessionId: string | undefined;
   constructor(private deps: RuntimeDeps) {}
 
   /** 主入口：处理一条用户/bot 消息，返回最终回复文本（兼记录消息） */
@@ -108,6 +111,7 @@ export class BotRuntime {
     opts: RuntimeOptions & { onBlock: (b: ContentBlock) => void },
   ): Promise<RuntimeResult> {
     const { bot, text, sessionId } = input;
+    this.lastSessionId = sessionId;
     const userContent: string | ContentBlock[] = input.content ?? text;
     const maxRounds = opts?.maxToolRounds ?? 3;
     const provider = this.deps.providers.get(bot.providerId) || this.deps.providers.getDefault();
@@ -257,6 +261,29 @@ export class BotRuntime {
       // G2：语义检索（哈希向量 + 关键词双通道），级联全局
       const hits = await this.deps.memory.retrieveCascade(bot.id, [], q, 6);
       return { output: hits.length ? hits.map((h) => `- [${h.namespace ?? "bot"}] ${h.content}`).join("\n") : "（暂无相关记忆）" };
+    }
+    if (t.tool === "apple.openApp" || t.tool === "apple.activate" || t.tool === "apple.type" || t.tool === "apple.click" || t.tool === "apple.hotkey" || t.tool === "apple.tellApp") {
+      // G5：AppleScript 应用控制（授权后）
+      if (!this.deps.systemAccess) return { output: "系统访问未启用" };
+      const action = t.tool.slice(6);
+      const out = await this.deps.systemAccess.apple(bot.id, action, args);
+      return { output: out };
+    }
+    if (t.tool === "screen.screenshot") {
+      // G5：屏幕截图（授权后）→ 直接注入会话 image 块
+      if (!this.deps.systemAccess) return { output: "系统访问未启用" };
+      const rect = args.rect as Record<string, unknown> | undefined;
+      const r = await this.deps.systemAccess.screenshot(bot.id, rect ? {
+        x: Number(rect.x ?? 0), y: Number(rect.y ?? 0),
+        w: Number(rect.w ?? 800), h: Number(rect.h ?? 600),
+      } : undefined);
+      if (args.inject !== false) {
+        const sid = this.lastSessionId;
+        if (sid) {
+          this.deps.store.addMessage({ sessionId: sid, from: bot.id, to: "user", role: "assistant", content: [{ type: "text", text: `📸 截图` }, { type: "image", dataUrl: r.dataUrl, alt: "截图" }], kind: "chat", createdAt: Date.now() });
+        }
+      }
+      return { output: `截图已保存: ${r.path}` };
     }
     if (t.tool === "notify") {
       if (this.deps.system) await this.deps.system.notify(String(args.title ?? bot.name), String(args.body ?? ""));

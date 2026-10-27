@@ -1,20 +1,20 @@
 # G5-TASKS — 系统深度接入
 
-> Goal：G5 · 状态：⏳ 待实现 · 上游：[G5-design](./G5-design.md)
+> Goal：G5 · 状态：✅ 已实现 · 上游：[G5-design](./G5-design.md)
 
 ## 0. 总览
 
 | 任务 | 内容 | 出口 | 状态 |
 |------|------|------|------|
-| T5.0 | ConsentCenter（grant/revoke/once/ttl/expire） | 授权生命周期单测 | ⬜ |
-| T5.1 | 授权弹窗 IPC（bot 名/能力/一次/长期/拒绝） | 未授权调用挂起等待 | ⬜ |
-| T5.2 | AuditLog（append-only jsonl + 查询/导出） | 每次调用落一条 | ⬜ |
-| T5.3 | SystemAccess.apple（openApp/activate/type/click/hotkey 模板） | 模板校验 + 真 osascript 冒烟 | ⬜ |
-| T5.4 | 截图（区域/全屏 → image 块注入会话） | 授权后截图可用 | ⬜ |
-| T5.5 | bash 白名单分组（dev/read/net/io）+ 强确认命令 | 分组放行 + rm 强确认 | ⬜ |
-| T5.6 | TCC 引导检测（辅助功能/屏幕录制） | 状态检测 + 引导打开设置 | ⬜ |
-| T5.7 | 面板授权矩阵 + 审计日志页 | UI 撤销/查看/导出 | ⬜ |
-| T5.8 | 集成验收（F1–F9） | 全绿 + 冒烟 | ⬜ |
+| T5.0 | ConsentCenter（grant/revoke/once/ttl/expire） | 授权生命周期单测 | ✅ |
+| T5.1 | 授权弹窗 IPC（bot 名/能力/一次/长期/拒绝） | 未授权调用挂起等待 | ✅ |
+| T5.2 | AuditLog（append-only jsonl + 查询/导出） | 每次调用落一条 | ✅ |
+| T5.3 | SystemAccess.apple（openApp/activate/type/click/hotkey 模板） | 模板校验 + 真 osascript 冒烟 | ✅ |
+| T5.4 | 截图（区域/全屏 → image 块注入会话） | 授权后截图可用 | ✅ |
+| T5.5 | bash 白名单分组（dev/read/net/io）+ 强确认命令 | 分组放行 + rm 强确认 | ✅ |
+| T5.6 | TCC 引导检测（辅助功能/屏幕录制） | 状态检测 + 引导打开设置 | ✅ |
+| T5.7 | 面板授权矩阵 + 审计日志页 | UI 撤销/查看/导出 | ✅ |
+| T5.8 | 集成验收（F1–F9） | 全绿 + 冒烟 | ✅ |
 
 ## 1. 顺序
 

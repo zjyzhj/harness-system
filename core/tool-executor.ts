@@ -3,6 +3,8 @@ import { readFileSync, writeFileSync, existsSync, readdirSync, statSync, mkdirSy
 import { join, resolve, normalize, extname } from "node:path";
 import type { SystemKit } from "./system-kit";
 import type { MemorySystem } from "./memory-system";
+import type { ConsentCenter, Cap } from "./consent-center";
+import type { AuditLog } from "./audit-log";
 
 export interface ToolResult {
   output: string;
@@ -16,6 +18,12 @@ export interface ExecutorOptions {
   deniedCommands?: string[];     // 明确禁止（如 rm -rf /）
   maxOutputBytes?: number;
   maxExecMs?: number;
+  /** G5：授权中心（bash 分组需授权） */
+  consent?: ConsentCenter;
+  /** G5：审计（每次 bash 落一条） */
+  audit?: AuditLog;
+  /** G5：bash 分组映射（命令 → cap），空则保持旧白名单逻辑 */
+  bashGroups?: Record<string, Cap>;
 }
 
 const SAFE_COMMANDS = [
@@ -33,6 +41,10 @@ const SAFE_COMMANDS = [
 export class ToolExecutor {
   private opts: Required<Pick<ExecutorOptions, "allowedRoots" | "allowedCommands" | "deniedCommands" | "maxOutputBytes" | "maxExecMs">> & ExecutorOptions;
 
+  private consent?: ConsentCenter;
+  private audit?: AuditLog;
+  private bashGroups: Record<string, Cap>;
+
   constructor(opts: ExecutorOptions, private system?: SystemKit, private memory?: MemorySystem) {
     this.opts = {
       allowedRoots: opts.allowedRoots,
@@ -41,6 +53,9 @@ export class ToolExecutor {
       maxOutputBytes: opts.maxOutputBytes ?? 16_000,
       maxExecMs: opts.maxExecMs ?? 30_000,
     };
+    this.consent = opts.consent;
+    this.audit = opts.audit;
+    this.bashGroups = opts.bashGroups ?? {};
   }
 
   /** 统一执行入口 */
@@ -59,7 +74,7 @@ export class ToolExecutor {
       case "fs.read": return this.fsRead(String(args.path ?? ""));
       case "fs.write": return this.fsWrite(String(args.path ?? ""), String(args.content ?? ""));
       case "fs.list": return this.fsList(String(args.path ?? "."));
-      case "bash.run": return this.bashRun(String(args.command ?? ""));
+      case "bash.run": return this.bashRun(String(args.command ?? ""), String(args.botId ?? "user"));
       case "web.fetch": return this.webFetch(String(args.url ?? ""));
       case "notify": return this.notify(String(args.title ?? "通知"), String(args.body ?? ""));
       case "memory.add": return this.memoryAdd(String(args.botId ?? ""), args);
@@ -101,12 +116,24 @@ export class ToolExecutor {
   }
 
   // ---- bash ----
-  private bashRun(cmd: string): Promise<string> {
+  private async bashRun(cmd: string, callerBotId = "user"): Promise<string> {
     if (!cmd.trim()) throw new Error("命令为空");
     if (this.opts.deniedCommands.some((d) => cmd.includes(d))) throw new Error(`命令被安全策略禁止: ${cmd.slice(0, 60)}`);
     const first = cmd.trim().split(/\s+/)[0];
-    const allowed = this.opts.allowedCommands?.length === 0 || this.opts.allowedCommands?.includes(first) || (first.includes("/") && existsSync(first));
-    if (!allowed) throw new Error(`命令 ${first} 不在白名单（可用: ${this.opts.allowedCommands?.slice(0, 20).join(", ")}…）`);
+    const t0 = Date.now();
+    // G5：分组授权（有 bashGroups 时）
+    if (Object.keys(this.bashGroups).length && this.consent) {
+      const cmdGroup = this.bashGroups[first];
+      if (!cmdGroup) throw new Error(`命令 ${first} 未在任何授权分组（可用分组: ${[...new Set(Object.values(this.bashGroups))].join(", ")}）`);
+      // 危险命令强确认（二次确认）
+      const dangerous = /(^|\s)rm\s+-rf\s+\/|diskutil\s+erase|sudo\s|dd\s+if=|mkfs/.test(cmd);
+      const granted = await this.consent.request(callerBotId, cmdGroup, `执行命令: ${cmd.slice(0, 80)}`, { requiresStrongConsent: dangerous });
+      this.audit?.append({ botId: callerBotId, cap: cmdGroup, action: "bash.run", args: cmd.slice(0, 300), granted: granted.granted, ok: undefined, latencyMs: Date.now() - t0 });
+      if (!granted.granted) throw new Error(`bash 能力「${cmdGroup}」未授权`);
+    } else {
+      const allowed = this.opts.allowedCommands?.length === 0 || this.opts.allowedCommands?.includes(first) || (first.includes("/") && existsSync(first));
+      if (!allowed) throw new Error(`命令 ${first} 不在白名单（可用: ${this.opts.allowedCommands?.slice(0, 20).join(", ")}…）`);
+    }
     return new Promise((resolvePromise, reject) => {
       const child = exec(cmd, { timeout: this.opts.maxExecMs, maxBuffer: this.opts.maxOutputBytes * 2 }, (err, stdout, stderr) => {
         if (err && !stdout) {
@@ -156,8 +183,14 @@ export class ToolExecutor {
 export const BUILTIN_TOOL_DESCRIPTIONS = `- fs.read: 读取白名单内文件内容。参数: path
 - fs.write: 写入文件（白名单内）。参数: path, content
 - fs.list: 列出目录内容。参数: path
-- bash.run: 执行白名单命令（如 curl/ls/cat/git）。参数: command
+- bash.run: 执行分组授权命令（bash:read 只读 / bash:dev git构建 / bash:net 网络 / bash:io 文件操作，会弹授权）。参数: command
 - web.fetch: 抓取网页文本。参数: url
 - notify: 发送系统通知。参数: title, body
 - memory.add: 保存持久记忆。参数: botId, content, kind
-- memory.search: 检索记忆。参数: botId, query`;
+- memory.search: 检索记忆。参数: botId, query
+- apple.openApp: 打开/激活应用（授权后）。参数: app
+- apple.activate: 激活已打开应用。参数: app
+- apple.type: 键盘输入文本（辅助功能授权）。参数: text
+- apple.hotkey: 发送快捷键（如 Cmd+C）。参数: key
+- apple.tellApp: 向应用发 AppleScript 命令。参数: app, script
+- screen.screenshot: 屏幕截图（授权后注入会话 image 块）。参数: rect?: {x,y,w,h}`;

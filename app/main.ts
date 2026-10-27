@@ -3,8 +3,9 @@
  * Tray(菜单栏) + 主控窗口 + 宠物窗口(无边框透明)
  * 核心逻辑全部在 core/（纯 TS），这里只做宿主桥接。
  */
-import { app, BrowserWindow, Tray, Menu, ipcMain, clipboard, Notification, screen, nativeImage } from "electron";
+import { app, BrowserWindow, Tray, Menu, ipcMain, dialog, clipboard, Notification, screen, nativeImage } from "electron";
 import { join } from "node:path";
+import { writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
 // 应用根：electron . 运行时 getAppPath() 返回项目根目录
@@ -24,6 +25,9 @@ import { Scheduler } from "../core/scheduler";
 import { GroupRegistry } from "../core/group-registry";
 import { Orchestrator, planFromText } from "../core/orchestrator";
 import { GatewayServer } from "../core/gateway-server";
+import { ConsentCenter, CAP_LABELS } from "../core/consent-center";
+import { AuditLog } from "../core/audit-log";
+import { SystemAccess } from "../core/system-access";
 import { BotRuntime, skillFromText } from "../core/bot-runtime";
 import { OfflinePersona } from "../core/offline-persona";
 import { ToolExecutor, BUILTIN_TOOL_DESCRIPTIONS } from "../core/tool-executor";
@@ -61,11 +65,24 @@ bus.setGroups(groups);
 const orchestrator = new Orchestrator({ store, groups, providers }, home);
 const migration = new MigrationV2(store, assetsDir, memory, skills, scheduler, groups, orchestrator);
 const workspace = join(home, "workspace");
-const executor = new ToolExecutor({ allowedRoots: [workspace] }, system, memory);
+const consent = new ConsentCenter(home);
+const audit = new AuditLog(home);
+const systemAccess = new SystemAccess(consent, audit, { workDir: workspace, screenshotDir: join(workspace, "screenshots") });
+const executor = new ToolExecutor({
+  allowedRoots: [workspace],
+  consent,
+  audit,
+  bashGroups: {
+    echo: "bash:read", ls: "bash:read", cat: "bash:read", head: "bash:read", tail: "bash:read", grep: "bash:read", rg: "bash:read", find: "bash:read", pwd: "bash:read", date: "bash:read", whoami: "bash:read", wc: "bash:read", sort: "bash:read", uniq: "bash:read", sed: "bash:read", awk: "bash:read", jq: "bash:read", df: "bash:read", du: "bash:read",
+    git: "bash:dev", npm: "bash:dev", pnpm: "bash:dev", bun: "bash:dev", node: "bash:dev", swift: "bash:dev", make: "bash:dev",
+    curl: "bash:net", wget: "bash:net", ping: "bash:net", dig: "bash:net", nslookup: "bash:net",
+    mkdir: "bash:io", touch: "bash:io", cp: "bash:io", mv: "bash:io", rm: "bash:io", chmod: "bash:io", chown: "bash:io", open: "bash:io",
+  },
+}, system, memory);
 const mcp = new McpClient(loadMcpServers());
 void mcp.init();
 const statuses = new Map<string, AgentStatus>();
-const runtime = new BotRuntime({ store, providers, memory, skills, system, executor, offline: new OfflinePersona(), mcp });
+const runtime = new BotRuntime({ store, providers, memory, skills, system, systemAccess, executor, offline: new OfflinePersona(), mcp });
 
 // 形象生成：有图像 provider 时用真 API，否则降级
 function personaWithImage() {
@@ -118,6 +135,26 @@ function pushPetEvent(botId: string, event: { type: string; text?: string; title
   if (win && !win.isDestroyed()) {
     win.webContents.send("pet:event", event);
   }
+}
+
+// G5：macOS 辅助功能 / 屏幕录制 TCC 权限检测
+function tccStatus() {
+  return {
+    accessibility: (() => {
+      try {
+        const { execFileSync } = require("node:child_process");
+        const out = execFileSync("osascript", ["-e", "tell application \"System Events\" to return UI elements enabled"], { timeout: 8000 }).toString();
+        return out.trim() === "true";
+      } catch { return false; }
+    })(),
+    screen: (() => {
+      try {
+        const { execFileSync } = require("node:child_process");
+        execFileSync("screencapture", ["-x", "/dev/null"], { timeout: 5000 });
+        return true;
+      } catch { return false; }
+    })(),
+  };
 }
 
 function createMainWindow() {
@@ -230,6 +267,37 @@ app.whenReady().then(() => {
     const sid = `plan-${Date.now()}-${stage.id}`;
     const r = await runtime.handle({ bot, from: "orchestrator", text: stage.prompt, sessionId: sid });
     return r.text;
+  };
+
+  // G5：授权弹窗（用户批准/一次/长期/拒绝；危险操作强确认）
+  consent.decider = (req) => {
+    const bot = store.getBot(req.botId);
+    const name = bot?.name || req.botId;
+    const danger = req.requiresStrongConsent ? "\n\n⚠️ 危险操作，请确认身份后输入 confirm 批准。" : "";
+    const btn = dialog.showMessageBoxSync(mainWin as BrowserWindow, {
+      type: danger ? "warning" : "question",
+      title: `系统授权请求 — ${name}`,
+      message: `${name} 请求使用「${req.cap}」能力`,
+      detail: `${req.description}${danger}`,
+      buttons: ["批准一次", "长期批准", "拒绝"],
+      defaultId: 2,
+      cancelId: 2,
+      noLink: true,
+    });
+    if (danger && btn !== 2) {
+      // 危险操作二次确认：输入 confirm
+      const input = dialog.showMessageBoxSync(mainWin as BrowserWindow, {
+        type: "warning",
+        title: "危险操作二次确认",
+        message: "输入 confirm 以确认执行危险操作",
+        buttons: ["我输入了 confirm", "取消"],
+        defaultId: 1,
+      });
+      if (input !== 0) return "deny" as const;
+    }
+    if (btn === 0) return "allow-once" as const;
+    if (btn === 1) return "allow" as const;
+    return "deny" as const;
   };
 
   // G4：HTTP 网关（config.gateway 开启时）
@@ -378,6 +446,18 @@ ipcMain.handle("plans:createFromText", async (_e, text: string, ownerBotId = "us
 ipcMain.handle("plans:list", (_e, botId?: string) => botId ? orchestrator.listForBot(botId) : orchestrator.list());
 ipcMain.handle("plans:run", async (_e, planId: string) => { const plan = orchestrator.list().find((x) => x.id === planId); if (!plan) throw new Error("计划不存在"); return orchestrator.run(plan.id); });
 ipcMain.handle("plans:cancel", (_e, planId: string) => orchestrator.cancel(planId));
+// G5：授权 + 审计 + TCC
+ipcMain.handle("consent:list", (_e, botId?: string) => consent.list(botId));
+ipcMain.handle("consent:grant", (_e, botId: string, cap: string, opts?: { once?: boolean; ttlMs?: number }) => consent.grant(botId, cap as any, opts));
+ipcMain.handle("consent:revoke", (_e, botId: string, cap?: string) => consent.revoke(botId, cap as any));
+ipcMain.handle("consent:caps", () => Object.entries(CAP_LABELS).map(([id, label]) => ({ id, label })));
+ipcMain.handle("audit:list", (_e, opts?: any) => audit.query(opts));
+ipcMain.handle("audit:export", (_e, filePath: string) => {
+  const events = audit.exportAll();
+  writeFileSync(filePath, JSON.stringify(events, null, 2), "utf8");
+  return events.length;
+});
+ipcMain.handle("system:tcc", () => tccStatus());
 ipcMain.handle("providers:list", () => providers.list());
 ipcMain.handle("providers:add", (_e, input: any) => providers.addProvider(input));
 ipcMain.handle("providers:test", (_e, id: string) => providers.test(id));

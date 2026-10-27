@@ -737,6 +737,75 @@ async function plansFlow() {
   modal.querySelector("#mp-close").onclick = closeModal;
 }
 
+/* G5 面板：系统授权矩阵 + 审计日志 + TCC 状态 */
+
+async function sysaccessFlow() {
+  const modal = openModal(`
+    <h2>🛡 系统授权与审计</h2>
+    <div class="hint">默认 deny：bot 请求系统能力时弹出授权，批准后按组放行。所有操作留痕审计。</div>
+    <div id="sa-tcc" class="kv"></div>
+    <div id="sa-matrix"></div>
+    <div class="actions">
+      <button class="ghost-btn" id="sa-audit-refresh">📋 刷新审计</button>
+      <button class="ghost-btn" id="sa-audit-export">⇩ 导出审计</button>
+      <button class="ghost-btn" id="sa-close">关闭</button>
+    </div>
+    <div id="sa-audit" style="margin-top:8px"></div>`);
+
+  // TCC 状态
+  const tcc = await api.system.tcc();
+  const tccBox = modal.querySelector("#sa-tcc");
+  tccBox.innerHTML = `
+    <label>macOS 权限</label>
+    <span>辅助功能：${tcc.accessibility ? "✅ 已授权" : "❌ 未授权（System Events 需要）"}
+      ${!tcc.accessibility ? '<button class="ghost-btn" id="sa-open-tcc">打开设置</button>' : ""}</span>
+    <span>屏幕录制：${tcc.screen ? "✅ 已授权" : "❌ 未授权（截图需要）"}</span>`;
+  const openBtn = tccBox.querySelector("#sa-open-tcc");
+  if (openBtn) openBtn.onclick = () => api.system.notify("提示", "请到 系统设置 → 隐私与安全性 → 辅助功能 授权 Harness Bot");
+
+  const renderMatrix = async () => {
+    const [grants, caps] = await Promise.all([api.consent.list(), api.consent.caps()]);
+    const box = modal.querySelector("#sa-matrix");
+    box.innerHTML = `<div class="hint">当前授权（按 bot × 能力）：</div>` +
+      grants.map((g) => `
+        <div class="row" style="margin:4px 0">
+          <span style="flex:1"><b>${esc(bots.find((b) => b.id === g.botId)?.name || g.botId)}</b>
+            <span class="hint">${esc(caps.find((c) => c.id === g.cap)?.label || g.cap)}${g.once ? " · 一次" : ""}${g.expiresAt ? " · 到期 " + new Date(g.expiresAt).toLocaleString("zh-CN", { hour12: false }) : " · 长期"}</span>
+          </span>
+          <button class="ghost-btn" data-revoke="${g.botId}" data-cap="${g.cap}" style="flex:none">撤销</button>
+        </div>`).join("") || `<span class="hint">暂无授权 — bot 请求系统能力时会弹窗征求你的同意</span>`;
+    box.querySelectorAll("[data-revoke]").forEach((b) => (b.onclick = async () => {
+      await api.consent.revoke(b.dataset.revoke, b.dataset.cap);
+      renderMatrix();
+    }));
+  };
+  renderMatrix();
+
+  const renderAudit = async () => {
+    const events = await api.audit.list({ limit: 50 });
+    const box = modal.querySelector("#sa-audit");
+    box.innerHTML = `<div class="hint">审计日志（最近 ${events.length} 条）：</div>` +
+      events.map((ev) => `
+        <div class="row" style="margin:2px 0;font-size:12px">
+          <span class="hint" style="flex:none">${new Date(ev.at).toLocaleTimeString("zh-CN", { hour12: false })}</span>
+          <span style="flex:none">${esc(bots.find((b) => b.id === ev.botId)?.name || ev.botId)}</span>
+          <span style="flex:none">${esc(ev.cap)}</span>
+          <span style="flex:1" class="hint">${esc(ev.action)} ${ev.granted ? "✅" : "🚫"}${ev.ok === false ? " ❌" : ev.ok ? " ✓" : ""}</span>
+        </div>`).join("") || `<span class="hint">暂无审计记录</span>`;
+  };
+  renderAudit();
+
+  modal.querySelector("#sa-audit-refresh").onclick = renderAudit;
+  modal.querySelector("#sa-audit-export").onclick = async () => {
+    const path = prompt("导出审计日志到（绝对路径）：", "/tmp/harness-audit-export.json");
+    if (path) {
+      const n = await api.audit.export(path);
+      alert(`已导出 ${n} 条审计日志 → ${path}`);
+    }
+  };
+  modal.querySelector("#sa-close").onclick = closeModal;
+}
+
 // ---- bind ----
 $("#new-bot-btn").onclick = createBotFlow;
 $("#settings-btn").onclick = settingsFlow;
@@ -746,6 +815,7 @@ $("#skills-btn").onclick = skillsFlow;
 $("#tasks-btn").onclick = tasksFlow;
 $("#groups-btn").onclick = groupsFlow;
 $("#plans-btn").onclick = plansFlow;
+$("#sysaccess-btn").onclick = sysaccessFlow;
 $("#mcp-btn").onclick = mcpFlow;
 $("#send-btn").onclick = send;
 // V3：图片粘贴/拖入 → 消息以富块发送

@@ -1,6 +1,6 @@
 # G5-DESIGN — 系统深度接入
 
-> Goal：G5 · 状态：⏳ 待实现 · 上游：[G5-spec](./G5-spec.md) · 下游：[G5-tasks](./G5-tasks.md)
+> Goal：G5 · 状态：✅ 已实现 · 上游：[G5-spec](./G5-spec.md) · 下游：[G5-tasks](./G5-tasks.md)
 
 ## 1. 方案
 

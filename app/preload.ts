@@ -34,18 +34,29 @@ const api = {
     run: (planId: string) => ipcRenderer.invoke("plans:run", planId),
     cancel: (planId: string) => ipcRenderer.invoke("plans:cancel", planId),
   },
-  providers: {
-    list: () => ipcRenderer.invoke("providers:list"),
-    add: (input: any) => ipcRenderer.invoke("providers:add", input),
-    test: (id: string) => ipcRenderer.invoke("providers:test", id),
-    remove: (id: string) => ipcRenderer.invoke("providers:delete", id),
-    capabilities: () => ipcRenderer.invoke("providers:capabilities"),
+  consent: {
+    list: (botId?: string) => ipcRenderer.invoke("consent:list", botId),
+    grant: (botId: string, cap: string, opts?: any) => ipcRenderer.invoke("consent:grant", botId, cap, opts),
+    revoke: (botId: string, cap?: string) => ipcRenderer.invoke("consent:revoke", botId, cap),
+    caps: () => ipcRenderer.invoke("consent:caps"),
+  },
+  audit: {
+    list: (opts?: any) => ipcRenderer.invoke("audit:list", opts),
+    export: (filePath: string) => ipcRenderer.invoke("audit:export", filePath),
   },
   system: {
     notify: (title: string, body: string) => ipcRenderer.invoke("system:notify", title, body),
     copy: (text: string) => ipcRenderer.invoke("system:copy", text),
     readFile: (path: string) => ipcRenderer.invoke("system:readFile", path),
     writeFile: (path: string, content: string) => ipcRenderer.invoke("system:writeFile", path, content),
+    tcc: () => ipcRenderer.invoke("system:tcc"),
+  },
+  providers: {
+    list: () => ipcRenderer.invoke("providers:list"),
+    add: (input: any) => ipcRenderer.invoke("providers:add", input),
+    test: (id: string) => ipcRenderer.invoke("providers:test", id),
+    remove: (id: string) => ipcRenderer.invoke("providers:delete", id),
+    capabilities: () => ipcRenderer.invoke("providers:capabilities"),
   },
   window: {
     openSession: (sessionId?: string) => ipcRenderer.invoke("window:openSession", sessionId),
