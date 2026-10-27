@@ -5,6 +5,8 @@ import type { Store } from "./store";
 import type { MemorySystem } from "./memory-system";
 import type { SkillRegistry } from "./skill-registry";
 import type { Scheduler } from "./scheduler";
+import type { GroupRegistry } from "./group-registry";
+import type { Orchestrator } from "./orchestrator";
 
 /**
  * V2 全量迁移：bots / providers / memory / skills / tasks / pets / assets
@@ -17,6 +19,8 @@ export class MigrationV2 {
     private memory: MemorySystem,
     private skills: SkillRegistry,
     private scheduler: Scheduler,
+    private groups?: GroupRegistry,
+    private orchestrator?: Orchestrator,
   ) {}
 
   /** 导出：附带 memory/skills/tasks 快照 */
@@ -33,6 +37,8 @@ export class MigrationV2 {
       memory: {},
       skills: {},
       tasks: this.scheduler.list(),
+      groups: this.groups?.list() ?? [],
+      plans: this.orchestrator?.list() ?? [],
     };
     // 每个 bot 的记忆
     for (const b of payload.bots) {
@@ -52,10 +58,10 @@ export class MigrationV2 {
     writeFileSync(filePath, JSON.stringify(this.exportPayload(opts), null, 2), "utf8");
   }
 
-  importFromPayload(payload: MigrationPayload): { importedProviders: number; importedBots: number; importedPets: number; importedMemories: number; importedSkills: number; importedTasks: number } {
+  importFromPayload(payload: MigrationPayload): { importedProviders: number; importedBots: number; importedPets: number; importedMemories: number; importedSkills: number; importedTasks: number; importedGroups: number; importedPlans: number } {
     if (!payload.format?.startsWith("harness-bot-migration/v")) throw new Error(`不支持的迁移格式：${payload.format}`);
     const usedNames = new Set(this.store.listBots().map((b) => b.name.toLowerCase()));
-    let importedBots = 0, importedPets = 0, importedMemories = 0, importedSkills = 0, importedTasks = 0;
+    let importedBots = 0, importedPets = 0, importedMemories = 0, importedSkills = 0, importedTasks = 0, importedGroups = 0, importedPlans = 0;
 
     // providers
     for (const p of payload.providers ?? []) {
@@ -119,7 +125,26 @@ export class MigrationV2 {
       this.store.savePet({ ...pet, botId });
       importedPets++;
     }
-    return { importedProviders: payload.providers?.length ?? 0, importedBots, importedPets, importedMemories, importedSkills, importedTasks };
+    // groups（映射新 bot id）
+    for (const g of payload.groups ?? []) {
+      const newMembers = g.members.map((m) => idMap.get(m) ?? m).filter((m) => this.store.getBot(m));
+      const newAdmin = idMap.get(g.admin) ?? g.admin;
+      this.groups?.create(g.name, this.store.getBot(newAdmin) ? newAdmin : "user", newMembers);
+      importedGroups++;
+    }
+    // plans（仅导入 pending/done 历史，按新 bot id 映射）
+    for (const p of payload.plans ?? []) {
+      try {
+        const stages = p.stages.map((st) => ({
+          botId: idMap.get(st.botId) ?? st.botId,
+          prompt: st.prompt,
+          mode: st.mode,
+        })).filter((st) => this.store.getBot(st.botId));
+        if (stages.length) this.orchestrator?.create({ ownerBotId: idMap.get(p.ownerBotId) ?? p.ownerBotId, title: p.title, stages });
+        importedPlans++;
+      } catch {}
+    }
+    return { importedProviders: payload.providers?.length ?? 0, importedBots, importedPets, importedMemories, importedSkills, importedTasks, importedGroups, importedPlans };
   }
 
   importFromFile(filePath: string) {

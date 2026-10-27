@@ -132,6 +132,9 @@ export interface MigrationPayload {
   memory?: Record<string, MemoryEntry[]>;
   skills?: Record<string, string>;        // skill key -> SKILL.md 内容
   tasks?: ScheduledTask[];
+  /** G4：群组与编排计划随迁移往返 */
+  groups?: Group[];
+  plans?: OrchestrationPlan[];
 }
 
 // ---- V3 适配器抽象（对齐 CowAgent LLMModel）----
@@ -264,4 +267,41 @@ export interface TaskRunLog {
   ok: boolean;
   error?: string;
   prompt: string;
+}
+
+// ---- G4 协作与编排 ----
+
+/** 群组（与 core/group-registry.ts 的 Group 同构，供迁移序列化） */
+export interface Group {
+  id: string;
+  name: string;
+  members: string[];
+  admin: string;          // "user" 或 bot id
+  createdAt: number;
+}
+
+export type OrchestrationStageMode = "seq" | "fan";
+
+export interface OrchestrationStage {
+  id: string;
+  botId: string;
+  prompt: string;
+  mode: OrchestrationStageMode;
+  status: "pending" | "running" | "done" | "error";
+  result?: string;
+  error?: string;
+  startedAt?: number;
+  finishedAt?: number;
+  retries: number;
+}
+
+export interface OrchestrationPlan {
+  id: string;
+  ownerBotId: string;       // "user" 或 bot id（仅主控/授权可发起）
+  title: string;
+  createdAt: number;
+  status: "pending" | "running" | "done" | "error";
+  stages: OrchestrationStage[];
+  currentStage?: string;
+  result?: string;          // 最终产出
 }

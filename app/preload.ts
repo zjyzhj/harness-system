@@ -19,6 +19,21 @@ const api = {
   bus: {
     send: (fromId: string, toId: string, text: string) => ipcRenderer.invoke("bus:send", fromId, toId, text),
   },
+  groups: {
+    list: (botId?: string) => ipcRenderer.invoke("groups:list", botId),
+    create: (name: string, members: string[]) => ipcRenderer.invoke("groups:create", name, members),
+    join: (groupId: string, botId: string) => ipcRenderer.invoke("groups:join", groupId, botId),
+    leave: (groupId: string, botId: string) => ipcRenderer.invoke("groups:leave", groupId, botId),
+    remove: (groupId: string) => ipcRenderer.invoke("groups:remove", groupId),
+    broadcast: (groupId: string, fromId: string, text: string) => ipcRenderer.invoke("groups:broadcast", groupId, fromId, text),
+  },
+  plans: {
+    create: (input: any) => ipcRenderer.invoke("plans:create", input),
+    createFromText: (text: string, ownerBotId?: string) => ipcRenderer.invoke("plans:createFromText", text, ownerBotId),
+    list: (botId?: string) => ipcRenderer.invoke("plans:list", botId),
+    run: (planId: string) => ipcRenderer.invoke("plans:run", planId),
+    cancel: (planId: string) => ipcRenderer.invoke("plans:cancel", planId),
+  },
   providers: {
     list: () => ipcRenderer.invoke("providers:list"),
     add: (input: any) => ipcRenderer.invoke("providers:add", input),

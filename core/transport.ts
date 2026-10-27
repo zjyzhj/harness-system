@@ -8,9 +8,11 @@ import type { Bot, ChatMessage } from "./types";
 export interface TransportMessage {
   from: string;          // bot id
   to: string;            // bot id（远程）
-  text: string;
+  text: string;          // 纯文本摘要（LLM 投递用）
+  content?: string | import("./types").ContentBlock[];  // G4：富内容块（图片/文件/工具结果）
   sessionId?: string;
-  kind?: "bot-to-bot";
+  kind?: "bot-to-bot" | "group";
+  groupId?: string;
   timestamp: number;
 }
 

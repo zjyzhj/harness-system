@@ -161,6 +161,15 @@ async function send() {
   const text = $("#input").value.trim();
   if (!text || !currentBot) return;
   $("#input").value = "";
+  // @组名 → 群组广播（G4）
+  const groups = await api.groups.list();
+  const gMatch = text.match(/^@([\p{L}\p{N}_\-\u4e00-\u9fa5]+)\s+([\s\S]+)/u);
+  const g = gMatch ? groups.find((x) => x.name === gMatch[1]) : null;
+  if (g) {
+    const members = await api.groups.broadcast(g.id, currentBot.id, gMatch[2]);
+    members.forEach((m) => appendMsg(m));
+    return;
+  }
   // @bot名 → bot 间通信（保持非流式，走 bus）
   const atMatch = text.match(/^@(\S+)\s+([\s\S]+)/);
   if (atMatch) {
@@ -638,6 +647,96 @@ async function mcpFlow() {
   modal.querySelector("#mcp-close").onclick = closeModal;
 }
 
+/* G4 面板：群组 + 编排 */
+
+async function groupsFlow() {
+  const modal = openModal(`
+    <h2>👥 群组</h2>
+    <div class="hint">建组后输入框用「@组名 任务」可广播给所有成员。</div>
+    ${currentBot ? `
+    <div class="kv">
+      <label>新建群组</label><input id="mg-name" placeholder="产品组" />
+      <label>成员（勾选 bot）</label><div id="mg-members" style="display:flex;flex-wrap:wrap;gap:6px"></div>
+    </div>
+    <div class="actions"><button class="primary-btn" id="mg-add">创建群组</button></div>` : `<span class="hint">先选一个 bot 再建组</span>`}
+    <div id="mg-list"></div>
+    <div class="actions"><button class="ghost-btn" id="mg-close">关闭</button></div>`);
+  const membersBox = modal.querySelector("#mg-members");
+  const renderMemberChips = () => {
+    membersBox.innerHTML = bots.map((b) => `<label class="chk"><input type="checkbox" value="${b.id}" /> ${esc(b.name)}</label>`).join("");
+  };
+  renderMemberChips();
+  const render = async () => {
+    const gs = await api.groups.list();
+    const box = modal.querySelector("#mg-list");
+    box.innerHTML = gs.length ? gs.map((g) => `
+      <div class="row" style="margin:6px 0;align-items:flex-start">
+        <div style="flex:1"><b>@${esc(g.name)}</b>
+          <div class="hint">成员：${g.members.map((m) => { const b = bots.find((x) => x.id === m); return esc(b?.name || m); }).join("、") || "—"}</div>
+        </div>
+        <button class="ghost-btn" data-bcast="${g.id}" style="flex:none">📢 广播</button>
+        <button class="ghost-btn" data-del="${g.id}" style="flex:none">✕</button>
+      </div>`).join("") : `<span class="hint">还没有群组</span>`;
+    box.querySelectorAll("[data-bcast]").forEach((b) => (b.onclick = async () => {
+      const text = prompt("广播内容（会发给组内其他成员）：", "大家好，@早会时间到");
+      if (text) { await api.groups.broadcast(b.dataset.bcast, currentBot.id, text); render(); }
+    }));
+    box.querySelectorAll("[data-del]").forEach((b) => (b.onclick = async () => { await api.groups.remove(b.dataset.del); render(); }));
+  };
+  render();
+  modal.querySelector("#mg-add").onclick = async () => {
+    const name = modal.querySelector("#mg-name").value.trim();
+    if (!name) { alert("输入群组名"); return; }
+    const members = [...membersBox.querySelectorAll("input:checked")].map((i) => i.value);
+    if (currentBot && !members.includes(currentBot.id)) members.push(currentBot.id);
+    await api.groups.create(name, members);
+    render();
+  };
+  modal.querySelector("#mg-close").onclick = closeModal;
+}
+
+async function plansFlow() {
+  const modal = openModal(`
+    <h2>🧩 编排</h2>
+    <div class="hint">一句话让多个 bot 协作：<b>「让 A 调研，B 总结，C 写报告」</b>。LLM 自动拆阶段，无模型时规则兜底。</div>
+    <div class="kv">
+      <label>编排指令</label><textarea id="mp-text" rows="2" placeholder="让 A 调研，B 总结，C 写报告">让 ${bots[0]?.name || "A"} 调研，${bots[1]?.name || "B"} 总结，${bots[2]?.name || "C"} 写报告</textarea>
+    </div>
+    <div class="actions"><button class="primary-btn" id="mp-create">创建并运行</button></div>
+    <div id="mp-list"></div>
+    <div class="actions"><button class="ghost-btn" id="mp-close">关闭</button></div>`);
+  const render = async () => {
+    const plans = await api.plans.list();
+    const box = modal.querySelector("#mp-list");
+    box.innerHTML = plans.length ? plans.map((p) => `
+      <div class="row" style="margin:6px 0;align-items:flex-start">
+        <div style="flex:1"><b>${esc(p.title)}</b>
+          <span class="hint">${p.status === "done" ? "✅" : p.status === "error" ? "❌" : p.status === "running" ? "⏳" : "⏸"} ${esc(p.status)}</span>
+          ${p.result ? `<div class="hint" style="white-space:pre-wrap;max-height:60px;overflow:auto">📄 ${esc(p.result.slice(0, 180))}</div>` : ""}
+          <div style="display:flex;gap:4px;flex-wrap:wrap;margin-top:4px">
+            ${p.stages.map((st) => `<span class="stage-chip st-${st.status}">${esc(bots.find((b) => b.id === st.botId)?.name || st.botId)}:${st.status === "done" ? "✅" : st.status === "error" ? "❌" : st.status === "running" ? "⏳" : "⏸"}</span>`).join("")}
+          </div>
+        </div>
+        <button class="ghost-btn" data-run="${p.id}" style="flex:none">▶</button>
+        <button class="ghost-btn" data-can="${p.id}" style="flex:none">⏹</button>
+      </div>`).join("") : `<span class="hint">还没有编排计划</span>`;
+    box.querySelectorAll("[data-run]").forEach((b) => (b.onclick = async () => { await api.plans.run(b.dataset.run); render(); }));
+    box.querySelectorAll("[data-can]").forEach((b) => (b.onclick = async () => { await api.plans.cancel(b.dataset.can); render(); }));
+  };
+  render();
+  modal.querySelector("#mp-create").onclick = async () => {
+    const text = modal.querySelector("#mp-text").value.trim();
+    if (!text) { alert("输入编排指令"); return; }
+    try {
+      const plan = await api.plans.createFromText(text);
+      render();
+      await api.plans.run(plan.id);
+      render();
+    } catch (e) { alert(e.message || e); }
+  };
+  modal.querySelector("#mp-close").onclick = closeModal;
+}
+
 // ---- bind ----
 $("#new-bot-btn").onclick = createBotFlow;
 $("#settings-btn").onclick = settingsFlow;
@@ -645,6 +744,8 @@ $("#migrate-btn").onclick = migrateFlow;
 $("#memory-btn").onclick = memoryFlow;
 $("#skills-btn").onclick = skillsFlow;
 $("#tasks-btn").onclick = tasksFlow;
+$("#groups-btn").onclick = groupsFlow;
+$("#plans-btn").onclick = plansFlow;
 $("#mcp-btn").onclick = mcpFlow;
 $("#send-btn").onclick = send;
 // V3：图片粘贴/拖入 → 消息以富块发送

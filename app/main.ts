@@ -21,6 +21,9 @@ import { SystemKit } from "../core/system-kit";
 import { MemorySystem } from "../core/memory-system";
 import { SkillRegistry, BUILTIN_SKILL_TEMPLATES } from "../core/skill-registry";
 import { Scheduler } from "../core/scheduler";
+import { GroupRegistry } from "../core/group-registry";
+import { Orchestrator, planFromText } from "../core/orchestrator";
+import { GatewayServer } from "../core/gateway-server";
 import { BotRuntime, skillFromText } from "../core/bot-runtime";
 import { OfflinePersona } from "../core/offline-persona";
 import { ToolExecutor, BUILTIN_TOOL_DESCRIPTIONS } from "../core/tool-executor";
@@ -53,7 +56,10 @@ if (skills.list().length === 0) {
   }
 }
 const scheduler = new Scheduler(home);
-const migration = new MigrationV2(store, assetsDir, memory, skills, scheduler);
+const groups = new GroupRegistry(home);
+bus.setGroups(groups);
+const orchestrator = new Orchestrator({ store, groups, providers }, home);
+const migration = new MigrationV2(store, assetsDir, memory, skills, scheduler, groups, orchestrator);
 const workspace = join(home, "workspace");
 const executor = new ToolExecutor({ allowedRoots: [workspace] }, system, memory);
 const mcp = new McpClient(loadMcpServers());
@@ -217,6 +223,30 @@ app.whenReady().then(() => {
   // G3：启动时恢复已启用的宠物窗口（多显示器记忆位置）
   for (const b of store.listBots().filter((x) => x.petEnabled)) createPetWindow(b.id);
 
+  // G4：编排器阶段执行器（走 bot 运行时）
+  orchestrator.stageRunner = async (stage) => {
+    const bot = store.getBot(stage.botId);
+    if (!bot) throw new Error(`阶段 bot 不存在: ${stage.botId}`);
+    const sid = `plan-${Date.now()}-${stage.id}`;
+    const r = await runtime.handle({ bot, from: "orchestrator", text: stage.prompt, sessionId: sid });
+    return r.text;
+  };
+
+  // G4：HTTP 网关（config.gateway 开启时）
+  void (async () => {
+    try {
+      const cfg = store.readConfig() as { gateway?: { port?: number; token?: string } };
+      const gw = cfg.gateway;
+      if (gw?.port) {
+        const server = new GatewayServer(gw.port, gw.token || "harness-default-token", bus);
+        const port = await server.start();
+        console.log(`[harness] 网关已启动 :${port} 🕸`);
+      }
+    } catch (e) {
+      console.log("[harness] 网关启动失败（忽略）:", e instanceof Error ? e.message : e);
+    }
+  })();
+
   // 定时任务：到期时唤醒对应 bot（走运行时）
   scheduler.onRun = async (task) => {
     const bot = store.getBot(task.botId);
@@ -321,6 +351,33 @@ ipcMain.handle("bus:send", async (_e, fromId: string, toId: string, text: string
   if (!from || !to) throw new Error("bot 不存在");
   return bus.send(from, to, text);
 });
+// G4：群组
+ipcMain.handle("groups:list", (_e, botId?: string) => groups.list(botId));
+ipcMain.handle("groups:create", (_e, name: string, members: string[]) => {
+  const g = groups.create(name, "user", members);
+  return g;
+});
+ipcMain.handle("groups:join", (_e, groupId: string, botId: string) => groups.join(groupId, botId));
+ipcMain.handle("groups:leave", (_e, groupId: string, botId: string) => groups.leave(groupId, botId));
+ipcMain.handle("groups:remove", (_e, groupId: string) => groups.remove(groupId));
+ipcMain.handle("groups:broadcast", async (_e, groupId: string, fromId: string, text: string) => {
+  const from = store.getBot(fromId);
+  if (!from) throw new Error("发起 bot 不存在");
+  return bus.broadcast(groupId, from, text);
+});
+// G4：编排
+ipcMain.handle("plans:create", (_e, input: { ownerBotId: string; title: string; stages: Array<{ botId: string; prompt: string; mode?: string }> }) =>
+  orchestrator.create({ ownerBotId: input.ownerBotId, title: input.title, stages: input.stages.map((s) => ({ botId: s.botId, prompt: s.prompt, mode: s.mode === "fan" ? "fan" as const : "seq" as const })) }));
+ipcMain.handle("plans:createFromText", async (_e, text: string, ownerBotId = "user") => {
+  const p = providers.getDefault();
+  const complete = p ? (prov: any, req: any) => providers.complete(prov, req) : undefined;
+  const stages = await planFromText(text, store.listBots(), p ? { provider: p as any, complete } : undefined);
+  if (!stages.length) throw new Error("没解析出可用 bot 阶段");
+  return orchestrator.create({ ownerBotId, title: text.slice(0, 30), stages });
+});
+ipcMain.handle("plans:list", (_e, botId?: string) => botId ? orchestrator.listForBot(botId) : orchestrator.list());
+ipcMain.handle("plans:run", async (_e, planId: string) => { const plan = orchestrator.list().find((x) => x.id === planId); if (!plan) throw new Error("计划不存在"); return orchestrator.run(plan.id); });
+ipcMain.handle("plans:cancel", (_e, planId: string) => orchestrator.cancel(planId));
 ipcMain.handle("providers:list", () => providers.list());
 ipcMain.handle("providers:add", (_e, input: any) => providers.addProvider(input));
 ipcMain.handle("providers:test", (_e, id: string) => providers.test(id));

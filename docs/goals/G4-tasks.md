@@ -1,20 +1,20 @@
 # G4-TASKS — 多 Bot 协作与编排
 
-> Goal：G4 · 状态：⏳ 待实现 · 上游：[G4-design](./G4-design.md)
+> Goal：G4 · 状态：✅ 已实现 · 上游：[G4-design](./G4-design.md)
 
 ## 0. 总览
 
 | 任务 | 内容 | 出口 | 状态 |
 |------|------|------|------|
-| T4.0 | TransportMessage 富消息体 + MessageBus 富互发 | 图片块互发测试 | ⬜ |
-| T4.1 | GroupRegistry（建组/成员/@组解析） | 广播到组员 | ⬜ |
-| T4.2 | Orchestrator 顺序流水线 | A→B→C 单测 | ⬜ |
-| T4.3 | Orchestrator fan-out + 汇总 + 超时/取消 | 并行与超时测试 | ⬜ |
-| T4.4 | planFromText（LLM 解析 + 规则降级） | 一句话编排可用 | ⬜ |
-| T4.5 | GatewayServer + 客户端互通 | 跨进程（本机两实例） | ⬜ |
-| T4.6 | 面板：群组页 + 编排视图 + @组 输入 | UI 操作全链路 | ⬜ |
-| T4.7 | 迁移（群组/编排结果）+ 权限校验 | 往返 + 非授权拒绝 | ⬜ |
-| T4.8 | 集成验收（F1–F7） | 全绿 + 冒烟 | ⬜ |
+| T4.0 | TransportMessage 富消息体 + MessageBus 富互发 | 图片块互发测试 | ✅ |
+| T4.1 | GroupRegistry（建组/成员/@组解析） | 广播到组员 | ✅ |
+| T4.2 | Orchestrator 顺序流水线 | A→B→C 单测 | ✅ |
+| T4.3 | Orchestrator fan-out + 汇总 + 超时/取消 | 并行与超时测试 | ✅ |
+| T4.4 | planFromText（LLM 解析 + 规则降级） | 一句话编排可用 | ✅ |
+| T4.5 | GatewayServer + 客户端互通 | 跨进程（本机两实例） | ✅ |
+| T4.6 | 面板：群组页 + 编排视图 + @组 输入 | UI 操作全链路 | ✅ |
+| T4.7 | 迁移（群组/编排结果）+ 权限校验 | 往返 + 非授权拒绝 | ✅ |
+| T4.8 | 集成验收（F1–F7） | 全绿 + 冒烟 | ✅ |
 
 ## 1. 顺序
 

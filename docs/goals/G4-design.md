@@ -1,6 +1,6 @@
 # G4-DESIGN — 多 Bot 协作与编排
 
-> Goal：G4 · 状态：⏳ 待实现 · 上游：[G4-spec](./G4-spec.md) · 下游：[G4-tasks](./G4-tasks.md)
+> Goal：G4 · 状态：✅ 已实现 · 上游：[G4-spec](./G4-spec.md) · 下游：[G4-tasks](./G4-tasks.md)
 
 ## 1. 现状与方案
 
