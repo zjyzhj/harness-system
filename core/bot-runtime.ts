@@ -253,8 +253,10 @@ export class BotRuntime {
       return { output: `已记住：${entry.content}` };
     }
     if (t.tool === "recall" || t.tool === "memory.search") {
-      const hits = this.deps.memory.search(bot.id, String(args.query ?? args.q ?? ""), 6);
-      return { output: hits.length ? hits.map((h) => `- ${h.content}`).join("\n") : "（暂无相关记忆）" };
+      const q = String(args.query ?? args.q ?? "");
+      // G2：语义检索（哈希向量 + 关键词双通道），级联全局
+      const hits = await this.deps.memory.retrieveCascade(bot.id, [], q, 6);
+      return { output: hits.length ? hits.map((h) => `- [${h.namespace ?? "bot"}] ${h.content}`).join("\n") : "（暂无相关记忆）" };
     }
     if (t.tool === "notify") {
       if (this.deps.system) await this.deps.system.notify(String(args.title ?? bot.name), String(args.body ?? ""));

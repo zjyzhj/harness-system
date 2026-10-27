@@ -416,31 +416,73 @@ async function botDetailFlow(b) {
 
 async function memoryFlow() {
   if (!currentBot) return;
-  const entries = await api.memory.list(currentBot.id);
+  const ns = await currentMemoryNs();
+  const entries = await api.memory.list(ns === "global" ? "global" : currentBot.id);
+  const namespaces = await api.memory.namespaces();
+  const memo = await api.memory.memo(ns);
   const modal = openModal(`
-    <h2>🧠 ${esc(currentBot.name)} 的持久记忆</h2>
-    <div class="row"><input id="mm-add" placeholder="记一条事实/笔记，如：用户偏好简洁回答" /></div>
+    <h2>🧠 ${esc(currentBot.name)} 的持久记忆 <span class="hint">(${esc(ns)})</span></h2>
+    <div class="row" style="gap:4px;flex-wrap:wrap">
+      ${["bot:" + currentBot.id, ...namespaces.filter((n) => n !== "bot:" + currentBot.id && n !== "global"), "global"].filter((n, i, a) => a.indexOf(n) === i).map((n) => `
+        <button class="ghost-btn memo-ns${n === ns ? " active" : ""}" data-ns="${esc(n)}">${esc(n)}</button>`).join("")}
+    </div>
+    <div class="row"><input id="mm-add" placeholder="记一条事实/笔记（写入当前 namespace）" /></div>
     <div class="actions"><button class="primary-btn" id="mm-add-btn">记住</button></div>
     <div id="mm-entries">
       ${entries.length ? entries.map((e) => `
         <div class="row" style="margin:4px 0">
-          <span class="hint" style="flex:none">${esc(e.kind)}</span>
+          <span class="hint" style="flex:none">${esc(e.kind)}${e.source ? ` · ${esc(e.source)}` : ""}</span>
           <span style="flex:1">${esc(e.content)}</span>
-          <button class="ghost-btn" data-del="${e.id}">✕</button>
-        </div>`).join("") : `<span class="hint">还没有记忆。可以让 bot 记住偏好，或说「记住：…」</span>`}
+          <button class="ghost-btn" data-del="${esc(e.id)}">✕</button>
+        </div>`).join("") : `<span class="hint">${ns.includes("group:") || ns === "global" ? "该共享空间暂无记忆" : "还没有记忆。可以让 bot 记住偏好，或说「记住：…」"}</span>`}
     </div>
-    <div class="actions"><button class="ghost-btn" id="mm-close">关闭</button></div>`);
+    <div class="row" style="gap:6px;margin-top:6px;align-items:center">
+      <b style="font-size:12.5px">MEMORY.md 权威总结</b>
+      <button class="ghost-btn" id="mm-rewrite" style="font-size:11px">✨ 用 LLM 重写</button>
+      <button class="ghost-btn" id="mm-merge" style="font-size:11px">🧹 合并重复</button>
+    </div>
+    <textarea id="mm-memo" rows="5" style="width:100%;background:#1a1a1a;color:#eaeaea;border:1px solid #333;border-radius:8px;padding:8px;font-size:12.5px;margin-top:4px">${esc(memo)}</textarea>
+    <div class="actions"><button class="ghost-btn" id="mm-save-memo">保存总结</button><button class="ghost-btn" id="mm-close">关闭</button></div>`);
+
+  const currentNs = () => modal.querySelector(".memo-ns.active")?.dataset.ns || ns;
+  modal.querySelectorAll(".memo-ns").forEach((b) => (b.onclick = () => {
+    blockSwitchNs = b.dataset.ns;
+    memoryFlow();
+  }));
   modal.querySelector("#mm-add-btn").onclick = async () => {
     const v = modal.querySelector("#mm-add").value.trim();
     if (!v) return;
-    await api.memory.add(currentBot.id, { kind: "fact", content: v, tags: ["手动"], source: "user" });
-    await memoryFlow();
+    const targetNs = currentNs();
+    const entry = { kind: "fact", content: v, tags: ["手动"], source: "user" };
+    if (targetNs !== "bot:" + currentBot.id) entry.namespace = targetNs;
+    await api.memory.add(currentBot.id, entry);
+    memoryFlow();
   };
   modal.querySelectorAll("[data-del]").forEach((b) => (b.onclick = async () => {
     await api.memory.remove(currentBot.id, b.dataset.del);
-    await memoryFlow();
+    memoryFlow();
   }));
+  modal.querySelector("#mm-rewrite").onclick = async () => {
+    modal.querySelector("#mm-rewrite").textContent = "生成中…";
+    try { await api.memory.rewriteMemo(currentNs()); } catch (e) { alert(e.message || e); }
+    memoryFlow();
+  };
+  modal.querySelector("#mm-merge").onclick = async () => {
+    await api.memory.merge(currentNs());
+    memoryFlow();
+  };
+  modal.querySelector("#mm-save-memo").onclick = async () => {
+    await api.memory.setMemo(currentNs(), modal.querySelector("#mm-memo").value);
+    closeModal();
+  };
   modal.querySelector("#mm-close").onclick = closeModal;
+}
+
+// 记录正在浏览的 namespace（切换标签用）
+let blockSwitchNs = null;
+async function currentMemoryNs() {
+  if (blockSwitchNs) return blockSwitchNs;
+  return "bot:" + (currentBot?.id || "");
 }
 
 async function skillsFlow() {

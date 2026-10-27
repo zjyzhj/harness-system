@@ -56,6 +56,13 @@ const api = {
     remove: (botId: string, id: string) => ipcRenderer.invoke("memory:delete", botId, id),
     search: (botId: string, q: string) => ipcRenderer.invoke("memory:search", botId, q),
     stats: (botId: string) => ipcRenderer.invoke("memory:stats", botId),
+    retrieve: (botId: string, q: string) => ipcRenderer.invoke("memory:retrieve", botId, q),
+    namespaces: () => ipcRenderer.invoke("memory:namespaces"),
+    memo: (ns: string) => ipcRenderer.invoke("memory:memo", ns),
+    setMemo: (ns: string, text: string) => ipcRenderer.invoke("memory:setMemo", ns, text),
+    rewriteMemo: (ns: string) => ipcRenderer.invoke("memory:rewriteMemo", ns),
+    merge: (ns: string) => ipcRenderer.invoke("memory:merge", ns),
+    evict: (ns: string, budget: number) => ipcRenderer.invoke("memory:evict", ns, budget),
   },
   skills: {
     list: () => ipcRenderer.invoke("skills:list"),

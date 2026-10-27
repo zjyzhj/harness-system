@@ -180,6 +180,12 @@ export interface MemoryEntry {
   createdAt: number;
   updatedAt: number;
   source?: string;             // 来源：sessionId 或 user
+  /** G2：命名空间（bot:<id> | group:<name> | global）；缺省 = bot:<botId> */
+  namespace?: string;
+  /** G2：语义检索缓存向量（hash 或 OpenAI） */
+  vector?: number[];
+  /** G2：嵌入器标记（hash | openai） */
+  vectorKind?: "hash" | "openai";
 }
 
 export interface ScheduledTask {

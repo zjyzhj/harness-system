@@ -301,6 +301,23 @@ ipcMain.handle("memory:stats", (_e, botId: string) => {
   return memoryStats(memory.list(botId));
 });
 ipcMain.handle("memory:search", (_e, botId: string, q: string) => memory.search(botId, q, 10));
+ipcMain.handle("memory:retrieve", async (_e, botId: string, q: string) => { const r = await memory.retrieve(botId, q, 10); return r; });
+ipcMain.handle("memory:namespaces", () => memory.namespaces());
+ipcMain.handle("memory:memo", (_e, ns: string) => memory.memoOf(ns));
+ipcMain.handle("memory:setMemo", (_e, ns: string, text: string) => memory.setMemo(ns, text));
+ipcMain.handle("memory:rewriteMemo", async (_e, ns: string) => {
+  const p = providers.getDefault();
+  if (!p) throw new Error("无默认 provider，无法生成总结");
+  return memory.rewriteMemo(ns, async (_cur, recent) => {
+    const r = await providers.complete(p, {
+      system: "把以下记忆压缩为 3-8 条要点权威总结（中文，保留关键事实与偏好）。",
+      user: recent.map((e) => `- ${e.content}`).join("\n"),
+    });
+    return r.text;
+  });
+});
+ipcMain.handle("memory:merge", (_e, ns: string) => memory.mergeDuplicate(ns));
+ipcMain.handle("memory:evict", (_e, ns: string, budget: number) => memory.evict(ns, budget));
 ipcMain.handle("tools:run", async (_e, tool: string, args: any) => executor.run(tool, args));
 ipcMain.handle("mcp:list", () => mcp.listTools());
 ipcMain.handle("mcp:call", async (_e, serverId: string, tool: string, args: any) => mcp.callTool(serverId, tool, args));
