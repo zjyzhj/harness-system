@@ -22,6 +22,10 @@ export interface PetSkin {
   desc?: string;
   /** G5.5：spritesheet 皮肤（来自 openpets/petdex 生态） */
   sprite?: { url: string; path: string; rows: number; cols: number; cellW?: number; cellH?: number };
+  /** Live2D Cubism 3/4/5 模型（model3.json 路径，相对 pet.html 或绝对 file 路径） */
+  live2d?: { model: string; scale?: number };
+  /** 用 bot.avatar 形状色块当桌宠（代码绘制，非 PNG 文件） */
+  shape?: boolean;
 }
 
 export const EMOJI_FALLBACK: Record<PetAction, string[]> = {
@@ -34,129 +38,44 @@ export const EMOJI_FALLBACK: Record<PetAction, string[]> = {
   think: ["💭", "🤔", "💭"],
 };
 
-const STYLE_EMOJI: Record<string, Partial<Record<PetAction, string[]>>> = {
-  pixel: {
-    idle: ["🐾", "🐾", "🐾"],
-    walk: ["🐾", "🐾"],
-    jump: ["🐾", "🐾"],
-  },
-  cute: {
-    idle: ["🐰", "🐻", "🐰"],
-    sleep: ["😪", "💤"],
-    celebrate: ["🌈", "⭐", "🌈"],
-  },
-};
-
-/** 默认皮肤（emoji 帧，无需图片） */
+/** 内置兜底帧（Live2D 加载失败时 sprite 区显示；不再作为可选「简易形象」暴露） */
 export const DEFAULT_SKIN: PetSkin = {
   id: "default",
   name: "默认",
   frames: EMOJI_FALLBACK,
   fps: 2,
   color: "#4F46E5",
-  desc: "通用 emoji 伙伴",
+  desc: "内部兜底，不出现在形象菜单",
 };
 
-/** G5.5：品牌/主题预设皮肤（对齐主流 AI 品牌与社区形象，离线 emoji 帧） */
-const BRAND_SKINS: PetSkin[] = [
-  {
-    id: "deepseek",
-    name: "DeepSeek 鲸",
-    color: "#4D6BFE",
-    desc: "DeepSeek 蓝白鲸鱼风",
-    fps: 2,
-    frames: {
-      idle: ["🐳", "🐋", "🐳"],
-      walk: ["🐳", "🐋"],
-      jump: ["🐳", "💦", "🐳"],
-      sleep: ["😴", "💤"],
-      celebrate: ["🎉", "🐳", "🎉"],
-      work: ["🧠", "📊", "🧠"],
-      think: ["💭", "🐳", "💭"],
-    },
-  },
-  {
-    id: "claude",
-    name: "Claude 橙块",
-    color: "#D97757",
-    desc: "Claude/Clawd 橙色调方块小人",
-    fps: 2,
-    frames: {
-      idle: ["🟧", "🙂", "🟧"],
-      walk: ["🟧", "🟨"],
-      jump: ["🟧", "⭐"],
-      sleep: ["😴", "🟧"],
-      celebrate: ["🟧", "🎉", "🟧"],
-      work: ["🟧", "🤖", "🟧"],
-      think: ["💭", "🟧", "💭"],
-    },
-  },
-  {
-    id: "doro",
-    name: "Doro 团子",
-    color: "#FF9EC7",
-    desc: "Codex 桌宠 Doro：粉发白团子",
-    fps: 2,
-    frames: {
-      idle: ["🍡", "🌸", "🍡"],
-      walk: ["🍡", "🍡"],
-      jump: ["🍡", "🌸"],
-      sleep: ["😴", "💤"],
-      celebrate: ["🎀", "🍡", "🎀"],
-      work: ["💻", "🍡", "💻"],
-      think: ["💭", "🍡", "💭"],
-    },
-  },
-  {
-    id: "guga",
-    name: "咕嘎",
-    color: "#22C55E",
-    desc: "咕嘎：绿色小怪兽",
-    fps: 2,
-    frames: {
-      idle: ["👾", "🐸", "👾"],
-      walk: ["👾", "👾"],
-      jump: ["👾", "💚"],
-      sleep: ["😴", "💤"],
-      celebrate: ["🎉", "👾", "🎉"],
-      work: ["🛠", "👾", "🛠"],
-      think: ["💭", "👾", "💭"],
-    },
-  },
-  {
-    id: "grok",
-    name: "Grok 星",
-    color: "#111111",
-    desc: "xAI Grok：黑金星空风",
-    fps: 2,
-    frames: {
-      idle: ["🌌", "🤖", "🌌"],
-      walk: ["🌌", "⭐"],
-      jump: ["🤖", "✨"],
-      sleep: ["😴", "💤"],
-      celebrate: ["🎉", "✨", "🎉"],
-      work: ["🧠", "🔮", "🧠"],
-      think: ["💭", "🤖", "💭"],
-    },
-  },
+/** 内置 Live2D 角色（Live2D 官方示例模型，Free Material License） */
+export const LIVE2D_SKINS: PetSkin[] = [
+  { id: "live2d-hiyori", name: "日和 Hiyori", color: "#F9A8D4", desc: "Live2D 少女：9 组待机动作随机切换", fps: 2, frames: EMOJI_FALLBACK, live2d: { model: "live2d/Hiyori/Hiyori.model3.json" } },
+  { id: "live2d-haru", name: "春 Haru", color: "#93C5FD", desc: "Live2D 少女：8 种表情 + 触摸动作", fps: 2, frames: EMOJI_FALLBACK, live2d: { model: "live2d/Haru/Haru.model3.json" } },
+  { id: "live2d-mao", name: "真央 Mao", color: "#C4B5FD", desc: "Live2D 魔法少女：8 种表情 + 6 组触摸动作", fps: 2, frames: EMOJI_FALLBACK, live2d: { model: "live2d/Mao/Mao.model3.json" } },
 ];
+export const DEFAULT_PET_SKIN_ID = "live2d-hiyori";
+
+/** 代码绘制的形状桌宠：渲染走 bot.avatar 的 blob SVG，不是假 PNG */
+export const SHAPE_SKIN: PetSkin = {
+  id: "shape-blob",
+  name: "形状色块",
+  frames: EMOJI_FALLBACK,
+  fps: 2,
+  color: "#3b82f6",
+  desc: "按描述用代码画的形状头像（眼睛会眨眼/忙碌时晃动）",
+  shape: true,
+};
+export const SHAPE_SKIN_ID = SHAPE_SKIN.id;
 
 export class PetSkinRegistry {
-  private skins = new Map<string, PetSkin>([["default", DEFAULT_SKIN]]);
+  private skins = new Map<string, PetSkin>();
   /** G5.5：社区皮肤索引文件（assets/skins/index.json） */
   private indexFile?: string;
 
   constructor(assetsDir?: string) {
-    for (const [style, partial] of Object.entries(STYLE_EMOJI)) {
-      this.skins.set(style, {
-        id: style,
-        name: style === "pixel" ? "像素" : style === "cute" ? "圆润" : style,
-        frames: { ...EMOJI_FALLBACK, ...partial } as Record<PetAction, string[]>,
-        fps: style === "pixel" ? 4 : 2,
-      });
-    }
-    // 注册品牌预设
-    for (const b of BRAND_SKINS) this.skins.set(b.id, b);
+    for (const l of LIVE2D_SKINS) this.skins.set(l.id, l);
+    this.skins.set(SHAPE_SKIN.id, SHAPE_SKIN);
     // 恢复持久化的社区皮肤（下载后立即落盘，重启不丢失）
     if (assetsDir) {
       this.indexFile = join(assetsDir, "skins", "index.json");
@@ -172,10 +91,12 @@ export class PetSkinRegistry {
   }
 
   list(): PetSkin[] {
-    return [...this.skins.values()];
+    // Live2D / sprite / 代码形状；内部 emoji default 兜底不出现在菜单
+    return [...this.skins.values()].filter((s) => s.live2d || s.sprite || s.shape);
   }
   get(id?: string): PetSkin {
-    return (id && this.skins.get(id)) || DEFAULT_SKIN;
+    if (id && this.skins.get(id)) return this.skins.get(id)!;
+    return this.skins.get(DEFAULT_PET_SKIN_ID) || DEFAULT_SKIN;
   }
   /** 注册新皮肤（例如形象生成后写入皮肤帧）；持久化社区皮肤 */
   register(skin: PetSkin) {

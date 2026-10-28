@@ -3,9 +3,16 @@
  * Tray(菜单栏) + 主控窗口 + 宠物窗口(无边框透明)
  * 核心逻辑全部在 core/（纯 TS），这里只做宿主桥接。
  */
-import { app, BrowserWindow, Tray, Menu, ipcMain, dialog, clipboard, Notification, screen, nativeImage } from "electron";
-import { join } from "node:path";
-import { writeFileSync, mkdirSync, readFileSync, existsSync } from "node:fs";
+import { app, BrowserWindow, Tray, Menu, ipcMain, dialog, clipboard, Notification, screen, nativeImage, shell, safeStorage } from "electron";
+import { SecretStore } from "../core/secret-store";
+import { EnvStore } from "../core/env-store";
+import { GroupSessionRunner, type GroupProgress, type GroupSessionHooks } from "../core/group-session";
+import { join, resolve, extname } from "node:path";
+import { randomBytes, randomUUID } from "node:crypto";
+import { writeFileSync, mkdirSync, readFileSync, existsSync, statSync, openSync, readSync, closeSync, readdirSync, watch } from "node:fs";
+import { createUsageBook } from "./host/usage";
+import { createSemanticRecall, type EmbeddingConfig } from "./host/semantic";
+import { EVAL_MODE, prepareEvalHome, runEvalMode } from "./host/eval-mode";
 import { pathToFileURL } from "node:url";
 
 // 应用根：electron . 运行时 getAppPath() 返回项目根目录
@@ -16,7 +23,10 @@ import { Store } from "../core/store";
 import { AgentRegistry } from "../core/agent-registry";
 import { MessageBus } from "../core/message-bus";
 import { ProviderCenter } from "../core/provider-center";
-import { PersonaGenerator } from "../core/persona";
+import { PersonaGenerator, parseAppearancePick, type AppearancePick } from "../core/persona";
+import {
+  buildPetMind, formatMindForPrompt, notePetDecision, listPetActivity, extractCompanionFact, type PetMind,
+} from "../core/pet-mind";
 import { MigrationV2 } from "../core/migration-v2";
 import { SystemKit } from "../core/system-kit";
 import { MemorySystem } from "../core/memory-system";
@@ -24,19 +34,75 @@ import { SkillRegistry, BUILTIN_SKILL_TEMPLATES } from "../core/skill-registry";
 import { Scheduler } from "../core/scheduler";
 import { GroupRegistry } from "../core/group-registry";
 import { Orchestrator, planFromText } from "../core/orchestrator";
+import { FileLogger } from "../core/logger";
+import { ProactiveEngine, collectSignals } from "../core/proactive";
 import { GatewayServer } from "../core/gateway-server";
-import { PetSkinRegistry, EMOJI_FALLBACK } from "../core/pet-skin";
-import { ConsentCenter, CAP_LABELS } from "../core/consent-center";
+import { PetSkinRegistry } from "../core/pet-skin";
+import { ConsentCenter, capLabel as capLabelOf, type ConsentDecision } from "../core/consent-center";
 import { AuditLog } from "../core/audit-log";
 import { SystemAccess } from "../core/system-access";
-import { BotRuntime, skillFromText } from "../core/bot-runtime";
+import { BotRuntime } from "../core/bot-runtime";
 import { OfflinePersona } from "../core/offline-persona";
-import { ToolExecutor, BUILTIN_TOOL_DESCRIPTIONS } from "../core/tool-executor";
+import { ToolExecutor } from "../core/tool-executor";
 import { McpClient, type McpServerConfig } from "../core/mcp-client";
+import { COMPUTER_MCP_ID, ensureBuiltinMcpServers, isBuiltinMcpId, mcpServersForClient } from "../core/builtin-mcp";
+import { buildComputerSteps, computerMcpConfig, ensureManagedUv, humanizeComputerError, warmComputerUseKit, type ComputerUseStatus } from "../core/computer-use-setup";
+import { CompanionEngine } from "../core/companion";
+import {
+  parsePetIntent,
+  parsePetIntentsRule,
+  shouldUseDirectorModel,
+  directorSystemPrompt,
+  directorUserPrompt,
+  parseDirectorIntents,
+  type PetIntent,
+} from "../core/pet-director";
+import {
+  clearPetBotPrefs, mergePrefs, patchPetBotPrefs, petPrefsFromConfig, resolvePetPrefs, type PetPrefs,
+} from "../core/pet-prefs";
+import { PetEvolveEngine, parseEvolveInvent } from "../core/pet-evolve";
+import { PetVisitEngine, parseVisitLines } from "../core/pet-visit";
+import {
+  PetEffectRegistry,
+  fxInventSystemPrompt,
+  fxInventUserPrompt,
+  parseInventedEffect,
+  type FxRecipe,
+} from "../core/pet-effects";
+import { RECOMMENDED_PETDEX, fetchPetdexManifest, installPetdex, petdexSkinId, searchPetdex } from "../core/petdex";
 import { OpenAICompatImageGen } from "../core/adapters/image-gen";
-import { AgentStatus } from "../core/types";
+import { AgentStatus, contentText, type Bot, type ContentBlock, type Session } from "../core/types";
+import { defaultAvatar, withDefaultAvatar } from "../core/avatar";
+import type { ImageGenConfig } from "../core/image-tool";
+import { ProjectRegistry, instructionsPrompt, type GlobalInstructions } from "../core/projects";
+import { ingestFiles } from "../core/attachments";
+import { registerShareIpc } from "./host/share";
+import { registerSecurityIpc } from "./host/security-ipc";
+import { registerSkinsIpc } from "./host/skins-ipc";
+import { registerVoiceIpc } from "./host/voice-ipc";
+import { registerKnowledgeIpc } from "./host/knowledge-ipc";
+import { TEMPLATE_EXT, TEMPLATE_SCHEME, normalizeTemplate, parseTemplate, templateLink, templateOf, uniqueBotName, type BotTemplate } from "../core/bot-template";
+
+if (EVAL_MODE) prepareEvalHome(process.env.HARNESS_HOME || join(app.getPath("userData"), "..", "harness-bot"), (dir) => app.setPath("userData", dir));
+
+// 两个进程同时读写同一份数据会互相覆盖，只允许开一个
+if (!EVAL_MODE && !app.requestSingleInstanceLock()) {
+  app.quit();
+  process.exit(0);
+}
+app.on("second-instance", () => {
+  if (!mainWin || mainWin.isDestroyed()) return;
+  if (mainWin.isMinimized()) mainWin.restore();
+  mainWin.show();
+  mainWin.focus();
+});
 
 const home = process.env.HARNESS_HOME || join(app.getPath("userData"), "..", "harness-bot");
+const logger = new FileLogger(home);
+logger.captureConsole();
+process.on("uncaughtException", (e) => console.error("[harness] 未捕获的异常", e));
+process.on("unhandledRejection", (r) => console.error("[harness] 未处理的 Promise 拒绝", r));
+app.on("child-process-gone", (_e, d) => { if (d.reason !== "clean-exit") console.error(`[harness] 子进程退出：${d.type} ${d.reason}`); });
 const store = new Store(home);
 const assetsDir = join(home, "assets");
 const petSkins = new PetSkinRegistry(assetsDir);
@@ -47,7 +113,7 @@ const persona = new PersonaGenerator(store, assetsDir);
 
 const system = new SystemKit({
   allowedRoot: join(home, "workspace"),
-  notify: (p) => new Notification({ title: p.title, body: p.body }).show() as unknown as boolean,
+  notify: (p) => deliverNotification({ title: p.title, body: p.body }),
   clipboardWrite: (t) => clipboard.writeText(t),
   clipboardRead: () => clipboard.readText(),
 });
@@ -82,44 +148,1295 @@ const executor = new ToolExecutor({
   },
 }, system, memory);
 const mcp = new McpClient(loadMcpServers());
-void mcp.init();
 const statuses = new Map<string, AgentStatus>();
-const runtime = new BotRuntime({ store, providers, memory, skills, system, systemAccess, executor, offline: new OfflinePersona(), mcp });
+{
+  // 状态变化实时推给面板（侧栏「正在处理」提示）
+  const rawSet = statuses.set.bind(statuses);
+  statuses.set = (k, v) => {
+    rawSet(k, v);
+    try {
+      if (mainWin && !mainWin.isDestroyed()) mainWin.webContents.send("status:changed", v);
+    } catch {
+      // 启动早期 mainWin 尚未声明
+    }
+    return statuses;
+  };
+}
+/** 进行中的回复：sessionId → 中止控制器（停止生成） */
+const inflight = new Map<string, AbortController>();
+const keyCipher = {
+  encrypt: (v: string) => (safeStorage.isEncryptionAvailable() ? `enc:${safeStorage.encryptString(v).toString("base64")}` : `b64:${Buffer.from(v).toString("base64")}`),
+  decrypt: (c: string) => (c.startsWith("enc:") ? safeStorage.decryptString(Buffer.from(c.slice(4), "base64")) : Buffer.from(c.slice(4), "base64").toString("utf8")),
+};
+const secrets = new SecretStore(home, keyCipher);
+/** 配置里存的 key：加密的解开，旧版明文原样返回 */
+function openStoredKey(v: unknown): string {
+  const s = typeof v === "string" ? v : "";
+  if (!/^(enc|b64):/.test(s)) return s;
+  try { return keyCipher.decrypt(s); } catch { return ""; }
+}
+/** 旧版明文存的接口 key（图片生成、语音识别）改成加密存储 */
+function encryptLegacyConfigKeys() {
+  const all = store.readConfig();
+  const changed: string[] = [];
+  for (const [section, label] of [["imageGen", "图片生成"], ["asr", "语音识别"]] as const) {
+    const v = all[section] as Record<string, unknown> | undefined;
+    if (v && typeof v.apiKey === "string" && v.apiKey && !/^(enc|b64):/.test(v.apiKey)) {
+      all[section] = { ...v, apiKey: keyCipher.encrypt(v.apiKey) };
+      changed.push(label);
+    }
+  }
+  if (changed.length) {
+    store.writeConfig(all);
+    console.log(`[harness] ${changed.join("、")}接口的 key 已改为加密存储`);
+  }
+}
+const env = new EnvStore(home);
+mcp.setSecretFiller((m) => {
+  const r = secrets.fill(m);
+  if (r.missing.length) console.warn(`[mcp] 未找到密钥：${r.missing.join("、")}`);
+  return r.args as Record<string, string>;
+});
+void mcp.init();
+const usage = createUsageBook(join(home, "usage.json"), (id) => providers.get(id)?.name);
+const semantic = createSemanticRecall({
+  home, store, memory, cipher: keyCipher,
+  groupsOf: (botId) => groups.list(botId).map((g) => g.id),
+  log: (msg) => logger.write("info", "[recall]", msg),
+});
+function mcpIdFromName(name: string): string {
+  return name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || `mcp-${Date.now().toString(36)}`;
+}
+function mcpFingerprint(servers: Array<{ id: string; command?: string; args?: string[]; url?: string }>): string {
+  return servers
+    .map((s) => `${s.id}\t${s.url ?? ""}\t${s.command ?? ""}\t${(s.args ?? []).join("\0")}`)
+    .sort()
+    .join("\n");
+}
+const mcpManage = {
+  list: () => mcp.status(),
+  /** 磁盘 config 被外部改过时（shell 手改 config.json），补一次热重连，不必重启软件 */
+  resync: async () => {
+    const disk = loadMcpServers();
+    if (mcpFingerprint(disk) === mcpFingerprint(mcp.status())) return { reloaded: false, count: disk.length };
+    await mcp.reload(disk);
+    return { reloaded: true, count: disk.length };
+  },
+  add: async (input: { id?: string; name: string; command?: string; args?: string[]; url?: string; env?: Record<string, string> }) => {
+    const id = (input.id?.trim() || mcpIdFromName(input.name)).slice(0, 40);
+    if (isBuiltinMcpId(id)) return { id, name: input.name, tools: 0, error: "「电脑操控」是内置能力，不用再 mcp.add" };
+    const next: McpServerConfig = {
+      id, name: input.name.trim(),
+      ...(input.url ? { url: input.url } : { command: input.command, args: input.args ?? [] }),
+      ...(input.env && Object.keys(input.env).length ? { env: input.env } : {}),
+    };
+    const cur = allMcpServers();
+    const servers = ensureBuiltinMcpServers([...cur.filter((s) => s.id !== id), next], home);
+    store.writeConfig({ ...store.readConfig(), mcpServers: servers });
+    await mcp.reload(mcpServersForClient(servers, home));
+    const st = mcp.status().find((s) => s.id === id)!;
+    return { id: st.id, name: st.name, tools: st.tools, error: st.error };
+  },
+  remove: async (idOrName: string) => {
+    const cur = allMcpServers();
+    const hit = cur.find((s) => s.id === idOrName || s.name === idOrName)
+      ?? cur.find((s) => s.name.includes(idOrName) || s.id.includes(idOrName));
+    if (!hit) return { error: `找不到 MCP「${idOrName}」。现有：${cur.map((s) => s.name).join("、") || "无"}` };
+    if (hit.builtin || isBuiltinMcpId(hit.id)) return { error: `「${hit.name}」是软件内置能力，请用设置里的开关关闭` };
+    const servers = ensureBuiltinMcpServers(cur.filter((s) => s.id !== hit.id), home);
+    store.writeConfig({ ...store.readConfig(), mcpServers: servers });
+    await mcp.reload(mcpServersForClient(servers, home));
+    return { removed: hit.name };
+  },
+};
+
+const runtime: BotRuntime = new BotRuntime({
+  store, providers, memory, skills, system, systemAccess, executor, offline: new OfflinePersona(), mcp, mcpManage, askBot, tasks: scheduler, notifyCheck,
+  groups, secrets, env, workspaceRoot: workspace,
+  groupPost: async (from, name, message, signal) => {
+    const all = groups.list();
+    const g = all.find((x) => x.name === name) ?? all.find((x) => x.name.includes(name) || name.includes(x.name));
+    if (!g) return { ok: false, error: `没有叫「${name}」的群聊。现有群聊：${all.map((x) => x.name).join("、") || "无"}` };
+    if (!g.members.includes(from.id)) return { ok: false, error: `你不在群聊「${g.name}」里，发不进去。你所在的群：${groups.list(from.id).map((x) => x.name).join("、") || "无"}` };
+    const sid = `group-${g.id}`;
+    const ctrl = new AbortController();
+    signal?.addEventListener("abort", () => ctrl.abort(), { once: true });
+    inflight.set(sid, ctrl);
+    try {
+      const r = await groupSessions.post(g.id, from, message, groupHooks(sid, ctrl));
+      return { ok: true, group: r.groupName, replies: r.replies, reason: r.reasonText };
+    } finally {
+      if (inflight.get(sid) === ctrl) inflight.delete(sid);
+    }
+  },
+  plans: { start: (req) => startPlanFor(req), list: () => orchestrator.list(), cancel: cancelPlanByTitle },
+  appFacts: () => ({ plans: orchestrator.list().map((x) => ({ title: x.title, status: x.status })), projects: projects.list().map((x) => ({ name: x.name })) }), consent, audit,
+  imageConfig: () => {
+    const c = store.readConfig().imageGen as ImageGenConfig | undefined;
+    if (!c?.baseUrl || !c.model) return null;
+    return { ...c, apiKey: openStoredKey(c.apiKey) };
+  },
+  onAppChanged: (what) => {
+    if (what === "bots") registerAll();
+    if (mainWin && !mainWin.isDestroyed()) mainWin.webContents.send("app:changed", what);
+  },
+  petHost: {
+    show: (botId) => {
+      if (EVAL_MODE) return;
+      const b = store.getBot(botId);
+      if (b && !b.petEnabled) store.saveBot({ ...b, petEnabled: true });
+      showPetWindow(botId);
+    },
+    hide: (botId) => { hidePetWindow(botId); },
+    skinLabel: (botId) => {
+      const b = store.getBot(botId);
+      if (!b) return "默认";
+      return petSkins.get(b.skinId)?.name || b.skinId || "默认";
+    },
+    isShown: (botId) => isPetShown(botId),
+    xp: (botId) => store.listPets().find((p) => p.botId === botId)?.xp ?? 0,
+    listSkins: () => petSkins.list().map((s) => ({ id: s.id, name: s.name })),
+    setSkin: (botId, skinId) => {
+      try {
+        const next = applyBotSkin(botId, skinId);
+        const label = petSkins.get(next.skinId)?.name || next.skinId || skinId;
+        return { ok: true as const, label };
+      } catch (e) {
+        return { ok: false as const, error: e instanceof Error ? e.message : String(e) };
+      }
+    },
+    searchCatalog: async (query) => {
+      const q = (query || "").trim();
+      if (!q) {
+        return RECOMMENDED_PETDEX.slice(0, 12).map((r) => ({
+          slug: r.slug, name: r.name, id: petdexSkinId(r.slug),
+          installed: !!petSkins.list().find((s) => s.id === petdexSkinId(r.slug)),
+        }));
+      }
+      const pets = await fetchPetdexManifest(join(assetsDir, "skins"));
+      return searchPetdex(pets, q, 15).map((p) => ({
+        slug: p.slug,
+        name: RECOMMENDED_PETDEX.find((r) => r.slug === p.slug)?.name || p.displayName,
+        id: petdexSkinId(p.slug),
+        installed: !!petSkins.list().find((s) => s.id === petdexSkinId(p.slug)),
+      }));
+    },
+    installCatalog: async (slug, opts) => {
+      try {
+        const pets = await fetchPetdexManifest(join(assetsDir, "skins"));
+        let entry = pets.find((p) => p.slug === slug);
+        if (!entry) {
+          const hit = searchPetdex(pets, slug, 1)[0];
+          entry = hit;
+        }
+        if (!entry) {
+          const rec = RECOMMENDED_PETDEX.find((r) => r.slug === slug || r.name === slug || r.name.includes(slug));
+          if (rec) entry = pets.find((p) => p.slug === rec.slug);
+        }
+        if (!entry) return { ok: false as const, error: `petdex 上找不到「${slug}」（需能访问 petdex.dev）` };
+        const id = petdexSkinId(entry.slug);
+        const label = opts?.name || RECOMMENDED_PETDEX.find((r) => r.slug === entry!.slug)?.name || entry.displayName;
+        if (!petSkins.list().find((s) => s.id === id)) {
+          const skin = await installPetdex(entry, assetsDir, label);
+          petSkins.register(skin);
+        }
+        let worn = false;
+        if (opts?.wearBotId) {
+          applyBotSkin(opts.wearBotId, id, label);
+          worn = true;
+        }
+        if (mainWin && !mainWin.isDestroyed()) mainWin.webContents.send("app:changed", "skins");
+        for (const w of petWins.values()) if (!w.isDestroyed()) w.webContents.send("app:changed", "skins");
+        return { ok: true as const, id, label, worn };
+      } catch (e) {
+        return { ok: false as const, error: e instanceof Error ? e.message : String(e) };
+      }
+    },
+    maySpawn: () => readPetPrefs().agentMaySpawn,
+    mayVisit: () => readPetPrefs().petVisit,
+    act: (botId, action, holdSec) => {
+      const allowed = new Set(["idle", "walk", "jump", "sleep", "celebrate", "work", "think"]);
+      const a = String(action || "").toLowerCase();
+      if (!allowed.has(a)) return { ok: false as const, error: `动作仅支持 ${[...allowed].join("/")}` };
+      if (!store.getBot(botId)) return { ok: false as const, error: "bot 不存在" };
+      pushPetEvent(botId, { type: "action", action: a, hold: holdSec ?? (a === "idle" ? 0 : 3) });
+      return { ok: true as const, action: a };
+    },
+    say: (botId, text, opts) => {
+      if (!store.getBot(botId)) return { ok: false as const, error: "bot 不存在" };
+      const t = String(text || "").trim();
+      if (!t) return { ok: false as const, error: "要说的话不能为空" };
+      pushPetEvent(botId, {
+        type: "say",
+        text: t.slice(0, 200),
+        title: opts?.title || store.getBot(botId)?.name,
+        action: opts?.action,
+        hold: opts?.holdSec,
+      });
+      return { ok: true as const };
+    },
+    fx: async (botId, args) => {
+      if (!store.getBot(botId)) return { ok: false as const, error: "bot 不存在" };
+      const action = (args.action || "play").toLowerCase();
+      if (action === "list") {
+        const list = petEffects.list().map((e) => ({
+          id: e.id, name: e.name, kind: e.kind, sticky: e.sticky, useCount: e.useCount,
+        }));
+        return {
+          ok: true as const,
+          message: `共 ${list.length} 个特效（自定义会过期回收，钉住除外）`,
+          list,
+        };
+      }
+      if (action === "gc") {
+        const { removed } = petEffects.gc(false);
+        return { ok: true as const, message: removed.length ? `已回收：${removed.join("、")}` : "没有需要回收的特效" };
+      }
+      if (action === "pin" || action === "unpin") {
+        const key = args.name || args.phrase || "";
+        if (!key) return { ok: false as const, error: "pin/unpin 需要 name" };
+        const e = petEffects.pin(key, action === "pin");
+        if (!e) return { ok: false as const, error: `找不到自定义特效「${key}」（内置无需钉住）` };
+        return { ok: true as const, message: action === "pin" ? `已钉住「${e.name}」，不会自动回收` : `已取消钉住「${e.name}」`, effect: { id: e.id, name: e.name, kind: e.kind } };
+      }
+      if (action === "forget" || action === "delete") {
+        const key = args.name || args.phrase || "";
+        if (!key) return { ok: false as const, error: "forget 需要 name" };
+        if (!petEffects.remove(key)) return { ok: false as const, error: `删不了「${key}」（内置或未找到）` };
+        return { ok: true as const, message: `已忘掉自定义特效「${key}」` };
+      }
+      // play：有相近则复用并告知；否则模型现场发明；失败才规则兜底
+      const phrase = (args.phrase || args.name || "").trim();
+      if (!phrase) return { ok: false as const, error: "pet.fx 需要 phrase（如「龟派气功」）" };
+      const { effect, mode, message } = await resolveAndPlayFx(botId, phrase);
+      return {
+        ok: true as const,
+        message,
+        effect: { id: effect.id, name: effect.name, kind: effect.kind, created: mode === "invent" || mode === "fallback" },
+      };
+    },
+    visit: async (fromId, toId) => {
+      if (!readPetPrefs().petVisit) return { ok: false as const, error: "用户已关闭「多宠互访」" };
+      const rec = await runPetVisit(fromId, toId, true);
+      if (!rec) return { ok: false as const, error: "现在去不了（对方未出台或太频繁）" };
+      return { ok: true as const, line: rec.lineFrom };
+    },
+    visitHistory: (botId, limit = 20) =>
+      petVisit.list(botId, limit).map((v) => ({
+        fromId: v.fromId, toId: v.toId, fromName: v.fromName, toName: v.toName,
+        lineFrom: v.lineFrom, lineTo: v.lineTo, at: v.at,
+      })),
+    revertSkin: (botId) => {
+      const b = store.getBot(botId);
+      if (!b?.prevSkinId) return { ok: false as const, error: "没有可恢复的上一套形象" };
+      const next = applyBotSkin(botId, b.prevSkinId);
+      const label = petSkins.get(next.skinId)?.name || next.skinId || "上一套";
+      return { ok: true as const, label };
+    },
+    generatePersona: async (botId, desc, style) => {
+      const b = store.getBot(botId);
+      if (!b) return { ok: false as const, error: "bot 不存在" };
+      try {
+        const result = await resolveAppearance(botId, desc, style as "default" | "pixel" | "cute" | undefined);
+        return {
+          ok: true as const,
+          name: result.card?.name || b.name,
+          message: result.message,
+          imaged: result.imaged,
+          codeDrawn: result.codeDrawn,
+          skin: result.appliedSkin?.name,
+          suggestions: result.suggestions.slice(0, 5).map((s) => ({ kind: s.kind, id: s.id, name: s.name })),
+        };
+      } catch (e) {
+        return { ok: false as const, error: e instanceof Error ? e.message : String(e) };
+      }
+    },
+    disable: (botId) => {
+      const b = store.getBot(botId);
+      if (!b) return;
+      store.saveBot({ ...b, petEnabled: false });
+      const w = petWins.get(botId);
+      if (w && !w.isDestroyed()) w.close();
+      petWins.delete(botId);
+      persistPetVisible(botId, false);
+      updateTrayIcon();
+    },
+    prefs: (botId) => {
+      const p = readPetPrefs(botId);
+      return {
+        companionChat: p.companionChat, proactiveFollowup: p.proactiveFollowup,
+        idleWork: p.idleWork, autoAppearance: p.autoAppearance,
+        agentMaySpawn: p.agentMaySpawn, selfEvolve: p.selfEvolve,
+        autoEvolve: p.autoEvolve, petVisit: p.petVisit,
+        idleMinutes: p.idleMinutes, maxChatPerDay: p.maxChatPerDay,
+        maxWorkPerDay: p.maxWorkPerDay, maxAppearPerWeek: p.maxAppearPerWeek,
+      };
+    },
+    setPrefs: (botId, patch) => {
+      const all = store.readConfig();
+      const prev = (all.prefs as Record<string, unknown> | undefined) || {};
+      const next = patchPetBotPrefs(prev, botId, patch as Partial<PetPrefs>);
+      store.writeConfig({ ...all, prefs: next });
+      if (mainWin && !mainWin.isDestroyed()) mainWin.webContents.send("app:changed", "pet-prefs");
+      const w = petWins.get(botId);
+      if (w && !w.isDestroyed()) w.webContents.send("app:changed", "pet-prefs");
+      return readPetPrefs(botId) as unknown as Record<string, unknown>;
+    },
+    evolveList: (botId, mode) => {
+      const rows = mode === "pending" ? petEvolve.listPending(botId) : petEvolve.listHistory(botId);
+      return rows.map((p) => ({
+        id: p.id, title: p.title, detail: p.detail, status: p.status, kind: p.kind, createdAt: p.createdAt,
+      }));
+    },
+    evolveDecide: (botId, action, id) => {
+      if (id && !petEvolve.listPending(botId).some((x) => x.id === id)) {
+        return { ok: false as const, error: "没有这条待确认提议（或已处理）" };
+      }
+      const p = id
+        ? (action === "accept" ? petEvolve.accept(id) : petEvolve.reject(id))
+        : (action === "accept" ? petEvolve.acceptLatest(botId) : petEvolve.rejectLatest(botId));
+      if (!p) return { ok: false as const, error: "没有待确认的进化提议" };
+      return { ok: true as const, title: p.title, status: p.status };
+    },
+    remind: (botId, delayMs, text) => {
+      if (!store.getBot(botId)) return { ok: false as const, error: "bot 不存在" };
+      const at = Date.now() + Math.max(5_000, delayMs);
+      scheduler.create({
+        botId,
+        name: text.slice(0, 40) || "提醒",
+        cron: "0 0 1 1 *",
+        kind: "once",
+        alarmAt: at,
+        notifyPet: true,
+        runPrompt: false,
+        deleteAfterRun: true,
+        prompt: text,
+      });
+      return { ok: true as const, at };
+    },
+  },
+  onUsage: (u) => usage.record(u),
+  recall: (bot, query, excludeSession) => semantic.recall(bot, query, excludeSession),
+});
+
+ipcMain.handle("usage:summary", () => usage.summary());
+ipcMain.handle("embedding:get", () => semantic.getConfig());
+ipcMain.handle("embedding:set", (_e, value: EmbeddingConfig) => semantic.setConfig(value));
+ipcMain.handle("embedding:status", () => semantic.status());
+
+const projects = new ProjectRegistry(home);
+migration.attachExtras({ env, secrets, projects, consent });
+const groupSessions: GroupSessionRunner = new GroupSessionRunner({ store, groups, runtime, providers });
+/** 全局自定义指令 + 会话所属项目的指令和资料 */
+function instructionsFor(sessionId?: string, projectId?: string | null): string {
+  const pid = projectId !== undefined ? projectId : sessionId ? store.getSession(sessionId)?.projectId : null;
+  return instructionsPrompt(store.readConfig().instructions as GlobalInstructions | undefined, projects.get(pid));
+}
+
+/** 群聊 IPC → core GroupSessionRunner 的宿主桥接（UI / 状态 / 中止） */
+function groupHooks(sessionId: string, ctrl: AbortController): GroupSessionHooks {
+  return {
+    onProgress: (p: GroupProgress) => sendUi("group:progress", p),
+    onStream: (ev) => sendUi("chat:stream", { ...ev.block, sessionId: ev.sessionId, botId: ev.botId, turn: ev.turn }),
+    setRunning: (botId, sid, task) => {
+      statuses.set(botId, { botId, state: "running", lastRunAt: Date.now(), currentTask: task, sessionId: sid });
+      activeSession.set(botId, sid);
+    },
+    setIdle: (botId) => {
+      activeSession.delete(botId);
+      statuses.set(botId, { botId, state: "idle", lastRunAt: Date.now() });
+    },
+    extraSystem: instructionsFor(sessionId),
+    signal: ctrl.signal,
+  };
+}
+
+/** 这个 bot 当前在哪个会话里干活（授权卡片显示到那个会话） */
+const activeSession = new Map<string, string>();
+const pendingConsent = new Map<string, (d: ConsentDecision) => void>();
+/** 单聊的用户消息在回复结束时才落盘：期间的授权记录先攒着，回复写完再补上，保证顺序 */
+const consentNotes = new Map<string, string[]>();
+const flushConsentNotes = (sid: string) => {
+  for (const content of consentNotes.get(sid) ?? []) store.addMessage({ sessionId: sid, from: "system", to: "user", role: "assistant", content, kind: "event", createdAt: Date.now() });
+  consentNotes.delete(sid);
+};
+const sendUi = (channel: string, payload: unknown) => { if (mainWin && !mainWin.isDestroyed()) mainWin.webContents.send(channel, payload); };
+ipcMain.handle("consent:respond", (_e, id: string, decision: ConsentDecision) => { pendingConsent.get(id)?.(decision); });
+
+/** bot 间会话：同一对 bot 固定复用一个会话，被问方能接着之前的问答 */
+const isB2bSession = (sid: string) => sid.startsWith("b2b-");
+
+async function askBot(from: Bot, target: string, message: string, depth: number, parentSessionId?: string, signal?: AbortSignal): Promise<string> {
+  const all = store.listBots().filter((b) => b.id !== from.id);
+  const to = all.find((b) => b.name === target) ?? all.find((b) => b.name.includes(target) || target.includes(b.name));
+  if (!to) return `找不到名为「${target}」的 bot。现有成员：${all.map((b) => b.name).join("、")}`;
+  const sid = `b2b-${from.id}-${to.id}`;
+  statuses.set(to.id, { botId: to.id, state: "running", lastRunAt: Date.now(), currentTask: `${from.name} 的提问` });
+  const parentActive = parentSessionId ?? activeSession.get(from.id);
+  if (parentActive) activeSession.set(to.id, parentActive);
+  try {
+    const r = await runtime.handleStream(
+      { bot: to, from: from.id, text: message, sessionId: sid, history: store.listMessages(sid).slice(-200) },
+      {
+        depth,
+        extraSystem: instructionsFor(parentActive),
+        signal: signal ?? (parentSessionId ? inflight.get(parentSessionId)?.signal : undefined),
+        onBlock: (block) => {
+          if (parentSessionId && mainWin && !mainWin.isDestroyed()) mainWin.webContents.send("chat:b2b", { parentSessionId, botId: to.id, block });
+        },
+      },
+    );
+    pushPetEvent(to.id, { type: "reply", text: r.text.slice(0, 120) });
+    return `${to.name} 回复：${r.text}`;
+  } finally {
+    if (parentActive && activeSession.get(to.id) === parentActive) activeSession.delete(to.id);
+    statuses.set(to.id, { botId: to.id, state: "idle", lastRunAt: Date.now() });
+  }
+}
+
+/** 冷启动：用最近一次用户消息时间；没有则视为「刚活跃」，避免 idle 闸门 fail-open */
+function seedLastUserAt(): number {
+  let latest = 0;
+  for (const s of store.listSessions()) {
+    for (const m of store.listMessages(s.id)) {
+      if (m.role === "user" && m.from === "user" && m.createdAt > latest) latest = m.createdAt;
+    }
+  }
+  return latest || Date.now();
+}
+let lastUserAt = seedLastUserAt();
+function touchUserActivity() { lastUserAt = Date.now(); }
+function readPetPrefs(botId?: string): PetPrefs {
+  return resolvePetPrefs(store.readConfig() as Record<string, unknown>, botId);
+}
+
+/** 窗口当前是否在桌面可见（藏起来 ≠ 关宠） */
+function isPetShown(botId: string): boolean {
+  const w = petWins.get(botId);
+  return !!(w && !w.isDestroyed() && w.isVisible());
+}
+
+/** 持久化 PetState.visible，并与窗口 show/hide 对齐 */
+function persistPetVisible(botId: string, visible: boolean, pos?: { x: number; y: number; displayId?: number }) {
+  const cur = store.listPets().find((p) => p.botId === botId) || { botId, x: 0, y: 0, visible: true };
+  store.savePet({
+    ...cur,
+    visible,
+    ...(pos ? { x: pos.x, y: pos.y, displayId: pos.displayId ?? cur.displayId } : {}),
+  });
+}
+
+function hidePetWindow(botId?: string) {
+  const ids = botId ? [botId] : [...petWins.keys()];
+  for (const id of ids) {
+    const w = petWins.get(id);
+    if (w && !w.isDestroyed()) {
+      w.hide();
+      const [x, y] = w.getPosition();
+      persistPetVisible(id, false, { x, y, displayId: screen.getDisplayNearestPoint({ x, y }).id });
+    } else {
+      persistPetVisible(id, false);
+    }
+  }
+}
+
+function showPetWindow(botId?: string) {
+  const targets = botId
+    ? [botId].filter((id) => store.getBot(id)?.petEnabled)
+    : store.listBots().filter((b) => b.petEnabled).map((b) => b.id);
+  for (const id of targets) {
+    createPetWindow(id, { forceShow: true });
+    persistPetVisible(id, true);
+  }
+  updateTrayIcon();
+}
+
+function applyBotSkin(botId: string, skinId: string, label?: string) {
+  const bot = store.getBot(botId);
+  if (!bot) throw new Error("bot 不存在");
+  const prev = bot.skinId;
+  const next = { ...bot, skinId, prevSkinId: prev && prev !== skinId ? prev : bot.prevSkinId };
+  store.saveBot(next);
+  pushPetEvent(botId, { type: "skin-updated", text: `皮肤已切换为「${label || skinId}」` });
+  updateTrayIcon();
+  return next;
+}
+const proactive = new ProactiveEngine(home, {
+  collect: () => collectSignals({
+    sessions: store.listSessions(),
+    messages: (sid) => store.listMessages(sid),
+    plans: orchestrator.list(),
+    tasks: scheduler.list(),
+    masterId: store.listBots().find((b) => b.isMaster)?.id,
+    nameOf: (id) => store.getBot(id)?.name ?? id,
+    now: Date.now(),
+  }),
+  lastUserActivity: () => lastUserAt,
+  idleMs: () => readPetPrefs().idleMinutes * 60_000,
+  phrase: async (sig) => {
+    const bot = store.getBot(sig.botId);
+    const provider = (bot && providers.get(bot.providerId)) || providers.getDefault();
+    if (!bot || !provider || statuses.get(bot.id)?.state === "running") return null;
+    const r = await providers.complete(provider, {
+      model: providers.get(bot.providerId) ? bot.model : undefined,
+      system: `${bot.systemPrompt || `你是 ${bot.name}（${bot.role}）`}\n\n现在由你主动跟用户跟进一件没完成的事。用一两句口语说清是哪件事，再给一个具体的下一步提议（比如「要我重跑一遍吗？」「选好了告诉我，我接着做」）。不寒暄、不道歉、不编造事实，不超过 80 字。`,
+      user: `事情：${sig.fact}`,
+      signal: AbortSignal.timeout(30_000),
+    });
+    return r.text.replace(/```[\s\S]*?```/g, "").trim();
+  },
+  deliver: (sig, text) => {
+    const bot = store.getBot(sig.botId);
+    // 跟进只服务已上台桌宠；气泡仅对当前可见窗
+    if (!bot?.petEnabled) return;
+    if (!readPetPrefs(sig.botId).proactiveFollowup) return;
+    const sid = sig.sessionId ?? store.listSessions(sig.botId).filter((s) => /^s-/.test(s.id)).sort((a, b) => b.updatedAt - a.updatedAt)[0]?.id;
+    if (!sid) return;
+    store.addMessage({ sessionId: sid, from: sig.botId, to: "user", role: "assistant", content: [{ type: "text", text }], kind: "chat", createdAt: Date.now(), meta: { proactive: true } });
+    if (isPetShown(sig.botId)) pushPetEvent(sig.botId, { type: "proactive", title: "跟进", text, sessionId: sid });
+    void deliverNotification({ title: `${bot.name} · 跟进`, body: text.slice(0, 120) });
+    console.log(`[proactive] ${sig.kind} → ${bot.name}：${text.slice(0, 60)}`);
+  },
+});
+const companion = new CompanionEngine(home, {
+  bots: () => store.listBots(),
+  memory: (id) => memory.list(id),
+  lastUserActivity: () => lastUserAt,
+  isBusy: (id) => statuses.get(id)?.state === "running",
+  prefs: (botId) => {
+    const p = readPetPrefs(botId);
+    return {
+      companionChat: p.companionChat,
+      idleWork: p.idleWork,
+      autoAppearance: p.autoAppearance,
+      idleMs: p.idleMinutes * 60_000,
+      maxChatPerDay: p.maxChatPerDay,
+      maxWorkPerDay: p.maxWorkPerDay,
+      maxAppearPerWeek: p.maxAppearPerWeek,
+    };
+  },
+  isShown: (id) => isPetShown(id),
+  work: async (bot) => {
+    if (statuses.get(bot.id)?.state === "running") return null;
+    const sid = `s-pet-idle-${bot.id}`;
+    const signals = collectSignals({
+      sessions: store.listSessions(bot.id),
+      messages: (id) => store.listMessages(id),
+      plans: orchestrator.list(),
+      tasks: scheduler.list().filter((t) => t.botId === bot.id),
+      masterId: bot.id,
+      nameOf: (id) => store.getBot(id)?.name ?? id,
+      now: Date.now(),
+    }).slice(0, 5);
+    const fact = signals.map((s) => s.fact).join("；") || "最近没有明显未完成事项";
+    const mind = loadPetMindFor(bot.id);
+    statuses.set(bot.id, { botId: bot.id, state: "running", lastRunAt: Date.now(), currentTask: "空闲小事" });
+    try {
+      const provider = providers.get(bot.providerId) || providers.getDefault();
+      let text = "";
+      let via: "model" | "rule" = "rule";
+      if (provider) {
+        const r = await providers.complete(provider, {
+          model: providers.get(bot.providerId) ? bot.model : undefined,
+          system: `${bot.systemPrompt || `你是 ${bot.name}`}\n你是桌宠，空闲时做一件只读观察并汇报。禁止假装已执行操作/改文件。要具体、有用，引用心智里的记忆或信号，不超过 80 字。`,
+          user: `${mind ? formatMindForPrompt(mind) + "\n\n" : ""}未完成信号：${fact}\n给一句真正有用的观察或下一步提议。`,
+          signal: AbortSignal.timeout(30_000),
+        });
+        text = (r.text || "").replace(/```[\s\S]*?```/g, "").replace(/\s+/g, " ").trim().slice(0, 160);
+        if (text) via = "model";
+      }
+      if (!text && signals[0]?.fact) {
+        text = `对了，还有件事：${signals[0].fact.slice(0, 60)}…需要的话叫我。`;
+      }
+      if (!text) {
+        notePetDecision(home, { botId: bot.id, kind: "idleWork", via: "system", note: "无信号可汇报", blocked: true });
+        return null;
+      }
+      store.addMessage({
+        sessionId: sid, from: bot.id, to: "user", role: "assistant",
+        content: [{ type: "text", text }], kind: "chat", createdAt: Date.now(),
+        meta: { petIdleWork: true, via },
+      });
+      notePetDecision(home, { botId: bot.id, kind: "idleWork", via, note: text.slice(0, 80) });
+      return { text, title: "空闲小事" };
+    } catch (e) {
+      console.error("[companion.work]", e);
+      notePetDecision(home, { botId: bot.id, kind: "idleWork", via: "system", note: String(e).slice(0, 80), blocked: true });
+      return null;
+    } finally {
+      statuses.set(bot.id, { botId: bot.id, state: "idle", lastRunAt: Date.now() });
+    }
+  },
+  appear: async (bot) => {
+    if (statuses.get(bot.id)?.state === "running") return null;
+    statuses.set(bot.id, { botId: bot.id, state: "running", lastRunAt: Date.now(), currentTask: "自动换装" });
+    try {
+      const msgs = store.listSessions(bot.id)
+        .filter((s) => /^s-/.test(s.id))
+        .sort((a, b) => b.updatedAt - a.updatedAt)
+        .slice(0, 2)
+        .flatMap((s) => store.listMessages(s.id).filter((m) => m.role === "user").slice(-2));
+      const hint = msgs.map((m) => contentText(m.content)).join(" ").replace(/\s+/g, " ").slice(0, 120);
+      const pets = await fetchPetdexManifest(join(assetsDir, "skins"));
+      const local = petSkins.list().filter((s) => s.id !== bot.skinId).slice(0, 12)
+        .map((s) => ({ slug: s.id, name: s.name, installed: true }));
+      const searched = searchPetdex(pets, hint.slice(0, 24) || bot.role || "cute", 8)
+        .map((p) => ({
+          slug: p.slug,
+          name: RECOMMENDED_PETDEX.find((r) => r.slug === p.slug)?.name || p.displayName,
+          installed: !!petSkins.list().find((s) => s.id === petdexSkinId(p.slug)),
+        }));
+      const candidates = [...local, ...searched].filter((c, i, arr) => arr.findIndex((x) => x.slug === c.slug) === i).slice(0, 16);
+      if (!candidates.length) return null;
+
+      let pick = candidates[0];
+      let reason = "";
+      const provider = providers.get(bot.providerId) || providers.getDefault();
+      if (provider) {
+        try {
+          const r = await providers.complete(provider, {
+            model: providers.get(bot.providerId) ? bot.model : undefined,
+            system: `你是桌宠 ${bot.name}。根据近期话题从候选形象里选一个最合适的换上。只输出 JSON：{"slug":"...","name":"...","why":"一句原因≤40字"}。必须选候选里有的 slug。`,
+            user: `人设：${bot.persona || bot.role}\n近期话题：${hint || "（无）"}\n候选：\n${candidates.map((c) => `- ${c.slug}｜${c.name}`).join("\n")}`,
+            signal: AbortSignal.timeout(20_000),
+          });
+          const m = (r.text || "").match(/\{[\s\S]*\}/);
+          if (m) {
+            const j = JSON.parse(m[0]) as { slug?: string; name?: string; why?: string };
+            const hit = candidates.find((c) => c.slug === j.slug || c.name === j.name);
+            if (hit) { pick = hit; reason = String(j.why || "").trim().slice(0, 40); }
+          }
+        } catch (e) {
+          console.error("[companion.appear.invent]", e);
+        }
+      }
+
+      // 候选可能是已装 skinId 或 petdex slug
+      let skinId = pick.slug;
+      let label = pick.name;
+      if (!petSkins.get(skinId)) {
+        const entry = pets.find((p) => p.slug === pick.slug) || searchPetdex(pets, pick.slug, 1)[0];
+        if (!entry) return null;
+        skinId = petdexSkinId(entry.slug);
+        label = RECOMMENDED_PETDEX.find((r) => r.slug === entry.slug)?.name || entry.displayName;
+        if (!petSkins.get(skinId)) {
+          const skin = await installPetdex(entry, assetsDir, label);
+          petSkins.register(skin);
+        }
+      }
+      if (bot.skinId === skinId) return null;
+      applyBotSkin(bot.id, skinId, label);
+      const line = reason
+        ? `我换上了「${label}」——${reason}。不喜欢就说「换回去」。`
+        : `我换上了「${label}」。不喜欢就说「换回去」。`;
+      return { text: line, title: "自动换装" };
+    } catch (e) {
+      console.error("[companion.appear]", e);
+      return null;
+    } finally {
+      statuses.set(bot.id, { botId: bot.id, state: "idle", lastRunAt: Date.now() });
+    }
+  },
+  chat: async (bot) => {
+    if (statuses.get(bot.id)?.state === "running") return null;
+    const provider = providers.get(bot.providerId) || providers.getDefault();
+    if (!provider) return null;
+    const mem = memory.list(bot.id).slice(0, 6).map((m) => `- ${m.content.slice(0, 48)}`).join("\n");
+    const hour = new Date().getHours();
+    const slot = hour < 6 ? "深夜" : hour < 12 ? "上午" : hour < 18 ? "下午" : "晚上";
+    try {
+      const r = await providers.complete(provider, {
+        model: providers.get(bot.providerId) ? bot.model : undefined,
+        system: `${bot.systemPrompt || `你是 ${bot.name}（${bot.role}）`}\n人设：${bot.persona || bot.personaCard?.traits?.join("、") || "友好"}\n\n你是桌面上的宠物，空闲时主动跟用户说一句短话。要像在陪着对方，可引用记忆，不要命令式、不要编造刚做完的事，不超过 60 字。`,
+        user: `现在是${slot}。记忆：\n${mem || "（暂无）"}\n说一句自然的搭话。`,
+        signal: AbortSignal.timeout(20_000),
+      });
+      const text = (r.text || "").replace(/```[\s\S]*?```/g, "").replace(/\s+/g, " ").trim().slice(0, 120);
+      if (!text) return null;
+      return { text, title: "搭话" };
+    } catch (e) {
+      console.error("[companion.chat]", e);
+      return null;
+    }
+  },
+  deliver: (botId, line) => {
+    const bot = store.getBot(botId);
+    const sid = store.listSessions(botId).filter((s) => /^s-/.test(s.id)).sort((a, b) => b.updatedAt - a.updatedAt)[0]?.id
+      || `s-pet-companion-${botId}`;
+    // 写入会话，方便下次对话有连续性
+    try {
+      store.ensureSession(sid, botId, "桌宠陪伴");
+      store.addMessage({
+        sessionId: sid, from: botId, to: "user", role: "assistant",
+        content: [{ type: "text", text: line.text }], kind: "chat", createdAt: Date.now(),
+        meta: { companion: line.kind || "chat" },
+      });
+    } catch (e) {
+      console.error("[companion.persist]", e);
+    }
+    const title = line.title || (line.kind === "work" ? "空闲小事" : line.kind === "appear" ? "自动换装" : bot?.name || "陪伴");
+    const evType = line.kind === "work" ? "companion-work" : line.kind === "appear" ? "companion-appear" : "companion";
+    pushPetEvent(botId, {
+      type: evType,
+      title,
+      text: line.text,
+      sessionId: sid,
+      action: line.kind === "work" ? "work" : line.kind === "appear" ? "celebrate" : "think",
+      hold: 3,
+    });
+    console.log(`[companion] ${bot?.name}：${line.text.slice(0, 60)}`);
+  },
+});
+const petVisit = new PetVisitEngine(home, {
+  bots: () => store.listBots(),
+  enabled: () => readPetPrefs().petVisit,
+  isShown: (id) => isPetShown(id),
+  inventLines: async (from, to) => {
+    const provider = providers.get(from.providerId) || providers.get(to.providerId) || providers.getDefault();
+    if (!provider) return null;
+    try {
+      const r = await providers.complete(provider, {
+        model: undefined,
+        system: "两个桌宠见面打招呼。只输出 JSON：{\"from\":\"访客说的一句≤40字\",\"to\":\"主人回应≤40字\"}。要贴合各自人设，口语、有趣，不要解释。",
+        user: `访客：${from.name}（${from.persona || from.personaCard?.traits?.join("、") || from.role}）\n主人：${to.name}（${to.persona || to.personaCard?.traits?.join("、") || to.role}）`,
+        signal: AbortSignal.timeout(15_000),
+      });
+      return parseVisitLines(r.text || "");
+    } catch (e) {
+      console.error("[pet-visit.invent]", e);
+      return null;
+    }
+  },
+});
+/** 叠加特效库：复用 / 模型现场发明 / 规则兜底；不改皮肤；TTL/LRU 回收 */
+const petEffects = new PetEffectRegistry(home);
+
+async function inventFxWithModel(botId: string, phrase: string): Promise<{ name: string; aliases: string[]; recipe: FxRecipe } | null> {
+  const bot = store.getBot(botId);
+  const provider = (bot && providers.get(bot.providerId)) || providers.getDefault();
+  if (!provider) return null;
+  try {
+    const r = await providers.complete(provider, {
+      model: bot && providers.get(bot.providerId) ? bot.model : undefined,
+      system: fxInventSystemPrompt(),
+      user: fxInventUserPrompt(phrase),
+      signal: AbortSignal.timeout(18_000),
+    });
+    return parseInventedEffect(r.text || "");
+  } catch (e) {
+    console.error("[fx.invent]", e);
+    return null;
+  }
+}
+
+function fxUserMessage(mode: "reuse" | "invent" | "fallback", name: string): string {
+  if (mode === "reuse") return `复用已有「${name}」——喝！`;
+  if (mode === "invent") return `现场做了「${name}」并记住了（叠加层，不改形象；久不用会回收，可钉住）。`;
+  return `模型没空，用兜底放出了「${name}」（已记下，下次可复用）。`;
+}
+
+function playPetEffect(
+  botId: string,
+  effect: { id: string; name: string; recipe: FxRecipe },
+  mode: "reuse" | "invent" | "fallback" = "reuse",
+) {
+  const r = effect.recipe;
+  pushPetEvent(botId, {
+    type: "fx",
+    title: effect.name,
+    text: fxUserMessage(mode, effect.name),
+    action: r.motion,
+    hold: r.holdSec ?? 2,
+    fx: {
+      id: effect.id,
+      overlay: r.overlay,
+      color: r.color,
+      durationMs: r.durationMs ?? 1800,
+      label: r.label,
+      dir: r.dir,
+    },
+  });
+}
+
+async function resolveAndPlayFx(botId: string, phrase: string) {
+  const { effect, mode } = await petEffects.resolveSmart(phrase, (p) => inventFxWithModel(botId, p));
+  playPetEffect(botId, effect, mode);
+  return { effect, mode, message: fxUserMessage(mode, effect.name) };
+}
+
+/** 把已记录的互访演出来：访客走过去 → 双方庆祝对白 → 走回家 */
+function stagePetVisit(
+  rec: { fromId: string; toId: string; fromName: string; toName: string; lineFrom: string; lineTo: string },
+  opts?: { forceShow?: boolean },
+) {
+  if (opts?.forceShow) {
+    createPetWindow(rec.fromId, { forceShow: true });
+    createPetWindow(rec.toId, { forceShow: true });
+  }
+  const guest = petWins.get(rec.fromId);
+  const host = petWins.get(rec.toId);
+  // 出门：走路
+  pushPetEvent(rec.fromId, { type: "action", action: "walk", hold: 2 });
+  if (guest && host && !guest.isDestroyed() && !host.isDestroyed()) {
+    if (opts?.forceShow || guest.isVisible()) guest.show();
+    if (opts?.forceShow || host.isVisible()) host.show();
+    if (guest.isVisible() && host.isVisible()) {
+      const [hx, hy] = host.getPosition();
+      const [gx, gy] = guest.getPosition();
+      const homePos = { x: gx, y: gy };
+      // 稍晚再挪窗，让 walk 先播一点
+      setTimeout(() => {
+        if (guest.isDestroyed()) return;
+        guest.setPosition(hx - 120, hy);
+        pushPetEvent(rec.fromId, {
+          type: "visit", title: `去找 ${rec.toName}`, text: rec.lineFrom,
+          peerId: rec.toId, peerName: rec.toName, role: "guest", action: "celebrate", hold: 4,
+        });
+        pushPetEvent(rec.toId, {
+          type: "visit", title: `${rec.fromName} 来串门`, text: rec.lineTo,
+          peerId: rec.fromId, peerName: rec.fromName, role: "host", action: "celebrate", hold: 4,
+        });
+      }, 600);
+      setTimeout(() => {
+        if (guest.isDestroyed()) return;
+        pushPetEvent(rec.fromId, { type: "action", action: "walk", hold: 2 });
+        guest.setPosition(homePos.x, homePos.y);
+        setTimeout(() => pushPetEvent(rec.fromId, { type: "action", action: "idle", hold: 0 }), 1800);
+      }, 8_000);
+      grantPetXp(rec.fromId, 3);
+      grantPetXp(rec.toId, 3);
+      return rec;
+    }
+  }
+  // 窗口不可见时仍推气泡，不演位置
+  pushPetEvent(rec.fromId, {
+    type: "visit", title: `去找 ${rec.toName}`, text: rec.lineFrom,
+    peerId: rec.toId, peerName: rec.toName, role: "guest", action: "celebrate", hold: 3,
+  });
+  pushPetEvent(rec.toId, {
+    type: "visit", title: `${rec.fromName} 来串门`, text: rec.lineTo,
+    peerId: rec.fromId, peerName: rec.fromName, role: "host", action: "celebrate", hold: 3,
+  });
+  grantPetXp(rec.fromId, 3);
+  grantPetXp(rec.toId, 3);
+  return rec;
+}
+
+/** 发起互访（用户/工具）；force 忽略冷却并强制亮窗；台词优先模型 */
+async function runPetVisit(fromId: string, toId: string, force = false) {
+  const from = store.getBot(fromId);
+  const to = store.getBot(toId);
+  if (!from || !to) return null;
+  const rec = await petVisit.visitSmart(from, to, { force });
+  if (!rec) return null;
+  return stagePetVisit(rec, { forceShow: force });
+}
+
+const petEvolve = new PetEvolveEngine(home, {
+  bots: () => store.listBots(),
+  memory: (id) => memory.list(id),
+  recentUserMessages: (botId, limit = 12) => {
+    const sessions = store.listSessions(botId).filter((s) => /^s-/.test(s.id)).sort((a, b) => b.updatedAt - a.updatedAt).slice(0, 3);
+    const out: import("../core/types").ChatMessage[] = [];
+    for (const s of sessions) {
+      for (const m of store.listMessages(s.id)) {
+        if (m.role === "user" && m.from === "user") out.push(m);
+      }
+    }
+    return out.sort((a, b) => b.createdAt - a.createdAt).slice(0, limit);
+  },
+  petXp: (botId) => store.listPets().find((p) => p.botId === botId)?.xp ?? 0,
+  enabled: () => readPetPrefs().selfEvolve,
+  autoApply: () => readPetPrefs().autoEvolve,
+  invent: async (bot, ctx) => {
+    const provider = providers.get(bot.providerId) || providers.getDefault();
+    if (!provider) return null;
+    try {
+      const r = await providers.complete(provider, {
+        model: providers.get(bot.providerId) ? bot.model : undefined,
+        system: `你是桌宠 ${bot.name}，观察相处后提出一条自进化小提议。只输出 JSON：{"kind":"play"|"work_style"|"habit"|"skill_hint","title":"≤20字问句","detail":"≤80字说明","personaAppend":"可选","memory":{"kind":"fact"|"rule","content":"可选"}}。要具体、可拒绝。`,
+        user: `人设：${bot.persona || bot.role}\n等级：Lv.${ctx.level}\n记忆：\n${ctx.memory.slice(0, 6).map((m) => `- [${m.kind}] ${m.content.slice(0, 40)}`).join("\n") || "（无）"}\n最近用户话：\n${ctx.messages.map((t) => `- ${t.slice(0, 60)}`).join("\n")}`,
+        signal: AbortSignal.timeout(20_000),
+      });
+      return parseEvolveInvent(r.text || "");
+    } catch (e) {
+      console.error("[pet-evolve.invent]", e);
+      return null;
+    }
+  },
+  apply: (botId, proposal) => {
+    const bot = store.getBot(botId);
+    if (!bot) return;
+    if (proposal.personaAppend) {
+      const persona = `${bot.persona || ""}${bot.persona ? "\n" : ""}${proposal.personaAppend}`.trim();
+      store.saveBot({ ...bot, persona });
+    }
+    if (proposal.memory) {
+      memory.add(botId, { kind: proposal.memory.kind, content: proposal.memory.content, source: "pet-evolve" });
+    }
+    pushPetEvent(botId, { type: "proactive", title: "进化生效", text: `好，我记下了：${proposal.title}` });
+  },
+  deliver: (botId, proposal) => {
+    pushPetEvent(botId, {
+      type: "proactive",
+      title: "进化提议",
+      text: `${proposal.title}\n${proposal.detail}\n\n回「好」接受，回「不要」算了。`,
+    });
+  },
+});
+
+function forgetPetSideState(botId: string) {
+  try { petEvolve.forgetBot(botId); } catch { /* ignore */ }
+  try { petVisit.forgetBot(botId); } catch { /* ignore */ }
+  try { companion.forgetBot(botId); } catch { /* ignore */ }
+  const all = store.readConfig();
+  const prev = (all.prefs as Record<string, unknown> | undefined) || {};
+  store.writeConfig({ ...all, prefs: clearPetBotPrefs(prev, botId) });
+}
+
+store.onMessageAdded((m) => {
+  if (m.role === "user" && m.from === "user") lastUserAt = m.createdAt;
+  if (mainWin && !mainWin.isDestroyed()) mainWin.webContents.send("messages:new", m);
+  notifyReply(m);
+});
+
+/**
+ * 通知投递：先走 Electron UNNotification；开发态即使系统设置里 Electron 已开，
+ * 也常报 UNErrorDomain 1 —— 再降级 osascript `display notification`（本机已验证可用）。
+ * blocked 持久化；notifyMuted = 用户点「不再提醒」。
+ */
+let notifyState: "unknown" | "ok" | "blocked" = store.readConfig().notifyBlocked ? "blocked" : "unknown";
+let notifyMuted = !!store.readConfig().notifyMuted;
+let notifyProbePending = notifyState === "blocked" && !notifyMuted;
+let notifyProbeInflight: Promise<"ok" | "blocked" | "unknown"> | null = null;
+let notifyProbedThisSession = false;
+const notifyAppLabel = () => (app.isPackaged ? "harness-bot" : "Electron");
+function pushNotifyUi(reason?: string) {
+  sendUi("notify:state", { state: notifyState, reason, muted: notifyMuted, appLabel: notifyAppLabel() });
+}
+function setNotifyState(next: "ok" | "blocked", reason?: string) {
+  if (next === "ok" && notifyMuted) {
+    notifyMuted = false;
+    store.writeConfig({ ...store.readConfig(), notifyMuted: false });
+  }
+  if (next === notifyState) {
+    pushNotifyUi(reason);
+    return;
+  }
+  notifyState = next;
+  store.writeConfig({ ...store.readConfig(), notifyBlocked: next === "blocked" });
+  pushNotifyUi(reason);
+}
+
+function escapeAppleScript(s: string): string {
+  return s.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+}
+
+/** osascript 兜底：不依赖 Electron 的 UNNotification 授权 */
+async function notifyOsascript(title: string, body: string): Promise<boolean> {
+  if (process.platform !== "darwin") return false;
+  const { execFile } = await import("node:child_process");
+  return new Promise((resolve) => {
+    execFile(
+      "osascript",
+      ["-e", `display notification "${escapeAppleScript(body.slice(0, 180))}" with title "${escapeAppleScript(title.slice(0, 80))}"`],
+      { timeout: 8000 },
+      (err) => {
+        if (err) {
+          console.log(`[notify] osascript failed：${err.message}`);
+          resolve(false);
+        } else {
+          console.log("[notify] ok：osascript");
+          resolve(true);
+        }
+      },
+    );
+  });
+}
+
+/** 只测 Electron 通道，不改全局状态 */
+function showElectronNotification(opts: { title: string; body: string; silent?: boolean; onClick?: () => void }): Promise<boolean> {
+  return new Promise((resolve) => {
+    if (!Notification.isSupported()) return resolve(false);
+    let settled = false;
+    const done = (ok: boolean, reason?: string) => {
+      if (settled) return;
+      settled = true;
+      console.log(`[notify] electron ${ok ? "ok" : "failed"}${reason ? `：${reason}` : ""}`);
+      resolve(ok);
+    };
+    try {
+      const n = new Notification({ title: opts.title, body: opts.body, silent: !!opts.silent });
+      if (opts.onClick) n.on("click", opts.onClick);
+      n.once("show", () => done(true));
+      n.once("failed", (_e, err) => done(false, String(err ?? "")));
+      n.show();
+      // 开发态常既不 show 也不 failed；超时后走 osascript 兜底，不要误报成功
+      setTimeout(() => done(false, "超时未回调"), 2000);
+    } catch (e) {
+      done(false, e instanceof Error ? e.message : String(e));
+    }
+  });
+}
+
+/** Electron → osascript；两者都失败才记 blocked */
+async function deliverNotification(opts: {
+  title: string;
+  body: string;
+  silent?: boolean;
+  onClick?: () => void;
+  updateState?: boolean;
+}): Promise<boolean> {
+  const update = opts.updateState !== false;
+  let ok = await showElectronNotification(opts);
+  if (!ok) ok = await notifyOsascript(opts.title, opts.body);
+  if (update) setNotifyState(ok ? "ok" : "blocked", ok ? undefined : "Electron 与系统通知均失败");
+  return ok;
+}
+
+/** 探测：每会话默认一次；重新检测 force=true */
+async function probeNotify(force = false): Promise<"ok" | "blocked" | "unknown"> {
+  if (notifyState === "ok" && !force) return "ok";
+  if (notifyProbedThisSession && !force && notifyState === "blocked") {
+    pushNotifyUi("本会话已测过");
+    return notifyState;
+  }
+  if (notifyProbeInflight) return notifyProbeInflight;
+  notifyProbeInflight = (async () => {
+    try {
+      notifyProbedThisSession = true;
+      await deliverNotification({ title: "Harness Bot", body: "通知已就绪 ✓", silent: false });
+      return notifyState;
+    } finally {
+      notifyProbeInflight = null;
+    }
+  })();
+  return notifyProbeInflight;
+}
+
+/** 设提醒时确认通知能弹 */
+async function notifyCheck(title: string, body: string): Promise<boolean> {
+  if (notifyState === "ok") return true;
+  return deliverNotification({ title, body });
+}
+
+/** 窗口不在前台时 Dock 图标跳动 + 任务栏闪烁（系统通知被拦时也能注意到） */
+function attention() {
+  if (mainWin && !mainWin.isDestroyed() && mainWin.isFocused()) return;
+  if (process.platform === "darwin") app.dock?.bounce("critical");
+  else mainWin?.flashFrame(true);
+}
+
+/** 窗口不在前台时，bot 的新回复（含定时任务）弹系统通知，点一下跳到那个会话 */
+const lastNotified = new Map<string, number>();
+function notifyReply(m: import("../core/types").ChatMessage) {
+  if (m.role !== "assistant" || m.kind === "bot-to-bot" || m.kind === "event" || isB2bSession(m.sessionId) || m.sessionId.startsWith("group-")) return;
+  // 定时提醒到点：窗口在前台也要弹
+  if (!m.meta?.scheduled && mainWin && !mainWin.isDestroyed() && mainWin.isFocused()) return;
+  if (Date.now() - (lastNotified.get(m.sessionId) ?? 0) < 4000) return;
+  lastNotified.set(m.sessionId, Date.now());
+  const bot = store.getBot(m.from);
+  const body = contentText(m.content).replace(/```tool[\s\S]*?```/g, "").replace(/\s+/g, " ").trim().slice(0, 90) || "发来了新内容";
+  void deliverNotification({
+    title: bot?.name ?? "Harness Bot",
+    body,
+    onClick: () => {
+      if (!mainWin || mainWin.isDestroyed()) createMainWindow();
+      mainWin?.show();
+      mainWin?.focus();
+      mainWin?.webContents.send("window:open-session", m.sessionId);
+    },
+  });
+}
 
 // 形象生成：有图像 provider 时用真 API，否则降级
 function personaWithImage() {
-  const imgProv = providers.list().find((p) => p.kind === "openai-compat" && p.model?.startsWith("dall") || p.model?.startsWith("gpt-image"));
+  const imgProv = providers.list().find((p) => p.kind === "openai-compat" && (p.model?.startsWith("dall") || p.model?.startsWith("gpt-image")));
+  // 也认设置页单独配的 imageGen
+  const cfg = store.readConfig().imageGen as { baseUrl?: string; model?: string; apiKey?: string } | undefined;
+  if (cfg?.baseUrl && cfg.model) {
+    return new PersonaGenerator(store, assetsDir, new OpenAICompatImageGen({
+      kind: "openai-compat",
+      id: "image-gen",
+      name: "图片",
+      baseUrl: cfg.baseUrl,
+      apiKey: openStoredKey(cfg.apiKey),
+      model: cfg.model,
+      createdAt: 0,
+    } as any));
+  }
   if (imgProv) return new PersonaGenerator(store, assetsDir, new OpenAICompatImageGen(imgProv));
   return persona;
 }
 
+/**
+ * 智能形象（模型优先）：
+ * AI 生图 → 真图；否则代码画头像，并由模型/规则决定 keep / shape / 换本地皮；
+ * 无本地强匹配时再尝试 petdex。绝不写字母渐变假 PNG，不无脑硬切形状色块。
+ */
+async function resolveAppearance(botId: string, desc: string, style?: "default" | "pixel" | "cute") {
+  const bot = store.getBot(botId);
+  if (!bot) throw new Error("bot 不存在");
+  const localSkins = petSkins.list().map((s) => ({ id: s.id, name: s.name, desc: s.desc }));
+  const gen = personaWithImage();
+
+  const pickSmart = async (ctx: {
+    description: string;
+    suggestions: import("../core/persona").AppearanceSuggestion[];
+    currentSkinId?: string;
+  }): Promise<AppearancePick | null> => {
+    const provider = providers.get(bot.providerId) || providers.getDefault();
+    if (!provider) return null;
+    const locals = ctx.suggestions.filter((s) => s.kind === "live2d" || s.kind === "local");
+    try {
+      const r = await providers.complete(provider, {
+        model: providers.get(bot.providerId) ? bot.model : undefined,
+        system: `你是桌宠形象导演。用户一句话要改形象。在候选里选最合适的落地方式。只输出 JSON：
+{"action":"keep"|"shape"|"skin","id":"仅 skin 时填候选 id","why":"≤30字"}
+规则：几何/简单色块（球/心/星/色块）→ shape；有明显匹配的 Live2D/本地皮 → skin；写实复杂但候选对不上 → keep（只改聊天头像，桌宠保持原皮）。禁止编造不在候选里的 id。`,
+        user: `描述：${ctx.description}\n当前皮：${ctx.currentSkinId || "无"}\n候选：\n${locals.map((s) => `- ${s.id}｜${s.name}｜分${s.score}｜${s.why}`).join("\n") || "（无）"}`,
+        signal: AbortSignal.timeout(15_000),
+      });
+      return parseAppearancePick(r.text || "", ctx.suggestions);
+    } catch (e) {
+      console.error("[appear.pickSmart]", e);
+      return null;
+    }
+  };
+
+  let result = await gen.generate(bot, desc, style, { localSkins, preferSkin: true, pickSmart });
+
+  if (result.appliedSkin) {
+    applyBotSkin(botId, result.appliedSkin.id, result.appliedSkin.name);
+  } else if (!result.imaged) {
+    // keep：高分 petdex 再尝试装社区皮；失败则头像已写好、桌宠保持原皮
+    const pd = result.suggestions.find((s) => s.kind === "petdex" && s.score >= 50);
+    if (pd) {
+      try {
+        const pets = await fetchPetdexManifest(join(assetsDir, "skins"));
+        const entry = pets.find((p) => p.slug === pd.id) || searchPetdex(pets, pd.id, 1)[0];
+        if (entry) {
+          const id = petdexSkinId(entry.slug);
+          if (!petSkins.list().find((s) => s.id === id)) {
+            const skin = await installPetdex(entry, assetsDir, pd.name);
+            petSkins.register(skin);
+          }
+          applyBotSkin(botId, id, pd.name);
+          result = {
+            ...result,
+            appliedSkin: { id, name: pd.name },
+            message: `${result.message} 已从社区库装上「${pd.name}」。`,
+          };
+        }
+      } catch {
+        // 网络失败：保留代码形状头像 + 原皮
+      }
+    }
+  }
+
+  const title = result.imaged
+    ? (result.card?.name || bot.name)
+    : (result.codeDrawn ? "代码形状头像" : (result.appliedSkin?.name || "角色卡已更新"));
+  pushPetEvent(botId, {
+    type: result.imaged || result.codeDrawn || result.appliedSkin ? "avatar-updated" : "proactive",
+    text: result.message,
+    title,
+  });
+  return result;
+}
+
 function loadMcpServers(): McpServerConfig[] {
   const cfg = store.readConfig();
-  const servers = (cfg as any).mcpServers ?? [];
-  return servers as McpServerConfig[];
+  const servers = ((cfg as { mcpServers?: McpServerConfig[] }).mcpServers ?? []) as McpServerConfig[];
+  const ensured = ensureBuiltinMcpServers(servers, home);
+  const needWrite = !servers.some((s) => s.id === COMPUTER_MCP_ID && s.builtin)
+    || servers.length !== ensured.length
+    || servers.find((s) => s.id === COMPUTER_MCP_ID)?.command !== ensured.find((s) => s.id === COMPUTER_MCP_ID)?.command
+    || servers.find((s) => s.id === COMPUTER_MCP_ID)?.enabled !== ensured.find((s) => s.id === COMPUTER_MCP_ID)?.enabled;
+  if (needWrite) store.writeConfig({ ...cfg, mcpServers: ensured });
+  return mcpServersForClient(ensured, home);
+}
+function allMcpServers(): McpServerConfig[] {
+  return ensureBuiltinMcpServers((store.readConfig().mcpServers as McpServerConfig[] | undefined) ?? [], home);
+}
+let computerDoctorNote = "";
+let computerPrefsPending = false;
+function computerUseStatus(): ComputerUseStatus {
+  if (process.platform !== "darwin") {
+    return { platformOk: false, enabled: false, runtimeReady: false, tools: 0, permissions: { accessibility: false, screen: false }, needsPermission: false, error: "仅支持 macOS", steps: [] };
+  }
+  const all = allMcpServers();
+  const row = all.find((s) => s.id === COMPUTER_MCP_ID);
+  const enabled = !!(row && row.enabled !== false);
+  const st = mcp.status().find((s) => s.id === COMPUTER_MCP_ID);
+  const perms = tccStatus();
+  const tools = st?.tools ?? 0;
+  const rawErr = enabled ? st?.error : undefined;
+  const runtimeReady = !!(row?.command && (!row.command.startsWith("/") || existsSync(row.command)) && (tools > 0 || !rawErr));
+  const error = humanizeComputerError(rawErr);
+  const base = { enabled, runtimeReady: runtimeReady || tools > 0, tools, permissions: perms, error };
+  return {
+    platformOk: true,
+    ...base,
+    needsPermission: !perms.accessibility || !perms.screen,
+    uvx: row?.command,
+    steps: buildComputerSteps(base),
+    doctor: computerDoctorNote || undefined,
+  };
+}
+async function probeComputerDoctor(): Promise<string> {
+  try {
+    const out = await mcp.callTool(COMPUTER_MCP_ID, "macos_doctor", {});
+    computerDoctorNote = String(out).replace(/\s+/g, " ").slice(0, 280);
+    return computerDoctorNote;
+  } catch (e) {
+    computerDoctorNote = humanizeComputerError(e instanceof Error ? e.message : String(e)) ?? "";
+    return computerDoctorNote;
+  }
+}
+async function setComputerUseEnabled(on: boolean, onProgress?: (msg: string) => void): Promise<ComputerUseStatus> {
+  if (process.platform !== "darwin") throw new Error("仅支持 macOS");
+  let next = allMcpServers();
+  if (on) {
+    const { uvx } = await ensureManagedUv(home, onProgress);
+    await warmComputerUseKit(uvx, onProgress);
+    const ready = computerMcpConfig(home);
+    next = ensureBuiltinMcpServers([...next.filter((s) => s.id !== COMPUTER_MCP_ID), { ...ready, enabled: true }], home);
+    onProgress?.("正在连接电脑操控…");
+  } else {
+    next = next.map((s) => (s.id === COMPUTER_MCP_ID ? { ...s, enabled: false } : s));
+    computerDoctorNote = "";
+  }
+  store.writeConfig({ ...store.readConfig(), mcpServers: next });
+  await mcp.reload(mcpServersForClient(next, home));
+  if (on) {
+    onProgress?.("正在自检权限与能力…");
+    await probeComputerDoctor();
+    const st = computerUseStatus();
+    if (st.needsPermission) computerPrefsPending = true;
+  }
+  return computerUseStatus();
 }
 
 // 为所有 bot 注册默认消息处理器：调用其绑定的 provider 生成回复
-async function defaultHandler(from: any, to: any, text: string, ctx: any): Promise<string> {
+/** 总线 handler：用户消息已由 MessageBus 落盘，runtime 只记回复；返回 recorded 避免总线再写一遍 */
+async function defaultHandler(from: any, to: any, text: string, ctx: any): Promise<{ text: string; recorded: true }> {
   const bot = store.getBot(to.id);
-  if (!bot) return "bot 不存在";
+  if (!bot) return { text: "bot 不存在", recorded: true };
   statuses.set(bot.id, { botId: bot.id, state: "running", lastRunAt: Date.now(), currentTask: text.slice(0, 60) });
   try {
-    const r = await runtime.handle({
-      bot,
-      from: from.id || "user",
-      text,
-      sessionId: ctx.sessionId,
-      history: store.listMessages(ctx.sessionId).slice(-10),
-    });
+    const r = await runtime.handle(
+      { bot, from: from.id || "user", text, sessionId: ctx.sessionId, history: store.listMessages(ctx.sessionId).slice(-200) },
+      { skipUserRecord: true, extraSystem: instructionsFor(ctx.sessionId) },
+    );
     statuses.set(bot.id, { botId: bot.id, state: "idle", lastRunAt: Date.now() });
     if (bot.petEnabled) {
       const xp = grantPetXp(bot.id, 10);
-      pushPetEvent(bot.id, { type: "reply", text: r.text.slice(0, 120), model: bot.model || providers.get(bot.providerId)?.model || providers.getDefault()?.model, xp });
+      pushPetEvent(bot.id, { type: "reply", text: r.text.slice(0, 120), rich: r.content, model: bot.model || providers.get(bot.providerId)?.model || providers.getDefault()?.model, xp });
     } else {
-      pushPetEvent(bot.id, { type: "reply", text: r.text.slice(0, 120) });
+      pushPetEvent(bot.id, { type: "reply", text: r.text.slice(0, 120), rich: r.content });
     }
-    return r.text;
+    return { text: r.text, recorded: true };
   } catch (e) {
     statuses.set(bot.id, { botId: bot.id, state: "error", lastRunAt: Date.now(), lastError: e instanceof Error ? e.message : String(e) });
     throw e;
@@ -128,13 +1445,64 @@ async function defaultHandler(from: any, to: any, text: string, ctx: any): Promi
 
 // 注册已有 bot + 新 bot 时自动注册
 function registerAll() {
-  for (const b of store.listBots()) bus.register(b.id, defaultHandler);
+  for (const b of store.listBots()) {
+    const patched = withDefaultAvatar(b);
+    if (patched) store.saveBot(patched);
+    bus.register(b.id, defaultHandler);
+  }
 }
 registerAll();
 
 let tray: Tray | null = null;
 let mainWin: BrowserWindow | null = null;
 const petWins = new Map<string, BrowserWindow>();
+const PET_WIN_W = 360, PET_WIN_H = 700;
+
+// Live2D 视线跟随：定时把全局鼠标位置（换算为窗口内坐标）推给宠物窗口
+let lastCursor = "";
+setInterval(() => {
+  if (!petWins.size) return;
+  const p = screen.getCursorScreenPoint();
+  const key = `${p.x},${p.y}`;
+  if (key === lastCursor) return;
+  lastCursor = key;
+  for (const w of petWins.values()) {
+    if (w.isDestroyed() || !w.isVisible()) continue;
+    const [wx, wy] = w.getPosition();
+    w.webContents.send("pet:cursor", { x: p.x - wx, y: p.y - wy });
+  }
+}, 80);
+
+ipcMain.on("pet:setIgnoreMouse", (e, ignore: boolean) => {
+  BrowserWindow.fromWebContents(e.sender)?.setIgnoreMouseEvents(ignore, { forward: true });
+});
+
+// 宠物拖动：主进程按全局鼠标位置移动窗口（-webkit-app-region 与鼠标穿透在 macOS 上冲突）
+const petDrags = new Map<number, { timer: ReturnType<typeof setInterval>; dx: number; dy: number }>();
+ipcMain.on("pet:drag", (e, phase: "start" | "end") => {
+  const win = BrowserWindow.fromWebContents(e.sender);
+  if (!win) return;
+  const prev = petDrags.get(win.id);
+  if (prev) { clearInterval(prev.timer); petDrags.delete(win.id); }
+  if (phase === "end") {
+    const botId = [...petWins.entries()].find(([, w]) => w === win)?.[0];
+    if (botId) {
+      const [bx, by] = win.getPosition();
+      persistPetVisible(botId, !win.isDestroyed() && win.isVisible(), {
+        x: bx, y: by, displayId: screen.getDisplayNearestPoint({ x: bx, y: by }).id,
+      });
+    }
+    return;
+  }
+  const c = screen.getCursorScreenPoint();
+  const [wx, wy] = win.getPosition();
+  const drag = { dx: c.x - wx, dy: c.y - wy, timer: setInterval(() => {
+    if (win.isDestroyed()) { clearInterval(drag.timer); petDrags.delete(win.id); return; }
+    const p = screen.getCursorScreenPoint();
+    win.setPosition(p.x - drag.dx, p.y - drag.dy);
+  }, 16) };
+  petDrags.set(win.id, drag);
+});
 
 /** G5.5：宠物成长经验 +n（落盘 pets.json，返回新 xp） */
 function grantPetXp(botId: string, n: number): number {
@@ -145,7 +1513,13 @@ function grantPetXp(botId: string, n: number): number {
 }
 
 /** 向某 bot 的宠物窗口推送事件（不存在则跳过） */
-function pushPetEvent(botId: string, event: { type: string; text?: string; title?: string; rich?: import("../core/types").ContentBlock[]; sessionId?: string; model?: string; xp?: number }) {
+function pushPetEvent(botId: string, event: {
+  type: string; text?: string; title?: string; rich?: import("../core/types").ContentBlock[];
+  sessionId?: string; model?: string; xp?: number;
+  peerId?: string; peerName?: string; role?: string;
+  action?: string; hold?: number;
+  fx?: { id?: string; overlay: string; color?: string; durationMs?: number; label?: string; dir?: string };
+}) {
   const win = petWins.get(botId);
   if (win && !win.isDestroyed()) {
     win.webContents.send("pet:event", event);
@@ -174,12 +1548,13 @@ function tccStatus() {
 
 function createMainWindow() {
   mainWin = new BrowserWindow({
-    width: 1080,
-    height: 780,
-    minWidth: 800,
+    width: 1180,
+    height: 800,
+    minWidth: 860,
     minHeight: 600,
     title: "Harness Bot",
-    backgroundColor: "#0d0d0d",
+    titleBarStyle: "hiddenInset",
+    backgroundColor: "#ffffff",
     show: false,
     webPreferences: {
       preload: join(DIST_DIR, "preload.cjs"),
@@ -188,34 +1563,92 @@ function createMainWindow() {
     },
   });
   mainWin.loadURL(pathToFileURL(join(DIST_DIR, "renderer", "index.html")).toString());
+  // 用户从「系统设置 → 通知 / 电脑操控权限」回来时重测
+  mainWin.on("focus", () => {
+    if (notifyProbePending) {
+      notifyProbePending = false;
+      void probeNotify(true);
+    }
+    if (computerPrefsPending) {
+      computerPrefsPending = false;
+      const st = computerUseStatus();
+      if (mainWin && !mainWin.isDestroyed()) {
+        mainWin.webContents.send("app:changed", "mcp");
+        mainWin.webContents.send("computerUse:status", st);
+      }
+      if (st.needsPermission) computerPrefsPending = true; // 还没勾完，下次再看
+    }
+  });
+  // 消息里的链接（来源引用等）用系统浏览器打开，面板本身不跳走
+  mainWin.webContents.setWindowOpenHandler(({ url }) => {
+    if (/^https?:\/\//.test(url)) void shell.openExternal(url);
+    return { action: "deny" };
+  });
+  mainWin.webContents.on("will-navigate", (e, url) => {
+    if (url.startsWith("file:") && url.includes("/renderer/index.html")) return;
+    e.preventDefault();
+    if (/^https?:\/\//.test(url)) void shell.openExternal(url);
+  });
+  // 主进程卡住时页面可能既不完成也不报失败：30 秒没加载完就重新加载
+  const loadWatchdog = setTimeout(() => {
+    if (!mainWin || mainWin.isDestroyed()) return;
+    console.error("[harness] 主面板 30 秒没加载完，重新加载");
+    mainWin.reload();
+  }, 30_000);
   mainWin.webContents.on("did-finish-load", () => {
+    clearTimeout(loadWatchdog);
     console.log("[harness] 主控面板渲染完成 ✅");
+    for (const s of pendingImports.splice(0)) mainWin?.webContents.send("bots:importLink", s);
     mainWin?.webContents.executeJavaScript("typeof window.harness !== 'undefined' ? 'bridge-ok' : 'bridge-missing'")
       .then((r) => console.log("[harness] preload bridge:", r))
       .catch(() => console.log("[harness] bridge check skipped"));
   });
   mainWin.once("ready-to-show", () => mainWin?.show());
   mainWin.on("closed", () => { mainWin = null; });
+  mainWin.webContents.on("console-message", (e) => {
+    if (e.level === "error") logger.write("error", `[renderer] ${e.message} (${e.sourceId.split("/").pop()}:${e.lineNumber})`);
+  });
+  mainWin.webContents.on("render-process-gone", (_e, d) => {
+    console.error(`[harness] 主面板渲染进程退出：${d.reason}`);
+    if (d.reason !== "clean-exit" && mainWin && !mainWin.isDestroyed()) mainWin.reload();
+  });
+  // 启动时主进程被卡住（如等钥匙串授权）会让页面加载失败、窗口白屏：失败就重新加载
+  mainWin.webContents.on("did-fail-load", (_e, code, desc, _url, isMainFrame) => {
+    if (!isMainFrame || code === -3) return;
+    console.error(`[harness] 主面板加载失败（${code} ${desc}），重新加载`);
+    setTimeout(() => { if (mainWin && !mainWin.isDestroyed()) mainWin.reload(); }, 1000);
+  });
 }
 
-function createPetWindow(botId: string) {
-  if (petWins.has(botId)) return petWins.get(botId);
+/**
+ * 创建/复用宠物窗口。
+ * - 仅 petEnabled 可建窗
+ * - forceShow：强制亮出来（托盘「显示」、手动拜访）
+ * - 否则尊重 PetState.visible（启动恢复可保持隐藏）
+ */
+function createPetWindow(botId: string, opts?: { forceShow?: boolean }) {
   const bot = store.getBot(botId);
-  if (!bot) return;
+  if (!bot?.petEnabled) return;
   const saved = store.listPets().find((p) => p.botId === botId);
-  const PW = 320, PH = 360; // 宠物窗口：容纳完整 180px 形象 + 气泡/HUD/菜单
+  const wantShow = opts?.forceShow || saved?.visible !== false;
+
+  const existing = petWins.get(botId);
+  if (existing && !existing.isDestroyed()) {
+    if (wantShow && !existing.isVisible()) existing.show();
+    if (!wantShow && existing.isVisible()) existing.hide();
+    return existing;
+  }
+
+  // 宠物固定在窗口底部，上方透明区留给气泡/HUD；透明区域鼠标穿透（pet:setIgnoreMouse）
+  const PW = PET_WIN_W, PH = PET_WIN_H;
   let x: number, y: number;
   if (saved) {
-    // 多显示器记忆：优先恢复到记录所在显示器（displayId），坐标换算到该屏
-    const disp = saved.displayId != null ? screen.getAllDisplays().find((d) => d.id === saved.displayId) : undefined;
-    const target = disp || screen.getDisplayNearestPoint({ x: saved.x, y: saved.y });
-    x = saved.x;
-    y = saved.y;
-    if (disp && (x < disp.workArea.x || x > disp.workArea.x + disp.workArea.width - PW || y < disp.workArea.y || y > disp.workArea.y + disp.workArea.height - PH)) {
-      x = disp.workArea.x + disp.workArea.width - PW - 8;
-      y = disp.workArea.y + disp.workArea.height - PH - 8;
-    }
-    void target;
+    // 多显示器记忆：优先恢复到记录所在显示器（displayId），越界时夹回屏内而不是重置到角落
+    const disp = (saved.displayId != null ? screen.getAllDisplays().find((d) => d.id === saved.displayId) : undefined)
+      ?? screen.getDisplayNearestPoint({ x: saved.x, y: saved.y });
+    const wa = disp.workArea;
+    x = Math.min(Math.max(saved.x, wa.x), wa.x + wa.width - PW);
+    y = Math.min(Math.max(saved.y, wa.y), wa.y + wa.height - PH);
   } else {
     const wa = screen.getPrimaryDisplay().workArea;
     x = wa.x + wa.width - PW - 8;
@@ -225,6 +1658,7 @@ function createPetWindow(botId: string) {
     width: PW,
     height: PH,
     x, y,
+    show: wantShow,
     transparent: true,
     frame: false,
     alwaysOnTop: true,
@@ -248,83 +1682,188 @@ function createPetWindow(botId: string) {
   win.on("moved", () => {
     const [bx, by] = win.getPosition();
     const displayId = screen.getDisplayNearestPoint({ x: bx, y: by }).id;
-    store.savePet({ botId, x: bx, y: by, visible: true, displayId });
+    persistPetVisible(botId, !win.isDestroyed() && win.isVisible(), { x: bx, y: by, displayId });
   });
   petWins.set(botId, win);
+  if (!saved) persistPetVisible(botId, wantShow, { x, y });
   return win;
+}
+
+/** 托盘图标：优先用当前启用宠物的 sprite 首帧，否则用默认粉团子 */
+function trayIconFromSkin(): Electron.NativeImage {
+  const fallback = () => {
+    const p2 = join(DIST_DIR, "..", "assets", "tray@2x.png");
+    const p1 = join(DIST_DIR, "..", "assets", "tray.png");
+    const hi = nativeImage.createFromPath(p2);
+    if (!hi.isEmpty()) return hi.resize({ width: 22, height: 22 });
+    const lo = nativeImage.createFromPath(p1);
+    return lo.isEmpty() ? nativeImage.createEmpty() : lo.resize({ width: 22, height: 22 });
+  };
+  const bot = store.listBots().find((b) => b.petEnabled && b.skinId);
+  if (!bot?.skinId) return fallback();
+  const skin = petSkins.get(bot.skinId);
+  const sp = skin?.sprite;
+  if (!sp?.path || !existsSync(sp.path)) return fallback();
+  try {
+    const sheet = nativeImage.createFromPath(sp.path);
+    if (sheet.isEmpty()) return fallback();
+    const { width, height } = sheet.getSize();
+    const cols = Math.max(1, sp.cols || 8);
+    const rows = Math.max(1, sp.rows || 9);
+    const cellW = sp.cellW || Math.floor(width / cols);
+    const cellH = sp.cellH || Math.floor(height / rows);
+    if (cellW < 4 || cellH < 4) return fallback();
+    // idle 首帧通常在 (0,0)
+    const frame = sheet.crop({ x: 0, y: 0, width: Math.min(cellW, width), height: Math.min(cellH, height) });
+    return frame.resize({ width: 22, height: 22, quality: "best" });
+  } catch {
+    return fallback();
+  }
+}
+
+function updateTrayIcon() {
+  if (!tray) return;
+  try {
+    const icon = trayIconFromSkin();
+    if (!icon.isEmpty()) tray.setImage(icon);
+  } catch { /* tray 已销毁时忽略 */ }
 }
 
 function refreshTray() {
   const menu = Menu.buildFromTemplate([
-    { label: "打开主控面板", click: () => mainWin ? mainWin.show() : createMainWindow() },
+    { label: "打开主控面板", click: () => { if (mainWin && !mainWin.isDestroyed()) { mainWin.show(); mainWin.focus(); } else createMainWindow(); } },
     { type: "separator" },
-    { label: "宠物：全部显示", click: () => { for (const b of store.listBots().filter((x) => x.petEnabled)) createPetWindow(b.id); } },
-    { label: "宠物：全部隐藏", click: () => { for (const w of petWins.values()) w.hide(); } },
+    { label: "宠物：全部显示", click: () => showPetWindow() },
+    { label: "宠物：全部隐藏", click: () => hidePetWindow() },
     { type: "separator" },
+    { label: "打开日志文件夹", click: () => void shell.openPath(logger.dir) },
     { label: "退出", click: () => app.quit() },
   ]);
   tray?.setContextMenu(menu);
+  updateTrayIcon();
 }
 
-app.whenReady().then(() => {
-  const icon = nativeImage.createFromPath(join(DIST_DIR, "..", "assets", "tray.png"));
-  tray = new Tray(icon.isEmpty() ? nativeImage.createEmpty() : icon);
-  tray.setToolTip("Harness Bot");
-  refreshTray();
-  createMainWindow();
+/** 别人分享的 bot 模板：harnessbot:// 链接或 .harnessbot 文件，交给界面预览后导入 */
+const pendingImports: string[] = [];
+function deliverImport(payload: string) {
+  if (mainWin && !mainWin.webContents.isLoading()) {
+    mainWin.show();
+    mainWin.webContents.send("bots:importLink", payload);
+  } else pendingImports.push(payload);
+}
+if (process.defaultApp && process.argv[1]) app.setAsDefaultProtocolClient(TEMPLATE_SCHEME, process.execPath, [resolve(process.argv[1])]);
+else app.setAsDefaultProtocolClient(TEMPLATE_SCHEME);
+app.on("open-url", (e, url) => {
+  e.preventDefault();
+  if (url.toLowerCase().startsWith(`${TEMPLATE_SCHEME}://`)) deliverImport(url);
+});
+app.on("open-file", (e, path) => {
+  if (extname(path).toLowerCase() !== `.${TEMPLATE_EXT}`) return;
+  e.preventDefault();
+  try { deliverImport(readFileSync(path, "utf8")); } catch { /* 读不了就忽略 */ }
+});
 
-  // G3：启动时恢复已启用的宠物窗口（多显示器记忆位置）
-  for (const b of store.listBots().filter((x) => x.petEnabled)) createPetWindow(b.id);
+app.whenReady().then(() => {
+  // 先碰一次钥匙串：签名变了 macOS 会弹授权框并卡住主进程；放在建窗口之前，免得页面加载到一半超时白屏
+  try { if (safeStorage.isEncryptionAvailable()) safeStorage.decryptString(safeStorage.encryptString("probe")); } catch (e) { console.error("[harness] 钥匙串不可用", e); }
+  store.setKeyCipher(keyCipher);
+  try { encryptLegacyConfigKeys(); } catch (e) { console.error("[harness] 加密旧配置 key 失败", e); }
+  semantic.setup();
+  setInterval(() => semantic.schedule(0), 10 * 60_000).unref();
+  setTimeout(() => {
+    try {
+      const n = store.offloadInlineImages();
+      prunePlanSessions();
+      if (n) console.log(`[harness] ${n} 个会话里的内嵌图片已改存为文件`);
+    } catch (e) { console.error("[harness] 整理会话失败", e); }
+  }, 3000);
+  if (!EVAL_MODE) {
+    tray = new Tray(trayIconFromSkin());
+    tray.setToolTip("Harness Bot");
+    refreshTray();
+    createMainWindow();
+    // G3：启动时恢复已启用的宠物窗口（多显示器记忆位置）
+    for (const b of store.listBots().filter((x) => x.petEnabled)) createPetWindow(b.id);
+    updateTrayIcon();
+  }
 
   // G4：编排器阶段执行器（走 bot 运行时）
-  orchestrator.stageRunner = async (stage) => {
+  orchestrator.stageRunner = async (stage, _prev, ctx) => {
     const bot = store.getBot(stage.botId);
     if (!bot) throw new Error(`阶段 bot 不存在: ${stage.botId}`);
+    prunePlanSessions(stage.id);
     const sid = `plan-${Date.now()}-${stage.id}`;
-    const r = await runtime.handle({ bot, from: "orchestrator", text: stage.prompt, sessionId: sid });
+    ctx.onActivity("思考中");
+    const r = await runtime.handleStream({ bot, from: "orchestrator", text: stage.prompt, sessionId: sid }, {
+      signal: ctx.signal,
+      unattended: true,
+      onBlock: (b) => {
+        if (b.type === "text") ctx.onText(b.text);
+        else if (b.type === "tool_call" && b.status === "running") ctx.onActivity(`调用 ${b.tool}`);
+      },
+    });
+    if (ctx.signal.aborted) throw new Error("已取消");
+    if (!r.text.trim()) throw new Error(`${bot.name} 没有给出产出`);
     return r.text;
   };
+  /** 实时产出逐字推送太密，合并成每 250ms 一次 */
+  const planPush = new Map<string, ReturnType<typeof setTimeout>>();
+  orchestrator.onChange = (plan) => {
+    if (planPush.has(plan.id)) return;
+    planPush.set(plan.id, setTimeout(() => { planPush.delete(plan.id); sendUi("plans:update", plan); }, 250));
+  };
 
-  // G5：授权弹窗（用户批准/一次/长期/拒绝；危险操作强确认）
-  consent.decider = (req) => {
+  // G5：授权请求以卡片形式出现在 bot 正在干活的会话里（没有窗口时退回系统弹窗）
+  consent.decider = async (req) => {
     const bot = store.getBot(req.botId);
     const name = bot?.name || req.botId;
-    const danger = req.requiresStrongConsent ? "\n\n⚠️ 危险操作，请确认身份后输入 confirm 批准。" : "";
-    const btn = dialog.showMessageBoxSync(mainWin as BrowserWindow, {
-      type: danger ? "warning" : "question",
-      title: `系统授权请求 — ${name}`,
-      message: `${name} 请求使用「${req.cap}」能力`,
-      detail: `${req.description}${danger}`,
-      buttons: ["批准一次", "长期批准", "拒绝"],
-      defaultId: 2,
-      cancelId: 2,
-      noLink: true,
-    });
-    if (danger && btn !== 2) {
-      // 危险操作二次确认：输入 confirm
-      const input = dialog.showMessageBoxSync(mainWin as BrowserWindow, {
-        type: "warning",
-        title: "危险操作二次确认",
-        message: "输入 confirm 以确认执行危险操作",
-        buttons: ["我输入了 confirm", "取消"],
-        defaultId: 1,
-      });
-      if (input !== 0) return "deny" as const;
+    const capLabel = capLabelOf(req.cap);
+    const strong = !!req.requiresStrongConsent;
+    if (!mainWin || mainWin.isDestroyed()) {
+      const choices: [string, ConsentDecision][] = [["批准一次", "allow-once"]];
+      if (!strong && !req.onceOnly && req.command) choices.push([`总是允许 ${req.command}`, "allow-command"]);
+      if (!strong && !req.command && req.cap !== "bash:other") choices.push(["长期批准", "allow"]);
+      choices.push(["拒绝", "deny"]);
+      const detail = `${req.description}${req.reasons?.length ? `\n\n需要注意：${req.reasons.join("；")}` : ""}`;
+      const btn = dialog.showMessageBoxSync({ type: "question", title: `系统授权请求 — ${name}`, message: `${name} 请求使用「${capLabel}」`, detail, buttons: choices.map((c) => c[0]), defaultId: choices.length - 1, cancelId: choices.length - 1, noLink: true });
+      return choices[btn]?.[1] ?? "deny";
     }
-    if (btn === 0) return "allow-once" as const;
-    if (btn === 1) return "allow" as const;
-    return "deny" as const;
+    const id = `c-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    const sessionId = activeSession.get(req.botId) ?? null;
+    const signal = sessionId ? inflight.get(sessionId)?.signal : undefined;
+    const decision = await new Promise<ConsentDecision>((resolve) => {
+      const done = (d: ConsentDecision) => { clearTimeout(timer); signal?.removeEventListener("abort", onAbort); pendingConsent.delete(id); resolve(d); };
+      const timer = setTimeout(() => done("deny"), 10 * 60_000);
+      const onAbort = () => done("deny");
+      signal?.addEventListener("abort", onAbort);
+      pendingConsent.set(id, done);
+      sendUi("consent:request", { id, botId: req.botId, botName: name, cap: req.cap, capLabel, description: req.description, danger: strong, command: req.command, onceOnly: !!req.onceOnly, reasons: req.reasons ?? [], sessionId });
+    });
+    if (sessionId) {
+      const note = decision === "allow-command"
+        ? `🔐 你允许 ${name} 以后直接执行 ${req.command}`
+        : `🔐 你${decision === "allow-once" ? "批准了一次" : decision === "allow" ? "长期批准了" : "拒绝了"} ${name} ${req.command ? `执行 ${req.command}` : `使用「${capLabel}」`}`;
+      const held = consentNotes.get(sessionId);
+      if (held) held.push(note);
+      else store.addMessage({ sessionId, from: "system", to: "user", role: "assistant", content: note, kind: "event", createdAt: Date.now() });
+    }
+    sendUi("consent:resolved", { id, decision });
+    return decision;
   };
 
   // G4：HTTP 网关（config.gateway 开启时）
-  void (async () => {
+  if (!EVAL_MODE) void (async () => {
     try {
-      const cfg = store.readConfig() as { gateway?: { port?: number; token?: string } };
+      const cfg = store.readConfig() as { gateway?: { port?: number; token?: string; host?: string } };
       const gw = cfg.gateway;
       if (gw?.port) {
-        const server = new GatewayServer(gw.port, gw.token || "harness-default-token", bus);
+        if (!gw.token || gw.token.length < 16 || gw.token === "harness-default-token") {
+          gw.token = randomBytes(24).toString("hex");
+          store.writeConfig({ ...store.readConfig(), gateway: gw });
+        }
+        const server = new GatewayServer(gw.port, gw.token, bus, { host: gw.host });
         const port = await server.start();
-        console.log(`[harness] 网关已启动 :${port} 🕸`);
+        console.log(`[harness] 网关已启动 ${gw.host ?? "127.0.0.1"}:${port} 🕸（token 见 config.json）`);
       }
     } catch (e) {
       console.log("[harness] 网关启动失败（忽略）:", e instanceof Error ? e.message : e);
@@ -335,24 +1874,39 @@ app.whenReady().then(() => {
   scheduler.onRun = async (task) => {
     const bot = store.getBot(task.botId);
     if (!bot) return;
-    const sid = `sched-${task.id}-${Date.now()}`;
+    // 同一个任务每次运行都记在同一个会话里，不会每跑一次多一个会话
+    const sid = `sched-${task.id}`;
+    // 在单聊里设的任务：结果直接发回那个会话（系统通知可能被 macOS 拦掉，聊天里一定看得到）
+    const replySid = task.sessionId && !task.sessionId.startsWith("group-") && !isB2bSession(task.sessionId) && store.getSession(task.sessionId) ? task.sessionId : null;
     try {
       statuses.set(task.botId, { botId: task.botId, state: "running", lastRunAt: Date.now(), currentTask: `⏰ ${task.name}` });
-      const r = await runtime.handle({ bot, from: "scheduler", text: task.prompt ?? task.name, sessionId: sid });
+      const limit = AbortSignal.timeout(15 * 60_000);
+      const text = (task.prompt ?? task.name) + (replySid ? "\n\n（这是你之前替用户设的定时任务，现在到点了。你的回复会直接显示在和用户的聊天里：直接对用户说要提醒的内容或任务结果，不要说「我来发通知」之类的过程话，也不用调用 notify，系统会自动弹通知。）" : "");
+      const r = await runtime.handle(
+        { bot, from: "scheduler", text, sessionId: sid, history: store.listMessages(sid).slice(-20) },
+        { signal: limit, unattended: true },
+      );
+      if (limit.aborted) throw new Error("运行超过 15 分钟，已停止");
       statuses.set(task.botId, { botId: task.botId, state: "idle", lastRunAt: Date.now() });
-      system.notify(`⏰ ${bot.name} 定时任务`, task.name);
+      if (replySid) {
+        const reply = r.text.replace(/```tool[\s\S]*?```/g, "").trim() || task.name;
+        store.addMessage({ sessionId: replySid, from: bot.id, to: "user", role: "assistant", content: [{ type: "text", text: reply.startsWith("⏰") ? reply : `⏰ ${reply}` }], kind: "chat", createdAt: Date.now(), meta: { scheduled: task.name } });
+        attention();
+      } else void system.notify(`⏰ ${bot.name} 定时任务`, task.name);
       const xp = bot.petEnabled ? grantPetXp(task.botId, 20) : undefined;
       pushPetEvent(task.botId, { type: "task-done", title: task.name, text: r.text.slice(0, 120), rich: r.content, sessionId: sid, model: bot.model || providers.get(bot.providerId)?.model || providers.getDefault()?.model, xp });
     } catch (e) {
       const err = e instanceof Error ? e.message : String(e);
       statuses.set(task.botId, { botId: task.botId, state: "error", lastError: err });
       pushPetEvent(task.botId, { type: "task-error", title: task.name, text: err.slice(0, 120), sessionId: sid });
+      throw e;
     }
   };
   scheduler.onAlarm = (task) => {
     const bot = store.getBot(task.botId);
     if (!bot) return;
-    system.notify(`⏰ ${bot.name} 提醒`, task.name);
+    // 要执行 prompt 的任务由 onRun 发结果，这里不重复弹
+    if (!task.runPrompt) void system.notify(`⏰ ${bot.name} 提醒`, task.name);
     pushPetEvent(task.botId, {
       type: "alarm",
       title: task.name,
@@ -360,98 +1914,380 @@ app.whenReady().then(() => {
       sessionId: task.sessionId,
     });
   };
+  // 创建 / 删除 / 到期自动删 后刷新右栏定时任务列表
+  scheduler.onChange = () => {
+    if (mainWin && !mainWin.isDestroyed()) mainWin.webContents.send("app:changed", "tasks");
+  };
+  if (EVAL_MODE) { void runEvalMode({ home, store, groups, providers, runtime, consent, exit: (code) => app.exit(code) }); return; }
   scheduler.start();
 
-  // 主动搭话：有宠物模式且空闲的 bot，随机主动问候（离线人格引擎）
-  setInterval(() => {
-    const pets = store.listBots().filter((b) => b.petEnabled && statuses.get(b.id)?.state !== "running");
-    if (!pets.length || Math.random() > 0.25) return;
-    const bot = pets[Math.floor(Math.random() * pets.length)];
-    const line = new OfflinePersona().proactive(bot, memory.list(bot.id));
-    if (line) {
-      pushPetEvent(bot.id, { type: "proactive", title: line.title, text: line.text });
-    }
-  }, 5 * 60_000);
+  // 主动跟进：有真实的悬而未决的事才开口（prefs.pet.proactiveFollowup 可关）
+  const tickProactive = () => {
+    if (!readPetPrefs().proactiveFollowup) return;
+    void proactive.tick().catch((e) => console.error("[proactive]", e));
+  };
+  setTimeout(tickProactive, 2 * 60_000);
+  setInterval(tickProactive, 5 * 60_000);
+  // 轻量陪伴 / 空闲做事 / 自动换装（由 prefs.pet 闸门）
+  const tickCompanion = () => { void companion.tick().catch((e) => console.error("[companion]", e)); };
+  setTimeout(tickCompanion, 3 * 60_000);
+  setInterval(tickCompanion, 10 * 60_000);
+  // 自进化：低频观察 → 模型提议（失败规则兜底）或 autoEvolve 自动接受
+  setTimeout(() => { void petEvolve.tick().catch((e) => console.error("[pet-evolve]", e)); }, 8 * 60_000);
+  setInterval(() => { void petEvolve.tick().catch((e) => console.error("[pet-evolve]", e)); }, 30 * 60_000);
+  // 多宠互访：约每 15 分钟试一次（台词优先模型）
+  setTimeout(() => { void petVisit.tick().then((r) => { if (r) stagePetVisit(r); }).catch((e) => console.error("[pet-visit]", e)); }, 12 * 60_000);
+  setInterval(() => { void petVisit.tick().then((r) => { if (r) stagePetVisit(r); }).catch((e) => console.error("[pet-visit]", e)); }, 15 * 60_000);
 
   app.on("activate", () => mainWin ? mainWin.show() : createMainWindow());
 });
 
 // ---- IPC：主控面板 / 宠物调用 core ----
 ipcMain.handle("bots:list", () => store.listBots());
-ipcMain.handle("bots:create", async (_e, text: string) => {
-  const bot = await registry.createBotFromText(text, { defaultProviderId: providers.getDefault()?.id });
+ipcMain.handle("bots:previews", () => {
+  const out: Record<string, { text: string; at: number; running: boolean }> = {};
+  for (const b of store.listBots()) {
+    const s = store.listSessionsPage({ botId: b.id, limit: 20 }).sessions.find((x) => isB2bSession(x.id) ? x.id.endsWith(`-${b.id}`) : !/^(plan|sched)-/.test(x.id));
+    const last = s ? store.listMessages(s.id).findLast((m) => m.kind !== "event") : undefined;
+    const asker = s && isB2bSession(s.id) ? store.getBot(s.id.slice(4, -(b.id.length + 1)))?.name ?? "另一个 bot" : null;
+    const raw = (asker ? `🤝 ${asker}：` : "") + (last ? (typeof last.content === "string" ? last.content : last.content.map((c: any) => c.text ?? "").join(" ")) : "");
+    out[b.id] = { text: raw.replace(/\[([^\]]+)\]\((?:app:|https?:)[^)]*\)/g, "$1").replace(/\s+/g, " ").slice(0, 60), at: last?.createdAt ?? s?.updatedAt ?? 0, running: statuses.get(b.id)?.state === "running" };
+  }
+  return out;
+});
+ipcMain.handle("bots:create", async (_e, text: string, opts?: { name?: string; avatar?: Bot["avatar"] }) => {
+  let bot = await registry.createBotFromText(text, { defaultProviderId: providers.getDefault()?.id });
+  const taken = new Set(store.listBots().filter((b) => b.id !== bot.id).map((b) => b.name));
+  let name = opts?.name?.trim() || bot.name;
+  for (let i = 2; taken.has(name); i++) name = `${(opts?.name?.trim() || bot.name)} ${i}`;
+  if (name !== bot.name || opts?.avatar) bot = registry.updateBot(bot.id, { ...(name !== bot.name ? { name } : {}), ...(opts?.avatar ? { avatar: opts.avatar } : {}) }) ?? bot;
   bus.register(bot.id, defaultHandler);
+  // 默认出台：创建完就现身，不用再开关「打开宠物」
+  if (bot.petEnabled && !EVAL_MODE) createPetWindow(bot.id);
   return bot;
 });
-ipcMain.handle("bots:delete", (_e, id: string) => { registry.deleteBot(id); bus.unregister(id); petWins.get(id)?.close(); });
-ipcMain.handle("bots:setPet", (_e, id: string, enabled: boolean) => {
-  registry.setPetEnabled(id, enabled);
-  if (enabled) createPetWindow(id); else petWins.get(id)?.close();
-});
-ipcMain.handle("skins:list", () => petSkins.list().map((s) => ({ id: s.id, name: s.name, color: s.color, desc: s.desc, fps: s.fps, sprite: s.sprite })));
-// G5.5：下载 openpets/petdex spritesheet 皮肤 → 存本地 assets/skins/<id>/
-ipcMain.handle("skins:download", async (_e, input: { id: string; name: string; url: string; rows?: number; cols?: number }) => {
-  const dir = join(assetsDir, "skins", input.id);
-  mkdirSync(dir, { recursive: true });
-  const res = await fetch(input.url);
-  if (!res.ok) throw new Error(`下载失败 HTTP ${res.status}`);
-  const buf = Buffer.from(await res.arrayBuffer());
-  const path = join(dir, "spritesheet.webp");
-  writeFileSync(path, buf);
-  const rows = input.rows ?? 9, cols = input.cols ?? 8;
-  const dataUrl = `data:image/webp;base64,${buf.toString("base64")}`;
-  // 注册为 sprite 皮肤（emoji 帧兜底 + sprite 播放）
-  petSkins.register({
-    id: input.id,
-    name: input.name,
-    color: "#888",
-    desc: `openpets 社区皮肤（${rows}×${cols} 帧）`,
-    fps: 8,
-    sprite: { url: input.url, path, rows, cols },
-    frames: EMOJI_FALLBACK,
-  });
-  return { ok: true, path, sprite: { path, rows, cols }, dataUrl: dataUrl.slice(0, 50) + "…" };
-});
-// G5.5：回写 spritesheet 每格尺寸（pet 窗口 Image 探测后持久化，重启直接播放）
-ipcMain.handle("skins:setMeta", (_e, id: string, meta: { cellW: number; cellH: number }) => {
-  const sk = petSkins.get(id);
-  if (!sk?.sprite?.path) throw new Error("皮肤不存在或非 sprite 皮肤");
-  petSkins.register({ ...sk, sprite: { ...sk.sprite, cellW: meta.cellW, cellH: meta.cellH } });
-  return { ok: true };
-});
-ipcMain.handle("bots:setSkin", (_e, id: string, skinId: string) => {
+ipcMain.handle("bots:update", (_e, id: string, patch: { name?: string; role?: string; persona?: string; providerId?: string; isMaster?: boolean; order?: number; avatar?: Bot["avatar"]; reasoning?: Bot["reasoning"] }) => {
   const bot = store.getBot(id);
   if (!bot) throw new Error("bot 不存在");
-  const next = { ...bot, skinId };
+  if (patch.isMaster) {
+    for (const b of store.listBots()) if (b.id !== id && b.isMaster) store.saveBot({ ...b, isMaster: false });
+  }
+  const next = { ...bot };
+  if (patch.name !== undefined) {
+    const name = patch.name.trim();
+    if (!name) throw new Error("名字不能为空");
+    const clash = store.listBots().find((b) => b.id !== id && b.name === name);
+    if (clash) throw new Error(`已经有叫「${name}」的 bot`);
+    next.name = name;
+  }
+  if (patch.role !== undefined) next.role = patch.role.trim();
+  if (patch.persona !== undefined) next.persona = patch.persona.trim();
+  if (patch.providerId !== undefined) next.providerId = patch.providerId;
+  if (patch.isMaster !== undefined) next.isMaster = patch.isMaster;
+  if (patch.order !== undefined) next.order = patch.order;
+  if (patch.reasoning && ["auto", "always", "off"].includes(patch.reasoning)) next.reasoning = patch.reasoning;
+  if (patch.avatar) { next.avatar = patch.avatar; delete next.avatarPath; }
   store.saveBot(next);
-  pushPetEvent(id, { type: "skin-updated", text: `皮肤已切换为「${skinId}」` });
   return next;
 });
-ipcMain.handle("persona:generate", async (_e, id: string, desc: string, style?: "default" | "pixel" | "cute") => {
+function avatarDataUrl(path: string | undefined, maxSide?: number): string | undefined {
+  if (!path) return undefined;
+  if (path.startsWith("data:")) return path;
+  if (!existsSync(path)) return undefined;
+  const img = nativeImage.createFromPath(path);
+  if (img.isEmpty()) return undefined;
+  if (!maxSide) return `data:image/png;base64,${img.toPNG().toString("base64")}`;
+  const { width, height } = img.getSize();
+  const scaled = width > maxSide || height > maxSide ? img.resize(width >= height ? { width: maxSide, quality: "best" } : { height: maxSide, quality: "best" }) : img;
+  return `data:image/jpeg;base64,${scaled.toJPEG(85).toString("base64")}`;
+}
+function botTemplate(id: string, avatarSide?: number): BotTemplate {
   const bot = store.getBot(id);
   if (!bot) throw new Error("bot 不存在");
-  const result = await personaWithImage().generate(bot, desc, style);
-  // 宠物立即刷新形象（头像 + 名字 + 性格）
-  pushPetEvent(id, { type: "avatar-updated", text: desc, title: result.card?.name || bot.name });
-  return result;
+  const own = skills.list().filter((k) => k.owner === bot.id).map((k) => ({ name: k.name, description: k.description, body: k.body }));
+  return templateOf(bot, own, avatarDataUrl(bot.avatarPath, avatarSide));
+}
+function createFromTemplate(t: BotTemplate, name = t.name): Bot {
+  const id = randomUUID();
+  let avatarPath: string | undefined;
+  const m = t.avatar?.match(/^data:image\/(png|jpe?g|webp);base64,(.+)$/);
+  if (m) {
+    mkdirSync(assetsDir, { recursive: true });
+    avatarPath = join(assetsDir, `${id}.${m[1] === "jpeg" ? "jpg" : m[1]}`);
+    writeFileSync(avatarPath, Buffer.from(m[2], "base64"));
+  }
+  const bot: Bot = {
+    id, name: uniqueBotName(name, store.listBots().map((b) => b.name)), role: t.role, persona: t.persona, systemPrompt: t.systemPrompt,
+    personaCard: t.personaCard, skinId: t.skinId, avatarPath, providerId: "", petEnabled: false, createdAt: Date.now(),
+  };
+  if (!avatarPath) bot.avatar = t.shape ?? defaultAvatar(id);
+  store.saveBot(bot);
+  for (const k of t.skills) skills.save({ ...k, owner: id });
+  bus.register(bot.id, defaultHandler);
+  return bot;
+}
+ipcMain.handle("bots:duplicate", (_e, id: string) => {
+  const t = botTemplate(id);
+  return createFromTemplate(t, `${t.name} 副本`);
+});
+/** 分享链接复制到剪贴板，同时在「下载」里存一份 .harnessbot 文件（链接太长发不出去时发文件） */
+ipcMain.handle("bots:share", (_e, id: string) => {
+  const t = botTemplate(id, 192);
+  const link = templateLink(t);
+  const file = join(app.getPath("downloads"), `${t.name.replace(/[\\/:*?"<>|]/g, "_")}.${TEMPLATE_EXT}`);
+  writeFileSync(file, JSON.stringify(t, null, 2), "utf8");
+  clipboard.writeText(link);
+  return { link, file, skills: t.skills.length, chars: link.length };
+});
+ipcMain.handle("bots:parseTemplate", (_e, input: string) => parseTemplate(input));
+ipcMain.handle("bots:pickTemplate", async () => {
+  const r = await dialog.showOpenDialog(mainWin!, { title: "导入 bot 模板", properties: ["openFile"], filters: [{ name: "Harness Bot 模板", extensions: [TEMPLATE_EXT, "json"] }] });
+  if (r.canceled || !r.filePaths[0]) return null;
+  return parseTemplate(readFileSync(r.filePaths[0], "utf8"));
+});
+ipcMain.handle("bots:importTemplate", (_e, raw: unknown) => createFromTemplate(normalizeTemplate(raw)));
+
+ipcMain.handle("bots:delete", (_e, id: string) => {
+  registry.deleteBot(id);
+  bus.unregister(id);
+  petWins.get(id)?.close();
+  petWins.delete(id);
+  forgetPetSideState(id);
+  updateTrayIcon();
+});
+ipcMain.handle("bots:setPet", (_e, id: string, enabled: boolean) => {
+  registry.setPetEnabled(id, enabled);
+  if (enabled) {
+    createPetWindow(id, { forceShow: true });
+    persistPetVisible(id, true);
+  } else {
+    const w = petWins.get(id);
+    if (w && !w.isDestroyed()) w.close();
+    petWins.delete(id);
+    persistPetVisible(id, false);
+  }
+  updateTrayIcon();
+});
+/** 暂时藏起来：只 hide 窗口并记 visible=false，不关 petEnabled——托盘「全部显示」即可回来 */
+ipcMain.handle("pets:hide", (_e, botId?: string) => { hidePetWindow(botId); });
+ipcMain.handle("pets:show", (_e, botId?: string) => { showPetWindow(botId); });
+ipcMain.handle("pets:visit", async (_e, fromId: string, toId: string) => {
+  if (!readPetPrefs().petVisit) throw new Error("已关闭多宠互访。可在「桌面宠物智能」里打开。");
+  const rec = await runPetVisit(fromId, toId, true);
+  if (!rec) throw new Error("拜访失败（对方需已开启桌宠）");
+  return rec;
+});
+ipcMain.handle("pets:visitHistory", (_e, botId?: string) => petVisit.list(botId));
+ipcMain.handle("pet:evolveHistory", (_e, botId?: string) =>
+  petEvolve.listHistory(botId).map((p) => ({
+    id: p.id, botId: p.botId, kind: p.kind, title: p.title, detail: p.detail,
+    status: p.status, createdAt: p.createdAt,
+  })));
+ipcMain.handle("pets:peers", (_e, botId: string) =>
+  store.listBots().filter((b) => b.id !== botId && b.petEnabled).map((b) => ({ id: b.id, name: b.name })));
+registerSkinsIpc({ petSkins, assetsDir });
+ipcMain.handle("bots:setSkin", (_e, id: string, skinId: string) => applyBotSkin(id, skinId));
+
+async function executePetIntent(botId: string, intent: PetIntent): Promise<{ handled: boolean; message?: string; chat?: boolean }> {
+  const bot = store.getBot(botId);
+  if (!bot) throw new Error("bot 不存在");
+  switch (intent.type) {
+    case "chat":
+      return { handled: false, chat: true };
+    case "setSkin": {
+      applyBotSkin(botId, intent.skinId, intent.label);
+      return { handled: true, message: `已换上「${intent.label}」。` };
+    }
+    case "installPetdex": {
+      const pets = await fetchPetdexManifest(join(assetsDir, "skins"));
+      const entry = pets.find((p) => p.slug === intent.slug);
+      if (!entry) throw new Error(`petdex 上找不到 ${intent.slug}`);
+      const id = petdexSkinId(entry.slug);
+      if (!petSkins.get(id)) {
+        const skin = await installPetdex(entry, assetsDir, intent.name);
+        petSkins.register(skin);
+      }
+      applyBotSkin(botId, id, intent.name);
+      return { handled: true, message: `已从形象库换上「${intent.name}」。` };
+    }
+    case "generatePersona": {
+      const result = await resolveAppearance(botId, intent.desc, intent.style);
+      return { handled: true, message: result.message };
+    }
+    case "updatePersona": {
+      store.saveBot({ ...bot, persona: intent.persona });
+      return { handled: true, message: `人设已更新：${intent.persona.slice(0, 60)}` };
+    }
+    case "setPace": {
+      // 单宠口令只改该宠覆盖，避免一只「安静」拖垮全体
+      const all = store.readConfig();
+      const prev = (all.prefs as Record<string, unknown> | undefined) || {};
+      const patch: Partial<PetPrefs> = {};
+      if (intent.companionChat !== undefined) patch.companionChat = intent.companionChat;
+      if (intent.idleWork !== undefined) patch.idleWork = intent.idleWork;
+      if (intent.autoAppearance !== undefined) patch.autoAppearance = intent.autoAppearance;
+      store.writeConfig({ ...all, prefs: patchPetBotPrefs(prev, botId, patch) });
+      if (mainWin && !mainWin.isDestroyed()) mainWin.webContents.send("app:changed", "pet-prefs");
+      const w = petWins.get(botId);
+      if (w && !w.isDestroyed()) w.webContents.send("app:changed", "pet-prefs");
+      return { handled: true, message: intent.note };
+    }
+    case "remind": {
+      const at = Date.now() + Math.max(5_000, intent.delayMs);
+      scheduler.create({
+        botId,
+        name: intent.text.slice(0, 40) || "提醒",
+        cron: "0 0 1 1 *",
+        kind: "once",
+        alarmAt: at,
+        notifyPet: true,
+        runPrompt: false,
+        deleteAfterRun: true,
+        prompt: intent.text,
+      });
+      const mins = Math.round(intent.delayMs / 60_000);
+      return { handled: true, message: `好，大约 ${mins < 1 ? "不到 1 分钟" : mins + " 分钟"}后提醒你：${intent.text}` };
+    }
+    case "revertSkin": {
+      if (!bot.prevSkinId) return { handled: true, message: "没有可恢复的上一套形象。" };
+      const back = bot.prevSkinId;
+      applyBotSkin(botId, back);
+      return { handled: true, message: "已换回上一套形象。" };
+    }
+    case "evolveAccept": {
+      const p = petEvolve.acceptLatest(botId);
+      if (!p) return { handled: false, chat: true }; // 没有待确认提议时，「好」走普通对话
+      return { handled: true, message: `好，已接受：${p.title}` };
+    }
+    case "evolveReject": {
+      const p = petEvolve.rejectLatest(botId);
+      if (!p) return { handled: false, chat: true };
+      return { handled: true, message: `好，先不改：${p.title}` };
+    }
+    case "act": {
+      pushPetEvent(botId, { type: "action", action: intent.action, hold: intent.holdSec ?? 3 });
+      return { handled: true, message: intent.note };
+    }
+    case "fx": {
+      const { message } = await resolveAndPlayFx(botId, intent.phrase);
+      return { handled: true, message };
+    }
+    case "visit": {
+      if (!readPetPrefs().petVisit) return { handled: true, message: "多宠互访还没打开，去设置里开一下。" };
+      const peer = store.listBots().find((b) => b.name === intent.peerName || b.name.includes(intent.peerName));
+      if (!peer) return { handled: true, message: `找不到伙伴「${intent.peerName}」。` };
+      const rec = await runPetVisit(botId, peer.id, true);
+      if (!rec) return { handled: true, message: "现在去不了，稍后再试。" };
+      return { handled: true, message: rec.lineFrom };
+    }
+    default:
+      return { handled: false, chat: true };
+  }
+}
+
+async function resolvePetIntents(botId: string, text: string): Promise<{ intents: PetIntent[]; via: "rule" | "model" | "chat" }> {
+  const bot = store.getBot(botId);
+  if (!bot) throw new Error("bot 不存在");
+  const ctx = {
+    text: String(text || "").trim(),
+    skins: petSkins.list().map((s) => ({ id: s.id, name: s.name })),
+    skinId: bot.skinId,
+    prevSkinId: bot.prevSkinId,
+    peers: store.listBots().filter((b) => b.id !== botId && b.petEnabled).map((b) => ({ id: b.id, name: b.name })),
+  };
+  if (!ctx.text) return { intents: [{ type: "chat", text: "" }], via: "chat" };
+
+  const rule = parsePetIntentsRule(ctx);
+  if (rule?.length) return { intents: rule, via: "rule" };
+
+  if (shouldUseDirectorModel(ctx.text, rule)) {
+    const provider = providers.get(bot.providerId) || providers.getDefault();
+    if (provider) {
+      try {
+        const r = await providers.complete(provider, {
+          model: providers.get(bot.providerId) ? bot.model : undefined,
+          system: directorSystemPrompt(ctx),
+          user: directorUserPrompt(ctx.text),
+          signal: AbortSignal.timeout(18_000),
+        });
+        const parsed = parseDirectorIntents(r.text || "", ctx);
+        if (parsed?.length) {
+          const actions = parsed.filter((i) => i.type !== "chat");
+          if (actions.length) return { intents: actions, via: "model" };
+          return { intents: [{ type: "chat", text: ctx.text }], via: "chat" };
+        }
+      } catch (e) {
+        console.error("[pet.direct.model]", e);
+      }
+    }
+  }
+
+  const one = parsePetIntent(ctx);
+  return { intents: [one], via: one.type === "chat" ? "chat" : "rule" };
+}
+
+async function executePetIntents(botId: string, intents: PetIntent[]): Promise<{ handled: boolean; message?: string; chat?: boolean; intent: string }> {
+  const actionable = intents.filter((i) => i.type !== "chat");
+  if (!actionable.length) {
+    return { handled: false, chat: true, intent: "chat" };
+  }
+  const notes: string[] = [];
+  let anyHandled = false;
+  for (const intent of actionable) {
+    const r = await executePetIntent(botId, intent);
+    if (r.handled) {
+      anyHandled = true;
+      if (r.message) notes.push(r.message);
+    } else if (r.chat && actionable.length === 1) {
+      return { handled: false, chat: true, intent: intent.type };
+    }
+  }
+  return {
+    handled: anyHandled,
+    message: notes.join(" ") || "好的。",
+    intent: actionable.map((i) => i.type).join("+"),
+  };
+}
+
+ipcMain.handle("pet:direct", async (_e, botId: string, text: string) => {
+  const { intents, via } = await resolvePetIntents(botId, text);
+  const r = await executePetIntents(botId, intents);
+  if (r.handled || via !== "chat") touchUserActivity();
+  return { ...r, via };
+});
+ipcMain.handle("persona:generate", async (_e, id: string, desc: string, style?: "default" | "pixel" | "cute") => {
+  if (!store.getBot(id)) throw new Error("bot 不存在");
+  return resolveAppearance(id, desc, style);
 });
 ipcMain.handle("chat:send", async (_e, botId: string, text: string, sessionId?: string) => {
   const bot = store.getBot(botId);
   if (!bot) throw new Error("bot 不存在");
   return bus.chat(bot, text, sessionId);
 });
-ipcMain.handle("chat:sendStream", async (_e, botId: string, content: string | import("../core/types").ContentBlock[], sessionId?: string) => {
+ipcMain.handle("chat:sendStream", async (_e, botId: string, content: string | import("../core/types").ContentBlock[], sessionId?: string, opts?: { think?: boolean; projectId?: string | null }) => {
   const bot = store.getBot(botId);
   if (!bot) throw new Error("bot 不存在");
   const sid = sessionId || `s-${Date.now()}`;
+  const projectId = opts?.projectId !== undefined ? opts.projectId : store.getSession(sid)?.projectId ?? null;
   const text = typeof content === "string" ? content : (content.filter((b) => b.type === "text").map((b) => (b as any).text ?? "").join(""));
   statuses.set(botId, { botId, state: "running", lastRunAt: Date.now(), currentTask: text.slice(0, 60) });
   const push = (b: import("../core/types").ContentBlock) => {
-    if (mainWin && !mainWin.isDestroyed()) mainWin.webContents.send("chat:stream", b);
+    if (mainWin && !mainWin.isDestroyed()) mainWin.webContents.send("chat:stream", { ...b, sessionId: sid, botId });
   };
+  const ctrl = new AbortController();
+  const prev = inflight.get(sid);
+  if (prev && prev !== ctrl) prev.abort();
+  inflight.set(sid, ctrl);
+  activeSession.set(botId, sid);
+  consentNotes.set(sid, []);
   try {
-    const r = await runtime.handleStream({ bot, from: "user", text, content: content as any, sessionId: sid, history: store.listMessages(sid).slice(-10) }, { onBlock: push });
+    const r = await runtime.handleStream(
+      { bot, from: "user", text, content: content as any, sessionId: sid, history: store.listMessages(sid).slice(-200) },
+      { onBlock: push, signal: ctrl.signal, think: !!opts?.think, extraSystem: instructionsFor(sid, projectId) },
+    );
+    if (opts?.projectId !== undefined) store.setSessionProject(sid, projectId);
     statuses.set(botId, { botId, state: "idle", lastRunAt: Date.now() });
+    if (!ctrl.signal.aborted) void suggestFollowUps(sid, botId, text, r.text);
     if (bot.petEnabled) {
       const xp = grantPetXp(botId, 10);
       pushPetEvent(botId, { type: "reply", text: r.text.slice(0, 120), rich: r.content, sessionId: sid, model: bot.model || providers.get(bot.providerId)?.model || providers.getDefault()?.model, xp });
@@ -465,8 +2301,156 @@ ipcMain.handle("chat:sendStream", async (_e, botId: string, content: string | im
     store.addMessage({ sessionId: sid, from: "user", to: botId, role: "user", content: content as any, kind: "chat", createdAt: Date.now() });
     store.addMessage({ sessionId: sid, from: botId, to: "user", role: "assistant", content: `❌ 回复失败：${err}`, kind: "chat", createdAt: Date.now() });
     throw e;
+  } finally {
+    flushConsentNotes(sid);
+    if (activeSession.get(botId) === sid) activeSession.delete(botId);
+    if (inflight.get(sid) === ctrl) inflight.delete(sid);
   }
 });
+ipcMain.handle("chat:cancel", (_e, sessionId: string) => { inflight.get(sessionId)?.abort(); });
+
+/** 回复结束后补 3 个追问建议，挂在这条回复的 meta 上 */
+async function suggestFollowUps(sid: string, botId: string, question: string, answer: string) {
+  if ((store.readConfig().prefs as { suggestions?: boolean } | undefined)?.suggestions === false) return;
+  const reply = answer.replace(/```tool[\s\S]*?```/g, "").trim();
+  if (reply.length < 12 || reply.startsWith("❌") || reply.includes("（已停止生成）")) return;
+  const msg = store.listMessages(sid).findLast((m) => m.from === botId && m.role === "assistant");
+  if (!msg?.id || (Array.isArray(msg.content) && msg.content.some((b) => b.type === "choice" || b.type === "secret"))) return;
+  const bound = providers.get(store.getBot(botId)?.providerId ?? "");
+  const p = bound?.kind === "openai-compat" ? bound : providers.list().find((x) => x.kind === "openai-compat" && x.isDefault) ?? providers.list().find((x) => x.kind === "openai-compat");
+  if (!p) return;
+  try {
+    const r = await providers.complete(p, {
+      system: "根据这轮对话，站在用户角度写 3 个最可能的下一步追问，每个不超过 22 个字，具体、不重复、不要客套。用对话的语言。只输出 JSON 字符串数组。",
+      user: `用户：${question.slice(0, 1500)}\n\n回答：${reply.slice(0, 3000)}`,
+      temperature: 0.6,
+    });
+    const arr = JSON.parse(r.text.match(/\[[\s\S]*\]/)?.[0] ?? "[]");
+    const suggestions = (Array.isArray(arr) ? arr : []).map((s) => String(s).trim()).filter(Boolean).slice(0, 3);
+    if (!suggestions.length) return;
+    store.updateMessage(sid, msg.id, (m) => ({ ...m, meta: { ...m.meta, suggestions } }));
+    sendUi("chat:suggestions", { sessionId: sid, msgId: msg.id, suggestions });
+  } catch {
+    // 追问建议只是锦上添花，失败不提示
+  }
+}
+
+/* ================= 附件 / 工作台 / 项目 / 自定义指令 / 分享 ================= */
+const attachDir = join(workspace, "attachments");
+ipcMain.handle("files:ingest", (_e, paths: string[]) => ingestFiles(paths, attachDir));
+ipcMain.handle("files:pickAttachments", async () => {
+  const r = await dialog.showOpenDialog(mainWin!, {
+    title: "添加附件",
+    properties: ["openFile", "multiSelections"],
+    filters: [
+      { name: "支持的文件", extensions: ["png", "jpg", "jpeg", "gif", "webp", "heic", "pdf", "doc", "docx", "rtf", "odt", "xlsx", "xlsm", "csv", "tsv", "pptx", "md", "txt", "json", "yaml", "yml", "html", "xml", "js", "ts", "tsx", "jsx", "py", "swift", "go", "rs", "java", "kt", "c", "cpp", "h", "rb", "php", "sh", "sql", "log"] },
+      { name: "所有文件", extensions: ["*"] },
+    ],
+  });
+  return r.canceled ? [] : ingestFiles(r.filePaths, attachDir);
+});
+/** 工作台只能改 bot 工作区和附件里的文件 */
+ipcMain.handle("files:save", (_e, path: string, content: string) => {
+  const abs = join(path);
+  if (!abs.startsWith(workspace + "/")) throw new Error("只能编辑 bot 工作区里的文件");
+  writeFileSync(abs, content, "utf8");
+  return { ok: true, size: Buffer.byteLength(content) };
+});
+const watchers = new Map<string, import("node:fs").FSWatcher>();
+ipcMain.handle("files:watch", (_e, path: string, on: boolean) => {
+  watchers.get(path)?.close();
+  watchers.delete(path);
+  if (!on || !existsSync(path)) return;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  watchers.set(path, watch(path, () => {
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(() => sendUi("files:changed", path), 150);
+  }));
+});
+
+ipcMain.handle("projects:list", () => projects.list());
+ipcMain.handle("projects:create", (_e, name: string, instructions?: string) => projects.create(name, instructions));
+ipcMain.handle("projects:update", (_e, id: string, patch: { name?: string; instructions?: string }) => projects.update(id, patch));
+ipcMain.handle("projects:remove", (_e, id: string) => {
+  projects.remove(id);
+  for (const s of store.listSessionsPage({ limit: 10000 }).sessions) if (s.projectId === id) store.setSessionProject(s.id, null);
+});
+ipcMain.handle("projects:addFiles", async (_e, id: string) => {
+  const r = await dialog.showOpenDialog(mainWin!, { title: "添加项目资料", properties: ["openFile", "multiSelections"] });
+  return r.canceled ? projects.get(id) : projects.addFiles(id, r.filePaths);
+});
+ipcMain.handle("projects:removeFile", (_e, id: string, path: string) => projects.removeFile(id, path));
+ipcMain.handle("sessions:setProject", (_e, sid: string, projectId: string | null) => store.setSessionProject(sid, projectId));
+
+const UI_CONFIG_KEYS = new Set(["instructions", "imageGen", "prefs"]);
+ipcMain.handle("config:get", (_e, key: "instructions" | "imageGen" | "prefs") => {
+  if (!UI_CONFIG_KEYS.has(key)) throw new Error(`不支持的配置项：${key}`);
+  const v = store.readConfig()[key] as Record<string, unknown> | undefined;
+  return key === "imageGen" && v ? { ...v, apiKey: v.apiKey ? "***" : "" } : v ?? null;
+});
+ipcMain.handle("config:set", (_e, key: "instructions" | "imageGen" | "prefs", value: Record<string, unknown>) => {
+  if (!UI_CONFIG_KEYS.has(key)) throw new Error(`不支持的配置项：${key}`);
+  const all = store.readConfig();
+  const prev = all[key] as Record<string, unknown> | undefined;
+  let next: Record<string, unknown>;
+  if (key === "prefs") next = mergePrefs(prev, value || {});
+  else if (key === "imageGen" && value) {
+    next = { ...value, apiKey: value.apiKey === "__keep__" ? prev?.apiKey ?? "" : value.apiKey ? keyCipher.encrypt(String(value.apiKey)) : "" };
+  } else next = value;
+  store.writeConfig({ ...all, [key]: next });
+  if (key === "prefs") {
+    if (mainWin && !mainWin.isDestroyed()) mainWin.webContents.send("app:changed", "pet-prefs");
+    for (const w of petWins.values()) if (!w.isDestroyed()) w.webContents.send("app:changed", "pet-prefs");
+  }
+  return key === "prefs" ? next : undefined;
+});
+
+ipcMain.handle("pet:prefs", () => readPetPrefs());
+
+registerShareIpc({ appRoot: APP_ROOT, store, groups });
+
+/* ================= 群聊（编排在 core/group-session，这里只做宿主桥接） ================= */
+ipcMain.handle("groups:chat", async (_e, groupId: string, content: string | ContentBlock[], sessionId?: string) => {
+  const sid = sessionId || `group-${groupId}`;
+  const ctrl = new AbortController();
+  inflight.set(sid, ctrl);
+  try {
+    const r = await groupSessions.chat(groupId, content, sid, groupHooks(sid, ctrl));
+    if (mainWin && !mainWin.isDestroyed() && !mainWin.isFocused()) {
+      const body = r.conclusion && r.conclusion.type === "conclusion" ? r.conclusion.summary : contentText(r.lastText).replace(/\s+/g, " ").slice(0, 80);
+      void deliverNotification({
+        title: `群聊「${r.groupName}」讨论结束 · ${r.turns} 次发言`,
+        body: body || r.reasonText,
+        onClick: () => { mainWin?.show(); mainWin?.focus(); sendUi("window:open-session", sid); },
+      });
+    }
+    return { ok: true, sessionId: r.sessionId, turns: r.turns, rounds: r.rounds, reason: r.reason };
+  } finally {
+    if (inflight.get(sid) === ctrl) inflight.delete(sid);
+  }
+});
+
+ipcMain.handle("groups:interject", (_e, groupId: string, sessionId: string, content: string | ContentBlock[]) =>
+  groupSessions.interject(groupId, sessionId, content));
+
+ipcMain.handle("groups:update", (_e, groupId: string, patch: { name?: string; members?: string[]; settings?: import("../core/group-registry").GroupSettings }) => groups.update(groupId, patch));
+
+ipcMain.handle("groups:taskDone", (_e, sessionId: string, msgId: number, index: number, done: boolean) =>
+  store.updateMessage(sessionId, msgId, (m) => ({
+    ...m,
+    content: Array.isArray(m.content) ? m.content.map((b) => (b.type === "conclusion" ? { ...b, tasks: b.tasks.map((t, i) => (i === index ? { ...t, done } : t)) } : b)) : m.content,
+  })));
+
+ipcMain.handle("groups:dispatch", async (_e, groupId: string, sessionId: string, msgId: number, indexes: number[]) => {
+  const ctrl = new AbortController();
+  inflight.set(sessionId, ctrl);
+  try {
+    return await groupSessions.dispatch(groupId, sessionId, msgId, indexes, groupHooks(sessionId, ctrl));
+  } finally {
+    if (inflight.get(sessionId) === ctrl) inflight.delete(sessionId);
+  }
+});
+
 ipcMain.handle("bus:send", async (_e, fromId: string, toId: string, text: string) => {
   const from = store.getBot(fromId), to = store.getBot(toId);
   if (!from || !to) throw new Error("bot 不存在");
@@ -489,6 +2473,61 @@ ipcMain.handle("groups:broadcast", async (_e, groupId: string, fromId: string, t
 // G4：编排
 ipcMain.handle("plans:create", (_e, input: { ownerBotId: string; title: string; stages: Array<{ botId: string; prompt: string; mode?: string }> }) =>
   orchestrator.create({ ownerBotId: input.ownerBotId, title: input.title, stages: input.stages.map((s) => ({ botId: s.botId, prompt: s.prompt, mode: s.mode === "fan" ? "fan" as const : "seq" as const })) }));
+/**
+ * 编排阶段的会话只是运行记录：每个阶段只留最近一次，计划删掉后一并清掉。
+ * 用户在里面说过话的会话不动。stageId 给定时清掉这个阶段的全部旧记录（马上要重跑）。
+ */
+function prunePlanSessions(stageId?: string) {
+  const live = new Set(orchestrator.list().flatMap((p) => p.stages.map((s) => s.id)));
+  const byStage = new Map<string, Session[]>();
+  for (const s of store.listSessions()) {
+    const m = s.id.match(/^plan-\d+-(.+)$/);
+    if (!m) continue;
+    byStage.set(m[1], [...(byStage.get(m[1]) ?? []), s]);
+  }
+  const hasUser = (sid: string) => store.listMessages(sid).some((m) => m.from === "user");
+  for (const [sid, list] of byStage) {
+    const sorted = list.sort((a, b) => b.updatedAt - a.updatedAt);
+    const drop = !live.has(sid) || sid === stageId ? sorted : sorted.slice(1);
+    for (const s of drop) if (!hasUser(s.id)) store.deleteSession(s.id);
+  }
+}
+
+/** bot 在聊天里发起编排：后台跑，跑完把结果作为它的消息发回发起的会话 */
+async function startPlanFor(req: { requester: Bot; sessionId?: string; task?: string; title?: string; stages?: Array<{ bot: string; prompt: string; mode?: string }> }) {
+  const bots = store.listBots();
+  let stages: Array<{ botId: string; prompt: string; mode?: "seq" | "fan" }>;
+  if (req.stages?.length) {
+    const unknown = req.stages.filter((x) => !bots.some((b) => b.name === x.bot)).map((x) => x.bot);
+    if (unknown.length) throw new Error(`找不到 bot：${unknown.join("、")}。现有：${bots.map((b) => b.name).join("、")}`);
+    stages = req.stages.map((x) => ({ botId: bots.find((b) => b.name === x.bot)!.id, prompt: x.prompt, mode: x.mode === "fan" ? "fan" : "seq" }));
+  } else {
+    const p = providers.getDefault();
+    stages = await planFromText(req.task!, bots, p ? { provider: p as any, complete: (prov: any, r: any) => providers.complete(prov, r) } : undefined);
+  }
+  if (!stages.length) throw new Error("没解析出可用的阶段");
+  const title = (req.title || req.task || stages.map((x) => bots.find((b) => b.id === x.botId)?.name ?? "?").join(" → ")).slice(0, 40);
+  const plan = orchestrator.create({ ownerBotId: "user", title, stages });
+  sendUi("plans:update", plan);
+  void orchestrator.run(plan.id).then((done) => {
+    if (!req.sessionId) return;
+    const ok = done.status === "done";
+    const head = ok ? `🧩 编排「${done.title}」跑完了` : done.result === "（已取消）" ? `🧩 编排「${done.title}」已停止` : `🧩 编排「${done.title}」没跑完`;
+    store.addMessage({
+      sessionId: req.sessionId, from: req.requester.id, to: "user", role: "assistant", kind: "chat", createdAt: Date.now(),
+      content: [{ type: "text", text: `${head}，详情见 [编排](app:settings/plans)。\n\n${done.result ?? ""}` }],
+    });
+  }).catch(() => { /* run 内部已兜底成 error 状态 */ });
+  return { title, steps: stages.map((x) => `${bots.find((b) => b.id === x.botId)?.name ?? x.botId}：${x.prompt.slice(0, 60)}`) };
+}
+function cancelPlanByTitle(match: string): string | null {
+  const running = orchestrator.list().filter((x) => x.status === "running");
+  const hit = running.find((x) => x.id === match || x.title === match) ?? running.find((x) => match && x.title.includes(match)) ?? (running.length === 1 && !match ? running[0] : undefined);
+  if (!hit) return null;
+  orchestrator.cancel(hit.id);
+  return hit.title;
+}
+
 ipcMain.handle("plans:createFromText", async (_e, text: string, ownerBotId = "user") => {
   const p = providers.getDefault();
   const complete = p ? (prov: any, req: any) => providers.complete(prov, req) : undefined;
@@ -499,25 +2538,81 @@ ipcMain.handle("plans:createFromText", async (_e, text: string, ownerBotId = "us
 ipcMain.handle("plans:list", (_e, botId?: string) => botId ? orchestrator.listForBot(botId) : orchestrator.list());
 ipcMain.handle("plans:run", async (_e, planId: string) => { const plan = orchestrator.list().find((x) => x.id === planId); if (!plan) throw new Error("计划不存在"); return orchestrator.run(plan.id); });
 ipcMain.handle("plans:cancel", (_e, planId: string) => orchestrator.cancel(planId));
+ipcMain.handle("plans:delete", (_e, planId: string) => { orchestrator.delete(planId); prunePlanSessions(); });
 // G5：授权 + 审计 + TCC
-ipcMain.handle("consent:list", (_e, botId?: string) => consent.list(botId));
-ipcMain.handle("consent:grant", (_e, botId: string, cap: string, opts?: { once?: boolean; ttlMs?: number }) => consent.grant(botId, cap as any, opts));
-ipcMain.handle("consent:revoke", (_e, botId: string, cap?: string) => consent.revoke(botId, cap as any));
-ipcMain.handle("consent:caps", () => Object.entries(CAP_LABELS).map(([id, label]) => ({ id, label })));
-ipcMain.handle("audit:list", (_e, opts?: any) => audit.query(opts));
-ipcMain.handle("audit:export", (_e, filePath: string) => {
-  const events = audit.exportAll();
-  writeFileSync(filePath, JSON.stringify(events, null, 2), "utf8");
-  return events.length;
-});
+registerSecurityIpc({ store, consent, audit, secrets, env });
 ipcMain.handle("system:tcc", () => tccStatus());
+const PREF_PANES: Record<string, string> = {
+  accessibility: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility",
+  screen: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture",
+  automation: "x-apple.systempreferences:com.apple.preference.security?Privacy_Automation",
+  notifications: "x-apple.systempreferences:com.apple.Notifications-Settings.extension",
+};
+ipcMain.handle("system:notifyState", async () => {
+  if (!notifyMuted && (notifyProbePending || notifyState === "unknown")) {
+    notifyProbePending = false;
+    await probeNotify();
+  }
+  return { state: notifyState, muted: notifyMuted, appLabel: notifyAppLabel() };
+});
+ipcMain.handle("system:notifyRecheck", async () => {
+  notifyProbePending = false;
+  notifyProbedThisSession = false;
+  notifyMuted = false;
+  store.writeConfig({ ...store.readConfig(), notifyMuted: false });
+  const state = await probeNotify(true);
+  return {
+    state,
+    muted: notifyMuted,
+    appLabel: notifyAppLabel(),
+    reason: state === "ok" ? "已弹出测试通知" : "Electron 与系统通知都失败了",
+  };
+});
+ipcMain.handle("system:notifyMute", () => {
+  notifyMuted = true;
+  store.writeConfig({ ...store.readConfig(), notifyMuted: true });
+  sendUi("notify:state", { state: notifyState, muted: true, appLabel: notifyAppLabel() });
+  return { state: notifyState, muted: true, appLabel: notifyAppLabel() };
+});
+ipcMain.handle("system:openPrefs", (_e, pane: string) => {
+  if (pane === "notifications") notifyProbePending = true; // 用户去系统设置改完回来再测
+  return shell.openExternal(PREF_PANES[pane] ?? PREF_PANES.accessibility);
+});
+ipcMain.handle("system:pickFile", async (_e, opts: { save?: boolean; defaultPath?: string; title?: string }) => {
+  const filters = [{ name: "JSON", extensions: ["json"] }];
+  if (opts.save) {
+    const r = await dialog.showSaveDialog(mainWin as BrowserWindow, { title: opts.title, defaultPath: opts.defaultPath, filters });
+    return r.canceled ? null : r.filePath ?? null;
+  }
+  const r = await dialog.showOpenDialog(mainWin as BrowserWindow, { title: opts.title, defaultPath: opts.defaultPath, filters, properties: ["openFile"] });
+  return r.canceled ? null : r.filePaths[0] ?? null;
+});
 ipcMain.handle("providers:list", () => providers.list());
 ipcMain.handle("providers:add", (_e, input: any) => providers.addProvider(input));
 ipcMain.handle("providers:test", (_e, id: string) => providers.test(id));
+ipcMain.handle("providers:testConfig", (_e, input: any) => providers.testConfig(input));
+ipcMain.handle("providers:update", (_e, id: string, patch: any) => providers.update(id, patch));
 ipcMain.handle("providers:delete", (_e, id: string) => providers.delete(id));
+ipcMain.handle("providers:setDefault", (_e, id: string) => {
+  const p = providers.get(id);
+  if (!p) throw new Error("provider 不存在");
+  store.saveProvider({ ...p, isDefault: true });
+});
 ipcMain.handle("providers:capabilities", () => providers.capabilities());
 ipcMain.handle("system:notify", (_e, title: string, body: string) => system.notify(title, body));
 ipcMain.handle("system:copy", (_e, text: string) => system.copy(text));
+ipcMain.handle("system:openPath", (_e, path: string) => shell.openPath(path));
+ipcMain.handle("system:reveal", (_e, path: string) => { if (existsSync(path)) shell.showItemInFolder(path); });
+const PREVIEW_MAX = 256 * 1024;
+ipcMain.handle("files:preview", (_e, path: string) => {
+  if (!existsSync(path) || !statSync(path).isFile()) return { ok: false, error: "文件不存在" };
+  const size = statSync(path).size;
+  const buf = Buffer.alloc(Math.min(size, PREVIEW_MAX));
+  const fd = openSync(path, "r");
+  try { readSync(fd, buf, 0, buf.length, 0); } finally { closeSync(fd); }
+  if (buf.includes(0)) return { ok: false, error: "二进制文件，无法预览" };
+  return { ok: true, text: buf.toString("utf8"), truncated: size > PREVIEW_MAX, size };
+});
 ipcMain.handle("system:readFile", (_e, path: string) => system.readFile(path));
 ipcMain.handle("system:writeFile", (_e, path: string, content: string) => system.writeFile(path, content));
 ipcMain.handle("migration:export", (_e, filePath: string, mask?: boolean) => migration.exportToFile(filePath, { maskKeys: mask }));
@@ -544,51 +2639,121 @@ ipcMain.handle("sessions:list", (_e, botId?: string) => store.listSessions(botId
 ipcMain.handle("sessions:page", (_e, opts?: { botId?: string; archived?: boolean; offset?: number; limit?: number }) => store.listSessionsPage(opts));
 ipcMain.handle("sessions:archive", (_e, sessionId: string, archived: boolean) => store.archiveSession(sessionId, archived));
 ipcMain.handle("sessions:delete", (_e, sessionId: string) => store.deleteSession(sessionId));
+ipcMain.handle("sessions:get", (_e, sessionId: string) => store.getSession(sessionId));
+ipcMain.handle("sessions:rename", (_e, sessionId: string, title: string) => store.renameSession(sessionId, title));
+ipcMain.handle("messages:delete", (_e, sessionId: string, ids: number[]) => store.deleteMessages(sessionId, ids));
+
+/** 问题卡片：记下用户点了哪个选项（卡片变成已答状态） */
+ipcMain.handle("messages:answer", (_e, sessionId: string, id: number, choiceId: string, answer: string) =>
+  store.updateMessage(sessionId, id, (m) => ({
+    ...m,
+    content: Array.isArray(m.content) ? m.content.map((b) => (b.type === "choice" && b.id === choiceId ? { ...b, answer } : b)) : m.content,
+  })));
+
+
+/** 导出会话为 Markdown */
+ipcMain.handle("sessions:export", async (_e, sessionId: string) => {
+  const s = store.getSession(sessionId);
+  const nameOf = (id: string) => (id === "user" ? "我" : store.getBot(id)?.name ?? id);
+  const lines: string[] = [`# ${s?.title || "会话"}`, "", `导出时间：${new Date().toLocaleString("zh-CN")}`, ""];
+  for (const m of store.listMessages(sessionId)) {
+    const blocks: ContentBlock[] = typeof m.content === "string" ? [{ type: "text", text: m.content }] : m.content;
+    lines.push(`### ${nameOf(m.from)} · ${new Date(m.createdAt).toLocaleString("zh-CN")}`, "");
+    for (const b of blocks) {
+      if (b.type === "text") lines.push(b.text.replace(/```tool[\s\S]*?```/g, "").trim());
+      else if (b.type === "image") lines.push(b.path ? `![${b.alt ?? "图片"}](${pathToFileURL(b.path).toString()})` : `（图片：${b.alt ?? ""}）`);
+      else if (b.type === "file") lines.push(`📎 [${b.name}](${pathToFileURL(b.path).toString()})`);
+      else if (b.type === "tool_call") lines.push(`> 🛠 ${b.tool}${b.result ? `：${b.result.split("\n")[0].slice(0, 120)}` : ""}`);
+      else if (b.type === "choice") lines.push(`> ❓ ${b.question}${b.mode === "confirm" ? "" : `（${b.options.join(" / ")}）`}${b.answer ? ` → ${b.answer}` : ""}`);
+      else if (b.type === "secret") lines.push(`> 🔑 ${b.label}${b.saved ? "（已保存）" : ""}`);
+    }
+    lines.push("");
+  }
+  const safe = (s?.title || "会话").replace(/[\\/:*?"<>|]/g, "_").slice(0, 60);
+  const r = await dialog.showSaveDialog(mainWin!, { defaultPath: join(app.getPath("downloads"), `${safe}.md`), filters: [{ name: "Markdown", extensions: ["md"] }] });
+  if (r.canceled || !r.filePath) return null;
+  writeFileSync(r.filePath, lines.join("\n"), "utf8");
+  return r.filePath;
+});
+
+/** 产出物库：bot 在所有会话里交付过的图片和文件，新的在前 */
+/** 产出库：某个 bot 发出的所有图片/文件；传 groupId 时是这个群所有会话里成员发出的 */
+ipcMain.handle("library:list", (_e, botId: string | null, groupId?: string) => {
+  const items: (ContentBlock & { sessionId: string; createdAt: number; from: string })[] = [];
+  const seen = new Set<string>();
+  const sessions = [...store.listSessionsPage({ limit: 5000, botId: groupId }).sessions, ...store.listSessionsPage({ limit: 5000, archived: true, botId: groupId }).sessions]
+    .sort((a, b) => b.updatedAt - a.updatedAt).slice(0, 300);
+  for (const s of sessions) {
+    for (const m of store.listMessages(s.id)) {
+      if ((groupId ? m.from === "user" : m.from !== botId) || !Array.isArray(m.content)) continue;
+      for (const b of m.content) {
+        if (b.type !== "image" && b.type !== "file") continue;
+        const key = (b as any).path ?? (b as any).url ?? `${s.id}-${m.createdAt}-${items.length}`;
+        if (seen.has(key)) continue;
+        if ((b as any).path && !existsSync((b as any).path)) continue;
+        seen.add(key);
+        items.push({ ...b, sessionId: s.id, createdAt: m.createdAt, from: m.from });
+      }
+    }
+  }
+  return items.sort((a, b) => b.createdAt - a.createdAt).slice(0, 300);
+});
+
+/** 工作区：bot 的工作目录文件 + 最近的工具活动 + 当前状态 */
+ipcMain.handle("workspace:info", (_e, botId: string) => {
+  const bot = store.getBot(botId);
+  const dir = bot ? runtime.workspaceOf(bot) : null;
+  const files: { path: string; rel: string; size: number; mtime: number; dir: boolean }[] = [];
+  const walk = (d: string, depth: number) => {
+    if (files.length >= 300 || depth > 3) return;
+    for (const name of readdirSync(d)) {
+      if (name.startsWith(".")) continue;
+      const p = join(d, name);
+      const st = statSync(p);
+      files.push({ path: p, rel: p.slice(dir!.length + 1), size: st.size, mtime: st.mtimeMs, dir: st.isDirectory() });
+      if (st.isDirectory()) walk(p, depth + 1);
+    }
+  };
+  if (dir) walk(dir, 0);
+  const activity: { tool: string; args?: Record<string, unknown>; status?: string; result?: string; at: number; sessionId: string }[] = [];
+  const sessions = store.listSessionsPage({ limit: 5000 }).sessions.sort((a, b) => b.updatedAt - a.updatedAt).slice(0, 40);
+  for (const s of sessions) {
+    for (const m of store.listMessages(s.id)) {
+      if (m.from !== botId || !Array.isArray(m.content)) continue;
+      for (const b of m.content) if (b.type === "tool_call") activity.push({ tool: b.tool, args: b.args, status: b.status, result: b.result?.slice(0, 200), at: m.createdAt, sessionId: s.id });
+    }
+  }
+  return {
+    dir,
+    files: files.sort((a, b) => b.mtime - a.mtime),
+    activity: activity.sort((a, b) => b.at - a.at).slice(0, 30),
+    status: statuses.get(botId) ?? null,
+    secrets: secrets.list(botId),
+    env: env.visibleTo(botId),
+  };
+});
+
+registerVoiceIpc({ store, keyCipher, openStoredKey });
 ipcMain.handle("messages:list", (_e, sessionId: string) => store.listMessages(sessionId));
 ipcMain.handle("messages:page", (_e, sessionId: string, opts?: { limit?: number; beforeId?: number }) => store.listMessagesPage(sessionId, opts));
 ipcMain.handle("messages:search", (_e, opts?: { q?: string; botId?: string; from?: number; to?: number; limit?: number }) => store.searchMessages(opts));
-ipcMain.handle("memory:list", (_e, botId: string) => memory.list(botId));
-ipcMain.handle("memory:stats", (_e, botId: string) => {
-  const { memoryStats } = require("../core/memory-system");
-  return memoryStats(memory.list(botId));
+registerKnowledgeIpc({ store, memory, skills, scheduler, mcp, providers, executor, statuses, home });
+ipcMain.handle("computerUse:status", () => computerUseStatus());
+ipcMain.handle("computerUse:doctor", async () => {
+  if (!computerUseStatus().enabled) return computerUseStatus();
+  await probeComputerDoctor();
+  return computerUseStatus();
 });
-ipcMain.handle("memory:search", (_e, botId: string, q: string) => memory.search(botId, q, 10));
-ipcMain.handle("memory:retrieve", async (_e, botId: string, q: string) => { const r = await memory.retrieve(botId, q, 10); return r; });
-ipcMain.handle("memory:namespaces", () => memory.namespaces());
-ipcMain.handle("memory:memo", (_e, ns: string) => memory.memoOf(ns));
-ipcMain.handle("memory:setMemo", (_e, ns: string, text: string) => memory.setMemo(ns, text));
-ipcMain.handle("memory:rewriteMemo", async (_e, ns: string) => {
-  const p = providers.getDefault();
-  if (!p) throw new Error("无默认 provider，无法生成总结");
-  return memory.rewriteMemo(ns, async (_cur, recent) => {
-    const r = await providers.complete(p, {
-      system: "把以下记忆压缩为 3-8 条要点权威总结（中文，保留关键事实与偏好）。",
-      user: recent.map((e) => `- ${e.content}`).join("\n"),
-    });
-    return r.text;
+ipcMain.handle("computerUse:setEnabled", async (_e, on: boolean) => {
+  const st = await setComputerUseEnabled(!!on, (msg) => {
+    try { if (mainWin && !mainWin.isDestroyed()) mainWin.webContents.send("computerUse:progress", msg); } catch { /* */ }
   });
+  if (on && st.needsPermission) {
+    if (!st.permissions.accessibility) void shell.openExternal(PREF_PANES.accessibility);
+    else if (!st.permissions.screen) void shell.openExternal(PREF_PANES.screen);
+  }
+  if (mainWin && !mainWin.isDestroyed()) mainWin.webContents.send("app:changed", "mcp");
+  return st;
 });
-ipcMain.handle("memory:merge", (_e, ns: string) => memory.mergeDuplicate(ns));
-ipcMain.handle("memory:evict", (_e, ns: string, budget: number) => memory.evict(ns, budget));
-ipcMain.handle("tools:run", async (_e, tool: string, args: any) => executor.run(tool, args));
-ipcMain.handle("mcp:list", () => mcp.listTools());
-ipcMain.handle("mcp:call", async (_e, serverId: string, tool: string, args: any) => mcp.callTool(serverId, tool, args));
-ipcMain.handle("status:list", () => [...statuses.values()]);
-ipcMain.handle("memory:add", (_e, botId: string, entry: any) => memory.add(botId, entry));
-ipcMain.handle("memory:delete", (_e, botId: string, id: string) => memory.delete(botId, id));
-ipcMain.handle("skills:list", () => skills.list());
-ipcMain.handle("skills:create", (_e, text: string) => {
-  const parsed = skillFromText(text);
-  if (!parsed) throw new Error("没听懂要创建的技能，试试：创建技能：自动周报，每周五总结本周工作");
-  return skills.create(parsed.key, parsed.markdown);
-});
-ipcMain.handle("skills:createRaw", (_e, key: string, markdown: string) => skills.create(key, markdown));
-ipcMain.handle("skills:setEnabled", (_e, key: string, enabled: boolean) => skills.setEnabled(key, enabled));
-ipcMain.handle("skills:delete", (_e, key: string) => skills.delete(key));
-ipcMain.handle("tasks:list", (_e, botId?: string) => botId ? scheduler.listForBot(botId) : scheduler.list());
-ipcMain.handle("tasks:create", (_e, input: any) => scheduler.create(input));
-ipcMain.handle("tasks:delete", (_e, id: string) => scheduler.delete(id));
-ipcMain.handle("tasks:setEnabled", (_e, id: string, enabled: boolean) => scheduler.setEnabled(id, enabled));
-ipcMain.handle("tasks:runNow", async (_e, id: string) => { const t = scheduler.list().find((x) => x.id === id); if (t && scheduler.onRun) await scheduler.onRun(t); return scheduler.list().find((x) => x.id === id); });
 
 app.on("window-all-closed", () => {});

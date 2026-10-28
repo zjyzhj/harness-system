@@ -19,6 +19,7 @@ export class ProviderCenter {
     model?: string;
     cliName?: CliName;
     wireApi?: "chat" | "responses";
+    toolMode?: "native" | "text";
     isDefault?: boolean;
   }): Provider {
     const p: Provider = {
@@ -30,6 +31,7 @@ export class ProviderCenter {
       model: input.model,
       cliName: input.cliName,
       wireApi: input.wireApi,
+      ...(input.toolMode ? { toolMode: input.toolMode } : {}),
       isDefault: input.isDefault ?? false,
       createdAt: Date.now(),
     };
@@ -53,9 +55,25 @@ export class ProviderCenter {
     this.store.deleteProvider(id);
   }
 
+  /** 改已有 provider；apiKey 传空表示不改 */
+  update(id: string, patch: Partial<Omit<Provider, "id" | "createdAt">>): Provider {
+    const p = this.store.getProvider(id);
+    if (!p) throw new Error("provider 不存在");
+    const next: Provider = { ...p, ...patch, id, createdAt: p.createdAt };
+    if (!patch.apiKey) next.apiKey = p.apiKey;
+    this.store.saveProvider(next);
+    return next;
+  }
+
   async test(id: string): Promise<{ ok: boolean; detail?: string }> {
     const p = this.store.getProvider(id);
     if (!p) return { ok: false, detail: "provider 不存在" };
+    return this.testConfig(p);
+  }
+
+  /** 测一份还没保存的配置（不落盘） */
+  async testConfig(input: Partial<Provider> & Pick<Provider, "kind">): Promise<{ ok: boolean; detail?: string }> {
+    const p: Provider = { id: "__test__", name: "test", isDefault: false, createdAt: 0, ...input };
     if (p.kind === "openai-compat") return testOpenAICompat(p);
     // CLI provider：若配了 base url + key，真测 API 连通性（模拟 codex 会用的端点）
     if (p.baseUrl && p.apiKey) {
@@ -67,17 +85,17 @@ export class ProviderCenter {
 
   async streamComplete(p: Provider, req: CompletionRequest & { _onChunk: (b: import("./types").ContentBlock) => void }): Promise<CompletionResult> {
     if (p.kind === "cli" && !p.baseUrl) {
-      const r = await completeCli(p, contentText(req.user ?? ""), req.system, req.model);
-      req._onChunk({ type: "text", text: r });
+      const r = await completeCli(p, contentText(req.user ?? ""), req.system, req.history, (t) => req._onChunk({ type: "text", text: t }), req.signal);
       return { text: r, content: [{ type: "text", text: r }] };
     }
     if (p.kind === "openai-compat") {
       return completeOpenAICompat(p, { ...req, stream: true });
     }
     try {
-      return completeOpenAICompat({ ...p, kind: "openai-compat" }, { ...req, stream: true });
+      return await completeOpenAICompat({ ...p, kind: "openai-compat" }, { ...req, stream: true });
     } catch (e) {
-      const r = await completeCli(p, contentText(req.user ?? ""), req.system, req.model);
+      if (req.signal?.aborted) throw e;
+      const r = await completeCli(p, contentText(req.user ?? ""), req.system, req.history, undefined, req.signal);
       req._onChunk({ type: "text", text: r });
       return { text: r, content: [{ type: "text", text: r }] };
     }
@@ -89,10 +107,10 @@ export class ProviderCenter {
     }
     // CLI 适配；失败则降级到同 provider 的 API 配置（若有 baseUrl/apiKey）
     try {
-      const text = await completeCli(p, contentText(req.user ?? ""), req.system, req.model);
+      const text = await completeCli(p, contentText(req.user ?? ""), req.system, req.history, undefined, req.signal);
       return { text };
     } catch (e) {
-      if (p.baseUrl && p.apiKey) {
+      if (p.baseUrl && p.apiKey && !req.signal?.aborted) {
         const fallback: Provider = { ...p, kind: "openai-compat" };
         return completeOpenAICompat(fallback, req);
       }

@@ -1,0 +1,18 @@
+/* 形状头像：平时偶尔眨眼；容器带 .busy 时身体一蹦一蹦、眼睛左右张望 */
+.blob-av { width: 100%; height: 100%; display: block; overflow: visible; }
+.blob-av .blob-body, .blob-av .blob-eyes rect { transform-box: fill-box; transform-origin: center; }
+.blob-av .blob-eyes rect { animation: blobBlink 5s infinite; animation-delay: var(--blink-delay, 0s); }
+@keyframes blobBlink { 0%, 94%, 100% { transform: scaleY(1); } 97% { transform: scaleY(.12); } }
+
+.busy > .blob-av .blob-body { animation: blobHop .9s ease-in-out infinite; transform-origin: 50% 100%; }
+.busy > .blob-av .blob-eyes { animation: blobLook 2.4s ease-in-out infinite, blobHopEyes .9s ease-in-out infinite; }
+.busy > .blob-av .blob-eyes rect { animation: none; }
+@keyframes blobHop {
+  0%, 100% { transform: translateY(0) scale(1, 1); }
+  15% { transform: translateY(0) scale(1.06, .92); }
+  45% { transform: translateY(-9%) scale(.96, 1.05); }
+  75% { transform: translateY(0) scale(1.04, .95); }
+}
+@keyframes blobHopEyes { 0%, 15%, 75%, 100% { translate: 0 0; } 45% { translate: 0 -8px; } }
+@keyframes blobLook { 0%, 50%, 100% { transform: translateX(0); } 25% { transform: translateX(-5px); } 75% { transform: translateX(5px); } }
+@keyframes blobPop { 0% { transform: scale(.8); } 100% { transform: scale(1); } }

@@ -3,7 +3,7 @@
  * 用法：bun run scripts/build-shell.ts
  */
 import { $ } from "bun";
-import { mkdirSync, copyFileSync, readdirSync } from "node:fs";
+import { mkdirSync, cpSync } from "node:fs";
 import { join } from "node:path";
 
 const root = join(import.meta.dir, "..");
@@ -15,11 +15,9 @@ mkdirSync(dist, { recursive: true });
 mkdirSync(rendererDist, { recursive: true });
 
 // 主进程（CJS，external electron）
-await $`bun build ${join(root, "app/main.ts")} --outfile ${join(dist, "main.cjs")} --format cjs --target node --external electron`.quiet();
+await $`bun build ${join(root, "app/main.ts")} --outfile ${join(dist, "main.cjs")} --format cjs --target node --external electron --external @huggingface/transformers`.quiet();
 // preload（CJS）
 await $`bun build ${join(root, "app/preload.ts")} --outfile ${join(dist, "preload.cjs")} --format cjs --target node --external electron`.quiet();
 
-for (const f of readdirSync(rendererSrc)) {
-  copyFileSync(join(rendererSrc, f), join(rendererDist, f));
-}
+cpSync(rendererSrc, rendererDist, { recursive: true });
 console.log("✅ shell built → dist/");

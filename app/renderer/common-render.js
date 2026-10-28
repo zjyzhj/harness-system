@@ -2,6 +2,11 @@
  * 共用渲染器 — 面板与宠物窗口同源。
  * 纯函数 + 白名单转义，无 DOM 依赖，可被任意 renderer 脚本加载。
  */
+/** 本地绝对路径 → file URL（路径含空格/#/? 时必须编码，如 ~/Library/Application Support） */
+function fileUrl(path) {
+  return "file://" + encodeURI(path).replace(/#/g, "%23").replace(/\?/g, "%3F");
+}
+
 function esc(s) {
   return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
@@ -17,7 +22,7 @@ function renderBlock(b) {
     case "text": return renderMarkdown(esc(b.text ?? ""));
     case "code": return `<pre class="code-block"><code${b.lang ? ` class="lang-${esc(b.lang)}"` : ""}>${esc(b.code)}</code></pre>`;
     case "image": {
-      const src = b.dataUrl || (b.url || (b.path ? `file://${b.path}` : ""));
+      const src = b.dataUrl || (b.url || (b.path ? fileUrl(b.path) : ""));
       return src ? `<img class="msg-img" src="${esc(src)}" alt="${esc(b.alt || "image")}" />` : "";
     }
     case "tool_call": {
@@ -27,12 +32,42 @@ function renderBlock(b) {
       return `<div class="tool-card"><div class="tool-head">🛠 ${esc(b.tool)} ${status}</div>${args}${result}</div>`;
     }
     case "file": return `<div class="file-card">📎 ${esc(b.name || b.path)}${b.size ? ` <span class="hint">${formatBytes(b.size)}</span>` : ""}</div>`;
-    case "thinking": return `<details class="thinking"><summary>💭 思考中…</summary><div>${renderMarkdown(esc(b.text))}</div></details>`;
+    case "thinking": return thinkHtml(b);
     default: return "";
   }
 }
 
-/** 轻量 markdown 子集：行内 code / 粗斜体 / 链接 / 代码块 / 标题 / 列表 / 引用 */
+/** 思考过程：默认折叠成一行「已深度思考 N 秒」，展开看全文 */
+function thinkSecs(ms) {
+  return ms < 1000 ? "不到 1 秒" : `${Math.round(ms / 1000)} 秒`;
+}
+
+function thinkHtml(b, live) {
+  const label = live ? "正在思考" : `已深度思考${b.ms ? ` ${thinkSecs(b.ms)}` : ""}`;
+  return `<details class="think-box${live ? " live" : ""}"${live ? " open" : ""}><summary><span class="tb-ico">💭</span><span class="tb-label">${label}</span>${live ? `<span class="dots"></span>` : ""}<span class="tb-arrow">›</span></summary><div class="tb-body">${esc(b.text ?? "")}</div></details>`;
+}
+
+/** 正文里的 [1] [2] → 指向来源的角标（sources 是本条回复的来源列表） */
+function citeLinks(html, sources) {
+  if (!sources || !sources.length) return html;
+  return html.replace(/\[(\d{1,2})\](?![(\]])/g, (m, n) => {
+    const s = sources[Number(n) - 1];
+    if (!s) return m;
+    let host = s.url;
+    try { host = new URL(s.url).hostname.replace(/^www\./, ""); } catch { /* 保留原样 */ }
+    return `<a class="cite" href="${esc(s.url)}" target="_blank" rel="noopener" title="${esc(s.title)} · ${esc(host)}">${n}</a>`;
+  });
+}
+
+/** 软件内引用 [文字](app:类型/标识) → 可点的彩色标签；label / id 已转义 */
+const REF_ICON = { skill: "🧩", bot: "🤖", group: "👥", file: "📄", project: "📁", settings: "⚙️", task: "⏰", memory: "🧠" };
+function refHtml(type, id, label) {
+  const icon = REF_ICON[type];
+  if (!icon) return label;
+  return `<a class="ref ref-${type}" data-ref="${type}" data-id="${id}" title="点击打开"><span class="ref-ico">${icon}</span>${label}</a>`;
+}
+
+/** 轻量 markdown 子集：行内 code / 粗斜体 / 链接 / 代码块 / 标题 / 列表 / 引用。src 须已 esc() 转义 */
 function renderMarkdown(src) {
   if (!src) return "";
   const lines = src.split(/\n/);
@@ -41,26 +76,48 @@ function renderMarkdown(src) {
     .replace(/`([^`]+)`/g, "<code>$1</code>")
     .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
     .replace(/\*([^*]+)\*/g, "<em>$1</em>")
+    .replace(/\[([^\]]+)\]\(app:([a-z]+)\/([^)]+)\)/g, (_, label, type, id) => refHtml(type, id, label))
     .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+  let list = null;
+  const closeList = () => { if (list) { out += `</${list}>`; list = null; } };
+  const openList = (tag) => { if (list !== tag) { closeList(); out += `<${tag}>`; list = tag; } };
+  const cells = (row) => row.trim().replace(/^\|/, "").replace(/\|$/, "").split("|").map((c) => c.trim());
+  const isTableSep = (row) => /^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)*\|?\s*$/.test(row ?? "");
   while (i < lines.length) {
     const line = lines[i];
     if (/^```/.test(line)) {
+      closeList();
       if (!inCode) { inCode = true; codeBuf = []; codeLang = line.slice(3).trim(); }
-      else { inCode = false; out += `<pre class="code-block"><code${codeLang ? ` class="lang-${esc(codeLang)}"` : ""}>${esc(codeBuf.join("\n"))}</code></pre>`; }
+      else { inCode = false; out += `<pre class="code-block"><code${codeLang ? ` class="lang-${codeLang}"` : ""}>${codeBuf.join("\n")}</code></pre>`; }
       i++; continue;
     }
     if (inCode) { codeBuf.push(line); i++; continue; }
+    if (line.includes("|") && isTableSep(lines[i + 1])) {
+      closeList();
+      const head = cells(line);
+      i += 2;
+      let body = "";
+      while (i < lines.length && lines[i].includes("|") && lines[i].trim()) {
+        body += `<tr>${cells(lines[i]).map((c) => `<td>${inline(c)}</td>`).join("")}</tr>`;
+        i++;
+      }
+      out += `<table class="md-table"><thead><tr>${head.map((c) => `<th>${inline(c)}</th>`).join("")}</tr></thead><tbody>${body}</tbody></table>`;
+      continue;
+    }
+    if (/^\s*[-*]\s/.test(line)) { openList("ul"); out += `<li>${inline(line.replace(/^\s*[-*]\s/, ""))}</li>`; i++; continue; }
+    if (/^\s*\d+\.\s/.test(line)) { openList("ol"); out += `<li>${inline(line.replace(/^\s*\d+\.\s/, ""))}</li>`; i++; continue; }
+    closeList();
     if (/^###\s/.test(line)) { out += `<h3>${inline(line.slice(4))}</h3>`; }
     else if (/^##\s/.test(line)) { out += `<h2>${inline(line.slice(3))}</h2>`; }
     else if (/^#\s/.test(line)) { out += `<h1>${inline(line.slice(2))}</h1>`; }
-    else if (/^[-*]\s/.test(line)) { out += `<li>${inline(line.replace(/^[-*]\s/, ""))}</li>`; }
     else if (/^>\s?/.test(line)) { out += `<blockquote>${inline(line.replace(/^>\s?/, ""))}</blockquote>`; }
-    else if (/^\d+\.\s/.test(line)) { out += `<li class="ol">${inline(line.replace(/^\d+\.\s/, ""))}</li>`; }
+    else if (/^-{3,}$/.test(line.trim())) { out += "<hr/>"; }
     else if (!line.trim()) { out += "<br/>"; }
     else { out += `<p>${inline(line)}</p>`; }
     i++;
   }
-  if (inCode) out += `<pre class="code-block"><code>${esc(codeBuf.join("\n"))}</code></pre>`;
+  closeList();
+  if (inCode) out += `<pre class="code-block"><code>${codeBuf.join("\n")}</code></pre>`;
   return out;
 }
 

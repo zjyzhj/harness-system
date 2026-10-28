@@ -1,4 +1,5 @@
-import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
+import { appendLinesSafe } from "./atomic-fs";
 import { join } from "node:path";
 
 /**
@@ -37,7 +38,7 @@ export class AuditLog {
   append(ev: Omit<AuditEvent, "at"> & { at?: number }) {
     const full: AuditEvent = { at: ev.at ?? Date.now(), ...ev } as AuditEvent;
     try {
-      appendFileSync(this.fileFor(full.at), JSON.stringify(full) + "\n", "utf8");
+      appendLinesSafe(this.fileFor(full.at), [JSON.stringify(full)]);
     } catch { /* 审计失败不阻断主流程 */ }
     return full;
   }

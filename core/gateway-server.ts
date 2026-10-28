@@ -1,4 +1,10 @@
 import { createServer, type Server } from "node:http";
+import { timingSafeEqual } from "node:crypto";
+
+function safeEqual(a: string, b: string): boolean {
+  const x = Buffer.from(a), y = Buffer.from(b);
+  return x.length === y.length && timingSafeEqual(x, y);
+}
 import type { TransportMessage } from "./transport";
 import type { MessageBus } from "./message-bus";
 
@@ -16,15 +22,14 @@ export class GatewayServer {
     private port: number,
     private token: string,
     private bus: MessageBus,
-    private opts?: { maxBodyBytes?: number },
+    private opts?: { maxBodyBytes?: number; host?: string },
   ) {}
 
   start(): Promise<number> {
     return new Promise((resolve, reject) => {
       const server = createServer(async (req, res) => {
-        res.setHeader("Access-Control-Allow-Origin", "*");
-        res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
-        if (req.method === "OPTIONS") { res.writeHead(204); res.end(); return; }
+        // 不给浏览器开跨域：网页脚本不能借用户的浏览器往本机网关投消息
+        if (req.method === "OPTIONS") { res.writeHead(403); res.end(); return; }
 
         const url = (req.url ?? "/").split("?")[0];
         if (req.method === "GET" && url === "/health") {
@@ -35,7 +40,7 @@ export class GatewayServer {
         if (req.method === "POST" && url === "/bots/msg") {
           // token 校验
           const auth = req.headers.authorization ?? "";
-          const ok = this.token && auth === `Bearer ${this.token}`;
+          const ok = this.token.length >= 16 && safeEqual(auth, `Bearer ${this.token}`);
           if (!ok) { res.writeHead(401, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "unauthorized" })); return; }
           let body = "";
           const max = this.opts?.maxBodyBytes ?? 5 * 1024 * 1024;
@@ -74,7 +79,7 @@ export class GatewayServer {
         res.end(JSON.stringify({ error: "not found" }));
       });
       server.on("error", reject);
-      server.listen(this.port, () => {
+      server.listen(this.port, this.opts?.host ?? "127.0.0.1", () => {
         this.server = server;
         const addr = server.address();
         const actual = typeof addr === "object" && addr ? addr.port : this.port;

@@ -2,8 +2,17 @@ import type { Bot, ChatMessage, ContentBlock } from "./types";
 import type { Store } from "./store";
 import type { Transport, TransportMessage } from "./transport";
 
-export type BotMessageHandler = (from: Bot, to: Bot, text: string, ctx: MessageContext) => Promise<string>;
+/** recorded=true：handler（通常是 runtime）已落盘回复，总线不再写一条重复的 assistant */
+export type HandlerReply = string | { text: string; recorded?: boolean };
+export type BotMessageHandler = (from: Bot, to: Bot, text: string, ctx: MessageContext) => Promise<HandlerReply>;
 export type ContentLike = string | ContentBlock[];
+
+function replyText(r: HandlerReply): string {
+  return typeof r === "string" ? r : r.text;
+}
+function replyRecorded(r: HandlerReply): boolean {
+  return typeof r === "object" && !!r.recorded;
+}
 
 export interface MessageContext {
   sessionId: string;
@@ -39,16 +48,16 @@ export class MessageBus {
     if (!handler) return false;
     const from = this.store.getBot(msg.from) ?? { id: msg.from, name: msg.from, role: "远程", persona: "", providerId: "", petEnabled: false, createdAt: Date.now() };
     const rich = msg.content && Array.isArray(msg.content) ? msg.content : msg.text;
-    const reply = await handler(from, bot, msg.text, { sessionId: msg.sessionId ?? `x-${Date.now()}`, bus: this });
+    const sid = msg.sessionId ?? `x-${Date.now()}`;
+    const reply = await handler(from, bot, msg.text, { sessionId: sid, bus: this });
+    const text = replyText(reply);
     const replyMsg: ChatMessage = {
-      sessionId: msg.sessionId ?? `x-${Date.now()}`, from: bot.id, to: msg.from, role: "assistant", content: reply, kind: "bot-to-bot", createdAt: Date.now(),
+      sessionId: sid, from: bot.id, to: msg.from, role: "assistant", content: text, kind: "bot-to-bot", createdAt: Date.now(),
     };
-    this.store.addMessage(replyMsg);
-    this.emit(replyMsg);
+    if (!replyRecorded(reply)) { this.store.addMessage(replyMsg); this.emit(replyMsg); }
     for (const t of this.transports) {
-      void t.send({ from: bot.id, to: msg.from, text: typeof reply === "string" ? reply : JSON.stringify(reply), content: reply, sessionId: replyMsg.sessionId, timestamp: Date.now() });
+      void t.send({ from: bot.id, to: msg.from, text, content: rich, sessionId: sid, timestamp: Date.now() });
     }
-    void rich;
     return true;
   }
 
@@ -59,14 +68,15 @@ export class MessageBus {
     const handler = this.handlers.get(msg.to);
     if (!handler) return;
     const from = this.store.getBot(msg.from) ?? { id: msg.from, name: msg.from, role: "远程", persona: "", providerId: "", petEnabled: false, createdAt: Date.now() };
-    void handler(from, bot, msg.text, { sessionId: msg.sessionId ?? `x-${Date.now()}`, bus: this }).then((reply) => {
+    const sid = msg.sessionId ?? `x-${Date.now()}`;
+    void handler(from, bot, msg.text, { sessionId: sid, bus: this }).then((reply) => {
+      const text = replyText(reply);
       const replyMsg: ChatMessage = {
-        sessionId: msg.sessionId ?? `x-${Date.now()}`, from: bot.id, to: msg.from, role: "assistant", content: reply, kind: "bot-to-bot", createdAt: Date.now(),
+        sessionId: sid, from: bot.id, to: msg.from, role: "assistant", content: text, kind: "bot-to-bot", createdAt: Date.now(),
       };
-      this.store.addMessage(replyMsg);
-      this.emit(replyMsg);
+      if (!replyRecorded(reply)) { this.store.addMessage(replyMsg); this.emit(replyMsg); }
       for (const t of this.transports) {
-        void t.send({ from: bot.id, to: msg.from, text: typeof reply === "string" ? reply : JSON.stringify(reply), content: reply, sessionId: replyMsg.sessionId, timestamp: Date.now() });
+        void t.send({ from: bot.id, to: msg.from, text, content: text, sessionId: sid, timestamp: Date.now() });
       }
     });
   }
@@ -114,7 +124,7 @@ export class MessageBus {
     }
 
     const textForLLM = typeof text === "string" ? text : text.filter((b) => (b as any).type === "text").map((b) => (b as any).text ?? "").join("\n");
-    const replyText = await handler(from, to, textForLLM, { sessionId: sid, bus: this }).catch((e: unknown) => {
+    const raw = await handler(from, to, textForLLM, { sessionId: sid, bus: this }).catch((e: unknown) => {
       const reply: ChatMessage = {
         sessionId: sid, from: to.id, to: from.id, role: "assistant",
         content: `❌ ${to.name} 处理失败：${e instanceof Error ? e.message : String(e)}`,
@@ -122,18 +132,16 @@ export class MessageBus {
       };
       this.store.addMessage(reply);
       this.emit(reply);
-      return "" as string & void;
+      return "" as HandlerReply;
     });
-    if (typeof replyText === "string" && replyText) {
-      const reply: ChatMessage = {
-        sessionId: sid, from: to.id, to: from.id, role: "assistant", content: replyText,
-        kind: "bot-to-bot", createdAt: Date.now(),
-      };
-      this.store.addMessage(reply);
-      this.emit(reply);
-      return [outgoing, reply];
-    }
-    return [outgoing];
+    const textOut = replyText(raw);
+    if (!textOut) return [outgoing];
+    const reply: ChatMessage = {
+      sessionId: sid, from: to.id, to: from.id, role: "assistant", content: textOut,
+      kind: "bot-to-bot", createdAt: Date.now(),
+    };
+    if (!replyRecorded(raw)) { this.store.addMessage(reply); this.emit(reply); }
+    return [outgoing, reply];
   }
 
   /** G4：群组广播 — 向组内所有成员 bot 发同一消息（各自独立会话） */
@@ -177,7 +185,9 @@ export class MessageBus {
       return [userMsg, err];
     }
     const textForLLM = typeof text === "string" ? text : text.filter((b) => (b as any).type === "text").map((b) => (b as any).text ?? "").join("\n");
-    const reply = await handler(bot, bot, textForLLM, { sessionId: sid, bus: this }).catch((e: unknown) => {
+    // from 必须是 user，不能传 bot 自己：否则 runtime 会把回复记成 bot-to-bot，系统通知也会被跳过
+    const userFrom: Bot = { id: "user", name: "用户", role: "user", persona: "", providerId: "", petEnabled: false, createdAt: 0 };
+    const raw = await handler(userFrom, bot, textForLLM, { sessionId: sid, bus: this }).catch((e: unknown) => {
       const err: ChatMessage = {
         sessionId: sid, from: bot.id, to: "user", role: "assistant",
         content: `❌ ${bot.name} 回复失败：${e instanceof Error ? e.message : String(e)}`,
@@ -185,18 +195,16 @@ export class MessageBus {
       };
       this.store.addMessage(err);
       this.emit(err);
-      return "" as string & void;
+      return "" as HandlerReply;
     });
-    if (typeof reply === "string" && reply) {
-      const a: ChatMessage = {
-        sessionId: sid, from: bot.id, to: "user", role: "assistant", content: reply,
-        kind: "chat", createdAt: Date.now(),
-      };
-      this.store.addMessage(a);
-      this.emit(a);
-      return [userMsg, a];
-    }
-    return [userMsg];
+    const textOut = replyText(raw);
+    if (!textOut) return [userMsg];
+    const a: ChatMessage = {
+      sessionId: sid, from: bot.id, to: "user", role: "assistant", content: textOut,
+      kind: "chat", createdAt: Date.now(),
+    };
+    if (!replyRecorded(raw)) { this.store.addMessage(a); this.emit(a); }
+    return [userMsg, a];
   }
 
   private emit(m: ChatMessage) {

@@ -1,4 +1,5 @@
 // 主控面板逻辑 — 通过 preload 暴露的 window.harness 调用 core
+// 面板脚本按 index.html 里的顺序加载，共享同一个全局作用域：这里是状态、通用工具和消息渲染
 const api = window.harness;
 const $ = (s) => document.querySelector(s);
 
@@ -6,73 +7,328 @@ let bots = [];
 let currentBot = null;
 let currentSession = null;
 
+let previews = {};
+let currentGroup = null;
+let groupList = [];
+/** 深度思考开关（全局记住） */
+let thinkMode = localStorage.getItem("harness.think") === "1";
+/** 当前会话（或还没发出第一句的新会话）所属项目 */
+let sessionProject = null;
+let projectList = [];
+/** 回复完自动朗读 */
+let autoSpeak = localStorage.getItem("harness.autoSpeak") === "1";
+/** 连续语音对话进行中 */
+let voiceMode = false;
+const liveStatus = {};
+const lastSeen = JSON.parse(localStorage.getItem("harness.lastSeen") || "{}");
+function markSeen(botId) {
+  if (!botId) return;
+  lastSeen[botId] = Date.now();
+  localStorage.setItem("harness.lastSeen", JSON.stringify(lastSeen));
+}
+
 async function refreshBots() {
-  bots = await api.bots.list();
+  [bots, previews, groupList] = await Promise.all([api.bots.list(), api.bots.previews().catch(() => ({})), api.groups.list().catch(() => [])]);
+  for (const b of bots) if (lastSeen[b.id] === undefined) lastSeen[b.id] = previews[b.id]?.at ?? 0;
+  if (currentBot) markSeen(currentBot.id);
+  const recent = (b) => previews[b.id]?.at ?? b.createdAt ?? 0;
+  bots.sort((a, b) => {
+    if (!!a.isMaster !== !!b.isMaster) return a.isMaster ? -1 : 1;
+    const ao = a.order ?? Infinity, bo = b.order ?? Infinity;
+    if (ao !== bo) return ao - bo;
+    return recent(b) - recent(a);
+  });
+  if (currentBot) currentBot = bots.find((b) => b.id === currentBot.id) ?? null;
   renderBotList();
+  renderHero();
+}
+
+function avatarHtml(b, fallback = "🤖") {
+  if (b?.avatarPath) return `<img src="${esc(fileUrl(b.avatarPath))}" />`;
+  if (validAvatar(b?.avatar)) return blobAvatarSvg(b.avatar, b.id);
+  return fallback;
+}
+
+/** 群聊里的发言只算群里忙：单聊入口（侧栏、标题、详情）不跟着动 */
+function isBusy(botId, inGroup = false) {
+  const st = liveStatus[botId];
+  if (!st) return !!previews[botId]?.running;
+  return st.state === "running" && (inGroup || !st.sessionId?.startsWith("group-"));
+}
+
+/** bot 在处理任务时，所有显示它头像的地方一起动 */
+function syncBusyAvatars() {
+  document.querySelectorAll("[data-av-bot]").forEach((el) => el.classList.toggle("busy", isBusy(el.dataset.avBot, "avGroup" in el.dataset)));
+}
+
+function renderHero() {
+  const hero = $("#side-hero");
+  const b = bots.find((x) => x.isMaster) ?? currentBot ?? bots[0];
+  hero.innerHTML = b ? `<div class="hero-avatar${isBusy(b.id) ? " busy" : ""}" data-av-bot="${esc(b.id)}">${avatarHtml(b)}${b.isMaster ? '<span class="hero-badge" title="主控">★</span>' : ""}</div><div class="hero-name">${esc(b.name)}${b.isMaster ? " · 主控" : ""}</div>` : "";
+  hero.classList.toggle("active", !!b && currentBot?.id === b.id);
+  hero.onclick = b ? () => selectBot(b) : null;
 }
 
 function renderBotList() {
   const list = $("#bot-list");
   list.innerHTML = "";
   if (bots.length === 0) {
-    list.innerHTML = `<div class="hint" style="color:var(--dim);padding:8px;">还没有 bot，点上面创建第一个 👆</div>`;
+    list.innerHTML = `<div class="d-empty" style="padding:8px">还没有 bot，点右上角 ＋ 创建第一个</div>`;
     return;
   }
   for (const b of bots) {
+    const pv = previews[b.id];
+    const st = liveStatus[b.id];
+    const running = isBusy(b.id);
+    const unread = currentBot?.id !== b.id && (pv?.at ?? 0) > (lastSeen[b.id] ?? 0);
     const el = document.createElement("div");
-    el.className = "bot-item" + (currentBot?.id === b.id ? " active" : "");
+    el.className = "bot-item" + (currentBot?.id === b.id ? " active" : "") + (unread ? " unread" : "");
+    el.dataset.botId = b.id;
     el.innerHTML = `
-      <div class="bot-avatar">${b.avatarPath ? `<img src="file://${b.avatarPath}" />` : "🤖"}</div>
+      <div class="bot-avatar${running ? " busy" : ""}" data-av-bot="${esc(b.id)}">${avatarHtml(b)}${running ? '<span class="run-dot"></span>' : ""}</div>
       <div class="bot-meta">
         <div class="bot-name">${esc(b.name)} ${b.petEnabled ? '<span class="bot-pet-badge">🐾</span>' : ""}</div>
-        <div class="bot-role">${esc(b.role || "通用助手")}</div>
-      </div>
-      <div style="display:flex;flex-direction:column;gap:2px">
-        <button class="ghost-btn pet-toggle" title="桌面宠物" style="padding:2px 6px;font-size:11px">${b.petEnabled ? "🐾开" : "🐾关"}</button>
-        <button class="ghost-btn detail-btn" title="详情" style="padding:2px 6px;font-size:11px">⋯</button>
-      </div>`;
-    el.querySelector(".pet-toggle").onclick = async (e) => {
-      e.stopPropagation();
-      await api.bots.setPet(b.id, !b.petEnabled);
-      await refreshBots();
-
-// G3：宠物「打开完整会话」→ 主面板聚焦并跳转
-api.onOpenSession(async (sid) => {
-  if (!sid) { alert("没有可打开的会话，先和宠物聊一句吧"); return; }
-  await openSessionById(sid);
-});
-    };
-    el.querySelector(".detail-btn").onclick = (e) => {
-      e.stopPropagation();
-      botDetailFlow(b);
-    };
+        <div class="bot-preview">${running ? `<span class="busy">正在处理${st?.currentTask ? `：${esc(st.currentTask)}` : "…"}</span>` : esc(pv?.text || b.role || "通用助手")}</div>
+      </div>${unread ? '<span class="unread-dot"></span>' : ""}`;
     el.onclick = () => selectBot(b);
+    el.oncontextmenu = (e) => { e.preventDefault(); botContextMenu(e, b); };
+    el.draggable = true;
+    el.ondragstart = (e) => { e.dataTransfer.setData("text/bot-id", b.id); e.dataTransfer.effectAllowed = "move"; el.classList.add("dragging"); };
+    el.ondragend = () => { el.classList.remove("dragging"); list.querySelectorAll(".drop-before,.drop-after").forEach((x) => x.classList.remove("drop-before", "drop-after")); };
+    el.ondragover = (e) => {
+      e.preventDefault();
+      const after = e.offsetY > el.clientHeight / 2;
+      el.classList.toggle("drop-after", after);
+      el.classList.toggle("drop-before", !after);
+    };
+    el.ondragleave = () => el.classList.remove("drop-before", "drop-after");
+    el.ondrop = (e) => {
+      e.preventDefault();
+      const dragId = e.dataTransfer.getData("text/bot-id");
+      const after = el.classList.contains("drop-after");
+      el.classList.remove("drop-before", "drop-after");
+      if (dragId && dragId !== b.id) reorderBots(dragId, b.id, after);
+    };
+    list.appendChild(el);
+  }
+  renderGroupList(list);
+}
+
+function renderGroupList(list) {
+  const head = document.createElement("div");
+  head.className = "list-head";
+  head.innerHTML = `<span>群聊</span><button class="list-add" title="新建 / 管理群聊">＋</button>`;
+  head.querySelector(".list-add").onclick = (e) => { e.stopPropagation(); groupsFlow(); };
+  list.appendChild(head);
+  if (!groupList.length) {
+    const tip = document.createElement("div");
+    tip.className = "d-empty";
+    tip.style.padding = "2px 10px 8px";
+    tip.textContent = "拉几个 bot 建群，大家在同一个会话里轮流接话";
+    list.appendChild(tip);
+  }
+  for (const g of groupList) {
+    const members = g.members.map(botById).filter(Boolean);
+    const relay = groupRelayOf(g.id);
+    const speaking = relay ? members.find((m) => m.name === relay.speaker) : null;
+    const shown = speaking ? [speaking, ...members.filter((m) => m !== speaking)] : members;
+    const el = document.createElement("div");
+    el.className = "bot-item" + (currentGroup?.id === g.id ? " active" : "");
+    el.dataset.groupId = g.id;
+    el.innerHTML = `
+      <div class="group-avatars">${groupAvatarsHtml(shown)}${relay ? '<i class="run-dot"></i>' : ""}</div>
+      <div class="bot-meta">
+        <div class="bot-name">${esc(g.name)}</div>
+        <div class="bot-preview">${relay ? `<span class="busy">${esc(relay.speaker || "成员")} 正在发言…</span>` : esc(members.map((m) => m.name).join("、") || "还没有成员")}</div>
+      </div>`;
+    el.onclick = () => selectGroup(g);
     list.appendChild(el);
   }
 }
 
+function groupAvatarsHtml(members) {
+  return members.slice(0, 3).map((m) => `<span class="${isBusy(m.id, true) ? "busy" : ""}" data-av-bot="${esc(m.id)}" data-av-group>${avatarHtml(m)}</span>`).join("") || "<span>👥</span>";
+}
+
+/** 群里正在进行的接力（侧栏头像、标题跟着动） */
+function groupRelayOf(groupId) {
+  for (const p of relayState.values()) if (p.groupId === groupId && p.state !== "done") return p;
+  return null;
+}
+
+async function selectGroup(g, sid) {
+  currentGroup = g;
+  currentBot = null;
+  if (voiceMode) stopVoiceMode();
+  renderComposerTools();
+  if (!sid) {
+    const { sessions } = await api.sessions.page({ botId: g.id, limit: 1 }).catch(() => ({ sessions: [] }));
+    sid = sessions[0]?.id ?? `group-${g.id}`;
+  }
+  currentSession = sid;
+  document.querySelectorAll(".bot-item").forEach((el) => el.classList.toggle("active", el.dataset.groupId === g.id));
+  $("#empty-state").style.display = "none";
+  $("#input").placeholder = `发到群聊「${g.name}」，成员会依次接话`;
+  const title = $("#chat-title");
+  title.innerHTML = `<span class="group-avatars t-group">${groupAvatarsHtml(g.members.map(botById).filter(Boolean))}</span>${esc(g.name)}`;
+  $("#chat-bar").classList.remove("hidden");
+  title.onclick = () => toggleDetails(true);
+  renderHero();
+  if (!$("#details").classList.contains("hidden") || (detailsPinned && window.innerWidth >= 1100)) toggleDetails(true);
+  clearMessages();
+  await loadSessionMessages(currentSession, true);
+  renderRelayBar();
+}
+
+async function reorderBots(dragId, targetId, after) {
+  const ids = bots.map((x) => x.id).filter((id) => id !== dragId);
+  const at = ids.indexOf(targetId) + (after ? 1 : 0);
+  ids.splice(at, 0, dragId);
+  await Promise.all(ids.map((id, i) => (botById(id)?.order === i ? null : api.bots.update(id, { order: i }))));
+  await refreshBots();
+}
+
+function botContextMenu(e, b) {
+  document.querySelectorAll(".ctx-menu").forEach((m) => m.remove());
+  const menu = document.createElement("div");
+  menu.className = "ctx-menu";
+  menu.style.cssText = "position:fixed;z-index:99;background:#17171c;border:1px solid #333;border-radius:8px;padding:4px;min-width:140px;font-size:12.5px;box-shadow:0 8px 30px rgba(0,0,0,.5)";
+  menu.style.left = Math.min(e.clientX, window.innerWidth - 160) + "px";
+  menu.style.top = Math.min(e.clientY, window.innerHeight - 100) + "px";
+  menu.innerHTML = `
+    <div class="ctx-item" data-act="master">${b.isMaster ? "☆ 取消主控" : "★ 设为主控"}</div>
+    <div class="ctx-item" data-act="detail">⋯ 详情 / 设置</div>
+    <div class="ctx-item danger" data-act="delete" style="color:#ff6b6b">🗑 删除 bot</div>`;
+  document.body.appendChild(menu);
+  const close = () => { menu.remove(); document.removeEventListener("click", outside); };
+  const outside = (ev) => { if (!ev.target.closest(".ctx-menu")) close(); };
+  setTimeout(() => document.addEventListener("click", outside), 0);
+  menu.querySelectorAll(".ctx-item").forEach((it) => {
+    it.style.padding = "7px 12px";
+    it.style.borderRadius = "6px";
+    it.style.cursor = "pointer";
+    it.onmouseenter = () => (it.style.background = "#23232a");
+    it.onmouseleave = () => (it.style.background = "transparent");
+    it.onclick = async () => {
+      close();
+      if (it.dataset.act === "detail") return botDetailFlow(b);
+      if (it.dataset.act === "master") { await api.bots.update(b.id, { isMaster: !b.isMaster }); return refreshBots(); }
+      if (!confirm(`确定删除「${b.name}」？宠物窗口会一并关闭，会话记录保留。`)) return;
+      await api.bots.remove(b.id);
+      if (currentBot?.id === b.id) {
+        currentBot = null;
+        currentSession = null;
+        clearMessages();
+        $("#empty-state").style.display = "";
+        $("#chat-bar").classList.add("hidden");
+        $("#details").classList.add("hidden");
+        $("#details-mask")?.classList.add("hidden");
+        document.body.classList.remove("details-open");
+      }
+      await refreshBots();
+    };
+  });
+}
+
+/** bot 之间的会话 id 是 b2b-<提问方>-<回答方>；返回提问方（当前 bot 是回答方时） */
+const isB2b = (sid) => typeof sid === "string" && sid.startsWith("b2b-");
+function b2bAsker(sid, selfId) {
+  if (!isB2b(sid) || !sid.endsWith(`-${selfId}`)) return null;
+  const fromId = sid.slice(4, -(selfId.length + 1));
+  return bots.find((x) => x.id === fromId) ?? { id: fromId, name: "另一个 bot" };
+}
+/** 编排阶段、定时任务在后台自动跑出来的会话：能查看，但不当作和用户聊天的会话 */
+const BG_SESSIONS = { "plan-": "🧩 编排计划里的一个阶段", "sched-": "⏰ 定时任务" };
+const bgKind = (sid) => typeof sid === "string" ? Object.entries(BG_SESSIONS).find(([k]) => sid.startsWith(k))?.[1] ?? null : null;
+const isOwnSession = (sid) => !isB2b(sid) && !bgKind(sid);
+const isForeign = (sid) => !!sid && !isOwnSession(sid);
+const sessionTitle = (x, botId) => {
+  const asker = b2bAsker(x.id, botId);
+  if (asker) return `🤝 ${esc(asker.name)} 来找它`;
+  const bg = bgKind(x.id);
+  return bg ? `${bg}：${esc(x.title || "")}` : esc(x.title || "新会话");
+};
+/** 打开 bot 时：自己的会话和别的 bot 来找它的会话里，哪个最近更新就打开哪个 */
+function pickSession(sessions, botId) {
+  return sessions.find((x) => isOwnSession(x.id) || b2bAsker(x.id, botId)) ?? null;
+}
+function b2bBanner(sid) {
+  const asker = currentBot && b2bAsker(sid, currentBot.id);
+  const bg = currentBot && bgKind(sid);
+  if (!asker && !bg) return null;
+  const el = document.createElement("div");
+  el.className = "b2b-banner";
+  const what = asker
+    ? `🤝 这是 <b>${esc(asker.name)}</b> 来找 <b>${esc(currentBot.name)}</b> 的对话（bot 之间自动进行）`
+    : `${bg.slice(0, 2)} 这是 <b>${esc(currentBot.name)}</b> 在${bg.slice(3)}里自动运行的记录`;
+  el.innerHTML = `${what}。在这里发消息会回到你和 ${esc(currentBot.name)} 自己的会话。<button class="ghost-btn">回到我的会话</button>`;
+  el.querySelector("button").onclick = () => openOwnSession();
+  return el;
+}
+async function openOwnSession() {
+  if (!currentBot) return;
+  const { sessions } = await api.sessions.page({ botId: currentBot.id, limit: 30 });
+  const own = sessions.find((x) => isOwnSession(x.id));
+  currentSession = own?.id ?? null;
+  clearMessages();
+  if (own) await loadSessionMessages(own.id, true);
+  if (detailsTab === "sessions") renderDetails(currentBot);
+}
+
 async function selectBot(b) {
   currentBot = b;
+  currentGroup = null;
   currentSession = null;
-  document.querySelectorAll(".bot-item").forEach((el) => el.classList.remove("active"));
-  const item = [...document.querySelectorAll(".bot-item")].find((el) => el.textContent.includes(b.name));
-  if (item) item.classList.add("active");
-  $("#empty-state").style.display = "none";
-  $("#messages").innerHTML = "";
-  $("#input").placeholder = `给 ${b.name} 发消息，@bot名 可让 bot 互相通信…`;
+  sessionProject = null;
+  if (voiceMode) stopVoiceMode();
+  renderComposerTools();
+  markSeen(b.id);
+  markActiveBot(b);
+  clearMessages();
   // G1：会话分页（每 bot 最新 30 个）
   const { sessions } = await api.sessions.page({ botId: b.id, limit: 30 });
-  if (sessions.length) {
-    currentSession = sessions[0].id;
-    await loadSessionMessages(sessions[0].id, true);
+  if (currentBot?.id !== b.id) return;
+  const latest = pickSession(sessions, b.id);
+  setSending();
+  if (latest) {
+    currentSession = latest.id;
+    await loadSessionMessages(latest.id, true);
+  } else rememberView();
+}
+
+/** 记住上次打开的 bot / 群聊和会话，重开软件时直接回到那里 */
+function rememberView() {
+  const view = currentGroup ? { group: currentGroup.id, sid: currentSession } : currentBot ? { bot: currentBot.id, sid: currentSession } : null;
+  if (view) localStorage.setItem("harness.lastView", JSON.stringify(view));
+}
+
+async function restoreView() {
+  let view = null;
+  try { view = JSON.parse(localStorage.getItem("harness.lastView") || "null"); } catch {}
+  const g = view?.group && groupList.find((x) => x.id === view.group);
+  if (g) {
+    const s = view.sid && (await api.sessions.get(view.sid).catch(() => null));
+    return selectGroup(g, s ? view.sid : undefined);
+  }
+  const bot = (view?.bot && botById(view.bot)) || bots.find((b) => b.isMaster) || bots[0];
+  if (!bot) return;
+  const s = bot.id === view?.bot && view.sid && (await api.sessions.get(view.sid).catch(() => null));
+  if (!s) return selectBot(bot);
+  await selectBot(bot);
+  if (currentBot?.id === bot.id && currentSession !== view.sid) {
+    currentSession = view.sid;
+    await loadSessionMessages(view.sid, true);
   }
 }
 
 /** G1：加载会话消息（分页窗口，tail=最新 N 条；加载更早时 prepend） */
 async function loadSessionMessages(sid, initial = false) {
+  if (initial) rememberView();
   const r = await api.messages.page(sid, { limit: initial ? 40 : 40 });
   const box = $("#messages");
-  if (initial) box.innerHTML = "";
+  if (initial) clearMessages();
+  const banner = initial && b2bBanner(sid);
+  if (banner) box.prepend(banner);
   // 若还有更早消息，顶部插「加载更早」
   const exists = box.querySelector(`[data-loadmore="${sid}"]`);
   if (exists) exists.remove();
@@ -101,8 +357,20 @@ async function loadSessionMessages(sid, initial = false) {
     btn.onclick = btn.onclick;
     box.prepend(btn);
   }
-  r.msgs.forEach((m) => appendMsg(m));
+  const els = r.msgs.map((m) => appendMsg(m));
+  if (initial) {
+    const info = await api.sessions.get(sid).catch(() => null);
+    if (info?.summary) box.prepend(compactNote(info));
+    sessionProject = info?.projectId ?? null;
+    renderComposerTools();
+  }
+  const live = pending.get(sid);
+  if (initial && live) live.nodes.forEach((n) => box.appendChild(n));
+  const lastIdx = r.msgs.findLastIndex((m) => m.kind !== "event");
+  const last = r.msgs[lastIdx];
+  if (initial && !live && last?.role === "assistant" && last.meta?.suggestions) showSuggestions(els[lastIdx], last.meta.suggestions);
   if (initial) box.scrollTop = box.scrollHeight;
+  setSending();
 }
 
 async function loadOlder(ev, sid) {
@@ -134,864 +402,185 @@ function box_first() {
   return null;
 }
 
-function makeMsgEl(m) {
-  const wrapper = document.createElement("div");
-  wrapper.dataset.id = m.id ?? "";
-  const fromName = m.from === "user" ? "我" : (bots.find((b) => b.id === m.from)?.name || m.from);
-  if (m.kind === "event") {
-    wrapper.className = "msg sys";
-    wrapper.innerHTML = `<div class="bubble">${esc(m.content)}</div>`;
-    return wrapper;
-  }
-  wrapper.className = "msg " + (m.from === "user" ? "user" : "bot");
-  const av = m.from === "user" ? `<div class="avatar">🧑</div>` : (() => { const b = bots.find((x) => x.id === m.from); return `<div class="avatar">${b?.avatarPath ? `<img src="file://${b.avatarPath}"/>` : "🤖"}</div>`; })();
-  const inner = typeof m.content === "string" ? renderMarkdown(esc(m.content)) : renderBlocks(m.content);
-  wrapper.innerHTML = `${m.from !== "user" ? `<div class="who">${esc(fromName)}</div>` : ""}${av}<div class="bubble">${inner}</div>${m.meta ? `<div class="msg-meta">${esc([m.meta.model, m.meta.latencyMs ? m.meta.latencyMs + "ms" : "", m.meta.tokensUsed ? m.meta.tokensUsed + " tok" : ""].filter(Boolean).join(" · "))}</div>` : ""}`;
-  return wrapper;
-}
-
-function appendMsg(m) {
-  const box = $("#messages");
-  const el = makeMsgEl(m);
-  box.appendChild(el);
-  box.scrollTop = box.scrollHeight;
-}
-
-async function send() {
-  const text = $("#input").value.trim();
-  if (!text || !currentBot) return;
-  $("#input").value = "";
-  // @组名 → 群组广播（G4）
-  const groups = await api.groups.list();
-  const gMatch = text.match(/^@([\p{L}\p{N}_\-\u4e00-\u9fa5]+)\s+([\s\S]+)/u);
-  const g = gMatch ? groups.find((x) => x.name === gMatch[1]) : null;
-  if (g) {
-    const members = await api.groups.broadcast(g.id, currentBot.id, gMatch[2]);
-    members.forEach((m) => appendMsg(m));
-    return;
-  }
-  // @bot名 → bot 间通信（保持非流式，走 bus）
-  const atMatch = text.match(/^@(\S+)\s+([\s\S]+)/);
-  if (atMatch) {
-    const target = bots.find((b) => b.name === atMatch[1] || b.name.includes(atMatch[1]));
-    if (target) {
-      const msgs = await api.bus.send(currentBot.id, target.id, atMatch[2]);
-      msgs.forEach((m) => appendMsg(m));
-      return;
-    }
-  }
-  // 用户消息立即上屏（含当前会话 id 记录；有图片时以富块显示）
-  const rich = pendingImages.length ? [{ type: "text", text }, ...pendingImages] : text;
-  const userMsg = { sessionId: currentSession || null, from: "user", to: currentBot.id, role: "user", content: rich, kind: "chat", createdAt: Date.now() };
-  appendMsg(userMsg);
-  clearImgHint();
-  if (currentSession === null) currentSession = userMsg.sessionId = `s-${Date.now()}`;
-
-  // 流式回复：监听增量块 → 打字机
-  let streamBubble = null;
-  const off = api.onChatStream((chunk) => {
-    const box = $("#messages");
-    if (!streamBubble || streamBubble.classList.contains("user") || !streamBubble.dataset.streaming) {
-      // 开新助手气泡
-      const el = document.createElement("div");
-      el.className = "msg bot";
-      el.dataset.streaming = "1";
-      const bot = bots.find((b) => b.id === currentBot.id);
-      el.innerHTML = `${bot?.avatarPath ? `<div class="avatar"><img src="file://${bot.avatarPath}"/></div>` : `<div class="avatar">🤖</div>`}<div class="bubble"></div>`;
-      box.appendChild(el);
-      streamBubble = el;
-      box.scrollTop = box.scrollHeight;
-    }
-    const bubble = streamBubble.querySelector(".bubble");
-    if (chunk.type === "text" && chunk.text) {
-      bubble.innerHTML = renderMarkdown(esc((bubble.dataset.text || "") + chunk.text));
-      bubble.dataset.text = (bubble.dataset.text || "") + chunk.text;
-    } else if (chunk.type === "tool_call") {
-      bubble.insertAdjacentHTML("beforeend", renderBlock(chunk));
-    }
-    box.scrollTop = box.scrollHeight;
-  });
-  try {
-    const r = await api.chat.sendStream(currentBot.id, Array.isArray(rich) ? rich : text, currentSession);
-    off();
-    // 结束后刷新会话：最终落盘内容（含工具块 + meta）
-    const msgs = await api.messages.list(currentSession);
-    const lastBot = [...document.querySelectorAll("#messages .msg.bot")].pop();
-    const final = msgs.find((m) => m.from === currentBot.id && m.role === "assistant");
-    if (final) {
-      if (lastBot) lastBot.remove();
-      appendMsg(final);
-    }
-    if (r.result?.text && !final) {
-      if (lastBot) lastBot.remove();
-      appendMsg({ sessionId: currentSession, from: currentBot.id, to: "user", role: "assistant", content: [{ type: "text", text: r.result.text }], kind: "chat", createdAt: Date.now() });
-    }
-  } catch (e) {
-    off();
-    if (streamBubble) streamBubble.remove();
-    appendMsg({ sessionId: currentSession, from: currentBot.id, to: "user", role: "assistant", content: `❌ 回复失败：${e.message || e}`, kind: "chat", createdAt: Date.now() });
-  }
-  // 调用方无需 await 刷新列表（消息已落盘）
-}
-
-function openModal(html) {
-  const root = $("#modal-root");
-  root.innerHTML = `<div class="modal-mask"><div class="modal">${html}</div></div>`;
-  root.querySelector(".modal-mask").onclick = (e) => { if (e.target === e.currentTarget) root.innerHTML = ""; };
-  return root.querySelector(".modal");
-}
-
-function closeModal() { $("#modal-root").innerHTML = ""; }
-
-async function createBotFlow() {
-  const modal = openModal(`
-    <h2>一句话创建 bot</h2>
-    <textarea id="mb-input" placeholder="例如：创建 bot：翻译助手，用 claude 模型，风格活泼">创建 bot：灵感助手，用 deepseek-chat 模型，风格活泼</textarea>
-    <div class="hint">也可以说「创建 bot：一只负责提醒我的小狐狸」——名字、角色、模型会自动解析。</div>
-    <div class="actions">
-      <button class="ghost-btn" id="mb-cancel">取消</button>
-      <button class="primary-btn" id="mb-ok">创建</button>
-    </div>`);
-  modal.querySelector("#mb-ok").onclick = async () => {
-    const text = modal.querySelector("#mb-input").value.trim();
-    if (!text) return;
-    const bot = await api.bots.create(text);
-    closeModal();
-    await refreshBots();
-
-// G3：宠物「打开完整会话」→ 主面板聚焦并跳转
-api.onOpenSession(async (sid) => {
-  if (!sid) { alert("没有可打开的会话，先和宠物聊一句吧"); return; }
-  await openSessionById(sid);
-});
-    selectBot(bot);
-  };
-  modal.querySelector("#mb-cancel").onclick = closeModal;
-}
-
-async function personaFlow() {
-  if (!currentBot) return;
-  const modal = openModal(`
-    <h2>一句话生成形象 — ${esc(currentBot.name)}</h2>
-    <input id="mp-input" placeholder="例如：一只蓝色狐狸，可爱，戴眼镜" value="一只蓝色狐狸，可爱" />
-    <div class="hint">会生成头像（本地文件）与角色卡；无图像 API 时自动用程序化头像，不阻塞。</div>
-    <div class="actions">
-      <button class="ghost-btn" id="mp-cancel">取消</button>
-      <button class="primary-btn" id="mp-ok">生成</button>
-    </div>`);
-  modal.querySelector("#mp-ok").onclick = async () => {
-    const desc = modal.querySelector("#mp-input").value.trim();
-    await api.persona.generate(currentBot.id, desc || "一只蓝色狐狸，可爱");
-    closeModal();
-    await refreshBots();
-
-// G3：宠物「打开完整会话」→ 主面板聚焦并跳转
-api.onOpenSession(async (sid) => {
-  if (!sid) { alert("没有可打开的会话，先和宠物聊一句吧"); return; }
-  await openSessionById(sid);
-});
-    selectBot(currentBot);
-  };
-  modal.querySelector("#mp-cancel").onclick = closeModal;
-}
-
-async function settingsFlow() {
-  const providers = await api.providers.list();
-  const caps = await api.providers.capabilities();
-  const modal = openModal(`
-    <h2>模型配置中心</h2>
-    <div class="kv">
-      <label>CLI 检测</label><div>${["codex","cursor","claude"].map((c) => `${c}: ${caps[c]?.installed ? "✅" + (caps[c]?.version ? " " + esc(caps[c].version.split(" ")[0]) : "") : "❌"}`).join("　")}</div>
-    </div>
-    <h2 style="margin-top:6px">添加 Provider</h2>
-    <div class="kv">
-      <label>类型</label>
-      <select id="mp-kind">
-        <option value="openai-compat">OpenAI 兼容 API</option>
-        <option value="cli">CLI（codex/cursor/claude）</option>
-      </select>
-      <label>名称</label><input id="mp-name" placeholder="例如 我的中转" value="我的中转" />
-      <label>Base URL</label><input id="mp-url" placeholder="https://api.example.com/v1" value="" />
-      <label>API Key</label><input id="mp-key" type="password" placeholder="sk-..." value="" />
-      <label>模型</label><input id="mp-model" placeholder="gpt-4o-mini / deepseek-chat" value="gpt-4o-mini" />
-      <label>CLI 名</label><select id="mp-cli"><option value="claude">claude</option><option value="codex">codex</option><option value="cursor">cursor</option></select>
-    </div>
-    <div class="actions">
-      <button class="ghost-btn" id="mp-test">测试连接</button>
-      <button class="primary-btn" id="mp-add">添加</button>
-    </div>
-    <div id="mp-test-result"></div>
-    <h2 style="margin-top:8px">已有 Provider</h2>
-    <div id="mp-providers"></div>
-    <div class="actions"><button class="ghost-btn" id="mp-close">关闭</button></div>`);
-  const listP = () => {
-    const box = modal.querySelector("#mp-providers");
-    box.innerHTML = providers.length ? providers.map((p) => `
-      <div class="row" style="margin-bottom:6px">
-        <span style="flex:1">${esc(p.name)} <span class="hint">${p.kind === "cli" ? "CLI" : "API"}${p.isDefault ? " ★默认" : ""}</span></span>
-        <button class="ghost-btn" data-del="${p.id}">删除</button>
-      </div>`).join("") : `<span class="hint">还没有 provider</span>`;
-    box.querySelectorAll("[data-del]").forEach((b) => (b.onclick = async () => {
-      await api.providers.remove(b.dataset.del);
-      await settingsFlow();
-    }));
-  };
-  listP();
-  modal.querySelector("#mp-add").onclick = async () => {
-    const kind = modal.querySelector("#mp-kind").value;
-    const cliName = modal.querySelector("#mp-cli").value;
-    await api.providers.add({
-      kind,
-      name: modal.querySelector("#mp-name").value.trim() || "未命名",
-      baseUrl: modal.querySelector("#mp-url").value.trim() || undefined,
-      apiKey: modal.querySelector("#mp-key").value.trim() || undefined,
-      model: modal.querySelector("#mp-model").value.trim() || undefined,
-      cliName: kind === "cli" ? cliName : undefined,
-      isDefault: providers.length === 0,
-    });
-    await settingsFlow();
-  };
-  modal.querySelector("#mp-test").onclick = async () => {
-    const p = await api.providers.add({
-      kind: modal.querySelector("#mp-kind").value,
-      name: "__test__",
-      baseUrl: modal.querySelector("#mp-url").value.trim() || undefined,
-      apiKey: modal.querySelector("#mp-key").value.trim() || undefined,
-      model: modal.querySelector("#mp-model").value.trim() || undefined,
-      cliName: modal.querySelector("#mp-kind").value === "cli" ? modal.querySelector("#mp-cli").value : undefined,
-    });
-    const r = await api.providers.test(p.id);
-    await api.providers.remove(p.id);
-    const el = modal.querySelector("#mp-test-result");
-    el.className = "test-result " + (r.ok ? "ok" : "bad");
-    el.textContent = r.ok ? "✅ 连接成功：" + (r.detail || "") : "❌ " + (r.detail || "");
-  };
-  modal.querySelector("#mp-close").onclick = closeModal;
-}
-
-async function migrateFlow() {
-  const modal = openModal(`
-    <h2>迁移</h2>
-    <div class="hint">导出会生成一个 JSON（含 bots、provider、形象引用；可脱敏 key）。导入会还原并复制形象文件。</div>
-    <div class="row">
-      <input id="mm-path" placeholder="文件路径，如 /tmp/harness-export.json" value="/tmp/harness-export.json" />
-    </div>
-    <div class="actions">
-      <button class="ghost-btn" id="mm-export">导出（脱敏 key）</button>
-      <button class="ghost-btn" id="mm-export-raw">导出（含 key）</button>
-      <button class="primary-btn" id="mm-import">导入</button>
-    </div>
-    <div id="mm-result" class="hint"></div>
-    <div class="actions"><button class="ghost-btn" id="mm-close">关闭</button></div>`);
-  const result = modal.querySelector("#mm-result");
-  modal.querySelector("#mm-export").onclick = async () => {
-    await api.migration.export(modal.querySelector("#mm-path").value.trim(), true);
-    result.textContent = "✅ 已导出（key 脱敏）";
-  };
-  modal.querySelector("#mm-export-raw").onclick = async () => {
-    await api.migration.export(modal.querySelector("#mm-path").value.trim(), false);
-    result.textContent = "✅ 已导出（含 key）";
-  };
-  modal.querySelector("#mm-import").onclick = async () => {
-    const r = await api.migration.import(modal.querySelector("#mm-path").value.trim());
-    result.textContent = `✅ 导入完成：providers ${r.importedProviders} / bots ${r.importedBots} / pets ${r.importedPets} / skins ${r.importedSkins ?? 0}`;
-    closeModal();
-    await refreshBots();
-
-// G3：宠物「打开完整会话」→ 主面板聚焦并跳转
-api.onOpenSession(async (sid) => {
-  if (!sid) { alert("没有可打开的会话，先和宠物聊一句吧"); return; }
-  await openSessionById(sid);
-});
-  };
-  modal.querySelector("#mm-close").onclick = closeModal;
-}
-
-async function botDetailFlow(b) {
-  const [mem, stats, skills, tasks, stList, skins, grants] = await Promise.all([
-    api.memory.list(b.id),
-    api.memory.stats(b.id),
-    api.skills.list(),
-    api.tasks.list(b.id),
-    api.status.list().catch(() => []),
-    api.skins.list(),
-    api.consent.list(b.id).catch(() => []),
-  ]);
-  const st = stList.find((x) => x.botId === b.id) || { state: "idle" };
-  const card = b.personaCard;
-  const caps = await api.consent.caps().catch(() => []);
-  const modal = openModal(`
-    <h2>${esc(b.name)} ${b.petEnabled ? "🐾" : ""}
-      <span class="status-dot st-${esc(st.state)}" title="${esc(st.state)}"></span>
-    </h2>
-    <div class="kv">
-      <label>角色</label><span>${esc(b.role || "通用助手")}</span>
-      <label>人设</label><span>${esc(b.persona || "—")}</span>
-      ${card ? `<label>性格</label><span>${esc(card.traits?.join("、") || "—")}</span>
-      ${card.catchphrase ? `<label>口头禅</label><span>${esc(card.catchphrase)}</span>` : ""}
-      ${card.background ? `<label>背景</label><span>${esc(card.background)}</span>` : ""}` : ""}
-      <label>状态</label><span>${esc(st.state)}${st.currentTask ? " · " + esc(st.currentTask) : ""}</span>
-      <label>记忆</label><span>${Object.entries(stats || {}).map(([k, v]) => `${k}:${v}`).join("、") || "无"}</span>
-      <label>技能</label><span>${skills.filter((x) => x.enabled).map((x) => esc(x.name)).join("、") || "无"}</span>
-      <label>定时</label><span>${tasks.length ? tasks.map((t) => esc(t.name) + "(" + esc(t.cron) + ")").join("、") : "无"}</span>
-      <label>宠物皮肤</label>
-      <span><select id="bd-skin" class="skin-select">${skins.map((s) => `<option value="${esc(s.id)}"${b.skinId === s.id ? " selected" : ""}>${esc(s.name)}${s.desc ? " — " + esc(s.desc) : ""}</option>`).join("")}</select></span>
-      <label>授权能力</label>
-      <span>${grants.length ? grants.map((g) => `<span class="cap-badge">${esc(caps.find((c) => c.id === g.cap)?.label || g.cap)}${g.once ? "·1次" : ""}</span>`).join(" ") : "无（默认拒绝，bot 请求时弹窗）"}</span>
-    </div>
-    <div class="actions">
-      <button class="ghost-btn" id="bd-persona">✨ 生成形象</button>
-      <button class="primary-btn" id="bd-chat">去对话</button>
-      <button class="ghost-btn" id="bd-close">关闭</button>
-    </div>
-    <div class="hint" id="bd-tip"></div>`);
-  modal.querySelector("#bd-skin").onchange = async (e) => {
-    await api.bots.setSkin(b.id, e.target.value);
-    const tip = modal.querySelector("#bd-tip");
-    tip.textContent = "✅ 已切换皮肤，桌面宠物会立即换上";
-    setTimeout(() => (tip.textContent = ""), 2500);
-  };
-  modal.querySelector("#bd-persona").onclick = async () => {
-    const desc = await askInput("一句话描述形象", "如：一只蓝色狐狸，可爱", "一只蓝色狐狸，可爱");
-    if (desc) {
-      closeModal();
-      await api.persona.generate(b.id, desc);
-      await refreshBots();
-    }
-  };
-  modal.querySelector("#bd-chat").onclick = () => { closeModal(); selectBot(b); };
-  modal.querySelector("#bd-close").onclick = closeModal;
-}
-
-async function memoryFlow() {
-  if (!currentBot) return;
-  const ns = await currentMemoryNs();
-  const entries = await api.memory.list(ns === "global" ? "global" : currentBot.id);
-  const namespaces = await api.memory.namespaces();
-  const memo = await api.memory.memo(ns);
-  const modal = openModal(`
-    <h2>🧠 ${esc(currentBot.name)} 的持久记忆 <span class="hint">(${esc(ns)})</span></h2>
-    <div class="row" style="gap:4px;flex-wrap:wrap">
-      ${["bot:" + currentBot.id, ...namespaces.filter((n) => n !== "bot:" + currentBot.id && n !== "global"), "global"].filter((n, i, a) => a.indexOf(n) === i).map((n) => `
-        <button class="ghost-btn memo-ns${n === ns ? " active" : ""}" data-ns="${esc(n)}">${esc(n)}</button>`).join("")}
-    </div>
-    <div class="row"><input id="mm-add" placeholder="记一条事实/笔记（写入当前 namespace）" /></div>
-    <div class="actions"><button class="primary-btn" id="mm-add-btn">记住</button></div>
-    <div id="mm-entries">
-      ${entries.length ? entries.map((e) => `
-        <div class="row" style="margin:4px 0">
-          <span class="hint" style="flex:none">${esc(e.kind)}${e.source ? ` · ${esc(e.source)}` : ""}</span>
-          <span style="flex:1">${esc(e.content)}</span>
-          <button class="ghost-btn" data-del="${esc(e.id)}">✕</button>
-        </div>`).join("") : `<span class="hint">${ns.includes("group:") || ns === "global" ? "该共享空间暂无记忆" : "还没有记忆。可以让 bot 记住偏好，或说「记住：…」"}</span>`}
-    </div>
-    <div class="row" style="gap:6px;margin-top:6px;align-items:center">
-      <b style="font-size:12.5px">MEMORY.md 权威总结</b>
-      <button class="ghost-btn" id="mm-rewrite" style="font-size:11px">✨ 用 LLM 重写</button>
-      <button class="ghost-btn" id="mm-merge" style="font-size:11px">🧹 合并重复</button>
-    </div>
-    <textarea id="mm-memo" rows="5" style="width:100%;background:#1a1a1a;color:#eaeaea;border:1px solid #333;border-radius:8px;padding:8px;font-size:12.5px;margin-top:4px">${esc(memo)}</textarea>
-    <div class="actions"><button class="ghost-btn" id="mm-save-memo">保存总结</button><button class="ghost-btn" id="mm-close">关闭</button></div>`);
-
-  const currentNs = () => modal.querySelector(".memo-ns.active")?.dataset.ns || ns;
-  modal.querySelectorAll(".memo-ns").forEach((b) => (b.onclick = () => {
-    blockSwitchNs = b.dataset.ns;
-    memoryFlow();
-  }));
-  modal.querySelector("#mm-add-btn").onclick = async () => {
-    const v = modal.querySelector("#mm-add").value.trim();
-    if (!v) return;
-    const targetNs = currentNs();
-    const entry = { kind: "fact", content: v, tags: ["手动"], source: "user" };
-    if (targetNs !== "bot:" + currentBot.id) entry.namespace = targetNs;
-    await api.memory.add(currentBot.id, entry);
-    memoryFlow();
-  };
-  modal.querySelectorAll("[data-del]").forEach((b) => (b.onclick = async () => {
-    await api.memory.remove(currentBot.id, b.dataset.del);
-    memoryFlow();
-  }));
-  modal.querySelector("#mm-rewrite").onclick = async () => {
-    modal.querySelector("#mm-rewrite").textContent = "生成中…";
-    try { await api.memory.rewriteMemo(currentNs()); } catch (e) { alert(e.message || e); }
-    memoryFlow();
-  };
-  modal.querySelector("#mm-merge").onclick = async () => {
-    await api.memory.merge(currentNs());
-    memoryFlow();
-  };
-  modal.querySelector("#mm-save-memo").onclick = async () => {
-    await api.memory.setMemo(currentNs(), modal.querySelector("#mm-memo").value);
-    closeModal();
-  };
-  modal.querySelector("#mm-close").onclick = closeModal;
-}
-
-// 记录正在浏览的 namespace（切换标签用）
-let blockSwitchNs = null;
-async function currentMemoryNs() {
-  if (blockSwitchNs) return blockSwitchNs;
-  return "bot:" + (currentBot?.id || "");
-}
-
-async function skillsFlow() {
-  const all = await api.skills.list();
-  const modal = openModal(`
-    <h2>🛠 技能（SKILL.md）</h2>
-    <div class="hint">技能 = 目录/SKILL.md + frontmatter(name/description)。回复需要时模型会调用。</div>
-    <div class="row"><input id="ms-create" placeholder="一句话创建：创建技能：自动周报，每周五总结本周工作" /></div>
-    <div class="actions"><button class="primary-btn" id="ms-create-btn">创建技能</button></div>
-    <div id="ms-list">
-      ${all.length ? all.map((sk) => `
-        <div class="row" style="margin:4px 0">
-          <button class="ghost-btn" style="flex:none" data-toggle="${sk.key}">${sk.enabled ? "✅" : "⬜"}</button>
-          <span style="flex:1"><b>${esc(sk.name)}</b> <span class="hint">${esc(sk.description)}</span></span>
-          <button class="ghost-btn" data-del="${sk.key}">✕</button>
-        </div>`).join("") : `<span class="hint">还没有技能</span>`}
-    </div>
-    <div class="actions"><button class="ghost-btn" id="ms-close">关闭</button></div>`);
-  modal.querySelector("#ms-create-btn").onclick = async () => {
-    const v = modal.querySelector("#ms-create").value.trim();
-    if (!v) return;
-    try {
-      await api.skills.create(v);
-      await skillsFlow();
-    } catch (e) {
-      const el = modal.querySelector("#ms-create");
-      el.placeholder = "创建失败：" + (e?.message || "未知错误");
-    }
-  };
-  modal.querySelectorAll("[data-toggle]").forEach((b) => (b.onclick = async () => {
-    await api.skills.setEnabled(b.dataset.toggle, !b.textContent.trim().startsWith("✅"));
-    await skillsFlow();
-  }));
-  modal.querySelectorAll("[data-del]").forEach((b) => (b.onclick = async () => {
-    await api.skills.remove(b.dataset.del);
-    await skillsFlow();
-  }));
-  modal.querySelector("#ms-close").onclick = closeModal;
-}
-
-async function tasksFlow() {
-  const modal = openModal(`
-    <h2>⏰ 定时任务</h2>
-    <div class="hint">cron 5 段：分 时 日 月 周。到期会唤醒对应 bot 执行。</div>
-    ${currentBot ? `
-    <div class="kv">
-      <label>任务名</label><input id="mt-name" placeholder="每日早报" value="每日早报" />
-      <label>cron</label><input id="mt-cron" placeholder="0 9 * * *" value="0 9 * * *" />
-      <label>执行指令</label><input id="mt-prompt" placeholder="给 bot 的指令" value="生成今日早报，用中文总结" />
-    </div>
-    <div class="actions"><button class="primary-btn" id="mt-add">为 ${esc(currentBot.name)} 添加</button></div>
-    <div class="kv" style="border-top:1px solid #222; padding-top:10px; margin-top:6px">
-      <label>⏰ 一次性提醒</label><input id="mt-alarm-min" type="number" min="1" value="15" style="width:70px" />
-      <label>提醒我</label><input id="mt-alarm-text" placeholder="喝水、站起来活动…" value="喝水时间到！" />
-      <label class="chk"><input id="mt-alarm-pet" type="checkbox" checked /> 宠物弹气泡提醒</label>
-    </div>
-    <div class="actions"><button class="ghost-btn" id="mt-alarm-add">添加提醒</button></div>` : `<span class="hint">先选一个 bot 再添加定时任务</span>`}
-    <div id="mt-list"></div>
-    <div class="actions"><button class="ghost-btn" id="mt-close">关闭</button></div>`);
-  const render = async () => {
-    const tasks = await api.tasks.list(currentBot?.id);
-    const box = modal.querySelector("#mt-list");
-    box.innerHTML = tasks.length ? tasks.map((t) => `
-      <div class="row" style="margin:4px 0">
-        <button class="ghost-btn" style="flex:none" data-toggle="${t.id}">${t.enabled ? "▶️" : "⏸"}</button>
-        <span style="flex:1"><b>${esc(t.name)}</b>
-          <span class="hint">${t.kind === "once" ? "🔔 一次性" : "⏱ " + esc(t.cron)}${t.notifyPet ? " 🐾" : ""} · 已跑${t.runCount}次${t.nextRunAt ? " · " + (t.kind === "once" ? "触发时间 " : "下次 ") + new Date(t.nextRunAt).toLocaleString("zh-CN", { hour12: false }) : ""}</span>
-          ${t.lastResult ? `<div class="hint">${t.lastResult === "ok" ? "✅" : "❌"} ${esc(t.lastRunLog || "")}</div>` : ""}
-        </span>
-        <button class="ghost-btn" data-run="${t.id}">⚡</button>
-        <button class="ghost-btn" data-del="${t.id}">✕</button>
-      </div>`).join("") : `<span class="hint">还没有定时任务</span>`;
-    box.querySelectorAll("[data-toggle]").forEach((b) => (b.onclick = async () => {
-      const t = tasks.find((x) => x.id === b.dataset.toggle);
-      await api.tasks.setEnabled(b.dataset.toggle, !t.enabled);
-      render();
-    }));
-    box.querySelectorAll("[data-run]").forEach((b) => (b.onclick = async () => { await api.tasks.runNow(b.dataset.run); render(); }));
-    box.querySelectorAll("[data-del]").forEach((b) => (b.onclick = async () => { await api.tasks.remove(b.dataset.del); render(); }));
-  };
-  render();
-  modal.querySelector("#mt-add").onclick = async () => {
-    await api.tasks.create({
-      botId: currentBot.id,
-      name: modal.querySelector("#mt-name").value.trim() || "任务",
-      cron: modal.querySelector("#mt-cron").value.trim(),
-      prompt: modal.querySelector("#mt-prompt").value.trim(),
-    });
-    render();
-  };
-  const alarmBtn = modal.querySelector("#mt-alarm-add");
-  if (alarmBtn) alarmBtn.onclick = async () => {
-    const mins = parseInt(modal.querySelector("#mt-alarm-min")?.value || "15", 10);
-    await api.tasks.create({
-      botId: currentBot.id,
-      name: "🔔 " + (modal.querySelector("#mt-alarm-text")?.value.trim() || "提醒"),
-      cron: "* * * * *",
-      prompt: modal.querySelector("#mt-alarm-text")?.value.trim() || "时间到了",
-      kind: "once",
-      alarmAt: Date.now() + Math.max(1, mins) * 60_000,
-      notifyPet: modal.querySelector("#mt-alarm-pet")?.checked ?? true,
-    });
-    render();
-  };
-  modal.querySelector("#mt-close").onclick = closeModal;
-}
-
-
-
-async function mcpFlow() {
-  const tools = await api.mcp.list();
-  const modal = openModal(`
-    <h2>🔌 MCP 工具</h2>
-    <div class="hint">已连接的 MCP server 暴露的工具（来自 config 的 mcpServers 配置）。模型可在需要时调用。</div>
-    <div id="mcp-tools">
-      ${tools.length ? tools.map((t) => `
-        <div class="row" style="margin:4px 0">
-          <span class="hint" style="flex:none">${esc(t.serverId)}</span>
-          <span style="flex:1"><b>${esc(t.name)}</b> <span class="hint">${esc(t.description || "")}</span></span>
-        </div>`).join("") : `<span class="hint">未配置 MCP server。可在 ~/.harness-bot/config.json 加 mcpServers 数组。</span>`}
-    </div>
-    <div class="actions"><button class="ghost-btn" id="mcp-close">关闭</button></div>`);
-  modal.querySelector("#mcp-close").onclick = closeModal;
-}
-
-/* G4 面板：群组 + 编排 */
-
-async function groupsFlow() {
-  const modal = openModal(`
-    <h2>👥 群组</h2>
-    <div class="hint">建组后输入框用「@组名 任务」可广播给所有成员。</div>
-    ${currentBot ? `
-    <div class="kv">
-      <label>新建群组</label><input id="mg-name" placeholder="产品组" />
-      <label>成员（勾选 bot）</label><div id="mg-members" style="display:flex;flex-wrap:wrap;gap:6px"></div>
-    </div>
-    <div class="actions"><button class="primary-btn" id="mg-add">创建群组</button></div>` : `<span class="hint">先选一个 bot 再建组</span>`}
-    <div id="mg-list"></div>
-    <div class="actions"><button class="ghost-btn" id="mg-close">关闭</button></div>`);
-  const membersBox = modal.querySelector("#mg-members");
-  const renderMemberChips = () => {
-    membersBox.innerHTML = bots.map((b) => `<label class="chk"><input type="checkbox" value="${b.id}" /> ${esc(b.name)}</label>`).join("");
-  };
-  renderMemberChips();
-  const render = async () => {
-    const gs = await api.groups.list();
-    const box = modal.querySelector("#mg-list");
-    box.innerHTML = gs.length ? gs.map((g) => `
-      <div class="row" style="margin:6px 0;align-items:flex-start">
-        <div style="flex:1"><b>@${esc(g.name)}</b>
-          <div class="hint">成员：${g.members.map((m) => { const b = bots.find((x) => x.id === m); return esc(b?.name || m); }).join("、") || "—"}</div>
-        </div>
-        <button class="ghost-btn" data-bcast="${g.id}" style="flex:none">📢 广播</button>
-        <button class="ghost-btn" data-del="${g.id}" style="flex:none">✕</button>
-      </div>`).join("") : `<span class="hint">还没有群组</span>`;
-    box.querySelectorAll("[data-bcast]").forEach((b) => (b.onclick = async () => {
-      const text = await askInput("广播内容（会发给组内其他成员）", "", "大家好，@早会时间到");
-      if (text) { await api.groups.broadcast(b.dataset.bcast, currentBot.id, text); render(); }
-    }));
-    box.querySelectorAll("[data-del]").forEach((b) => (b.onclick = async () => { await api.groups.remove(b.dataset.del); render(); }));
-  };
-  render();
-  modal.querySelector("#mg-add").onclick = async () => {
-    const name = modal.querySelector("#mg-name").value.trim();
-    if (!name) { alert("输入群组名"); return; }
-    const members = [...membersBox.querySelectorAll("input:checked")].map((i) => i.value);
-    if (currentBot && !members.includes(currentBot.id)) members.push(currentBot.id);
-    await api.groups.create(name, members);
-    render();
-  };
-  modal.querySelector("#mg-close").onclick = closeModal;
-}
-
-async function plansFlow() {
-  const modal = openModal(`
-    <h2>🧩 编排</h2>
-    <div class="hint">一句话让多个 bot 协作：<b>「让 A 调研，B 总结，C 写报告」</b>。LLM 自动拆阶段，无模型时规则兜底。</div>
-    <div class="kv">
-      <label>编排指令</label><textarea id="mp-text" rows="2" placeholder="让 A 调研，B 总结，C 写报告">让 ${bots[0]?.name || "A"} 调研，${bots[1]?.name || "B"} 总结，${bots[2]?.name || "C"} 写报告</textarea>
-    </div>
-    <div class="actions"><button class="primary-btn" id="mp-create">创建并运行</button></div>
-    <div id="mp-list"></div>
-    <div class="actions"><button class="ghost-btn" id="mp-close">关闭</button></div>`);
-  const render = async () => {
-    const plans = await api.plans.list();
-    const box = modal.querySelector("#mp-list");
-    box.innerHTML = plans.length ? plans.map((p) => `
-      <div class="row" style="margin:6px 0;align-items:flex-start">
-        <div style="flex:1"><b>${esc(p.title)}</b>
-          <span class="hint">${p.status === "done" ? "✅" : p.status === "error" ? "❌" : p.status === "running" ? "⏳" : "⏸"} ${esc(p.status)}</span>
-          ${p.result ? `<div class="hint" style="white-space:pre-wrap;max-height:60px;overflow:auto">📄 ${esc(p.result.slice(0, 180))}</div>` : ""}
-          <div style="display:flex;gap:4px;flex-wrap:wrap;margin-top:4px">
-            ${p.stages.map((st) => `<span class="stage-chip st-${st.status}">${esc(bots.find((b) => b.id === st.botId)?.name || st.botId)}:${st.status === "done" ? "✅" : st.status === "error" ? "❌" : st.status === "running" ? "⏳" : "⏸"}</span>`).join("")}
-          </div>
-        </div>
-        <button class="ghost-btn" data-run="${p.id}" style="flex:none">▶</button>
-        <button class="ghost-btn" data-can="${p.id}" style="flex:none">⏹</button>
-      </div>`).join("") : `<span class="hint">还没有编排计划</span>`;
-    box.querySelectorAll("[data-run]").forEach((b) => (b.onclick = async () => { await api.plans.run(b.dataset.run); render(); }));
-    box.querySelectorAll("[data-can]").forEach((b) => (b.onclick = async () => { await api.plans.cancel(b.dataset.can); render(); }));
-  };
-  render();
-  modal.querySelector("#mp-create").onclick = async () => {
-    const text = modal.querySelector("#mp-text").value.trim();
-    if (!text) { alert("输入编排指令"); return; }
-    try {
-      const plan = await api.plans.createFromText(text);
-      render();
-      await api.plans.run(plan.id);
-      render();
-    } catch (e) { alert(e.message || e); }
-  };
-  modal.querySelector("#mp-close").onclick = closeModal;
-}
-
-/* G5 面板：系统授权矩阵 + 审计日志 + TCC 状态 */
-
-async function sysaccessFlow() {
-  const modal = openModal(`
-    <h2>🛡 系统授权与审计</h2>
-    <div class="hint">默认 deny：bot 请求系统能力时弹出授权，批准后按组放行。所有操作留痕审计。</div>
-    <div id="sa-tcc" class="kv"></div>
-    <div id="sa-matrix"></div>
-    <div class="actions">
-      <button class="ghost-btn" id="sa-audit-refresh">📋 刷新审计</button>
-      <button class="ghost-btn" id="sa-audit-export">⇩ 导出审计</button>
-      <button class="ghost-btn" id="sa-close">关闭</button>
-    </div>
-    <div id="sa-audit" style="margin-top:8px"></div>`);
-
-  // TCC 状态
-  const tcc = await api.system.tcc();
-  const tccBox = modal.querySelector("#sa-tcc");
-  tccBox.innerHTML = `
-    <label>macOS 权限</label>
-    <span>辅助功能：${tcc.accessibility ? "✅ 已授权" : "❌ 未授权（System Events 需要）"}
-      ${!tcc.accessibility ? '<button class="ghost-btn" id="sa-open-tcc">打开设置</button>' : ""}</span>
-    <span>屏幕录制：${tcc.screen ? "✅ 已授权" : "❌ 未授权（截图需要）"}</span>`;
-  const openBtn = tccBox.querySelector("#sa-open-tcc");
-  if (openBtn) openBtn.onclick = () => api.system.notify("提示", "请到 系统设置 → 隐私与安全性 → 辅助功能 授权 Harness Bot");
-
-  const renderMatrix = async () => {
-    const [grants, caps] = await Promise.all([api.consent.list(), api.consent.caps()]);
-    const box = modal.querySelector("#sa-matrix");
-    box.innerHTML = `<div class="hint">当前授权（按 bot × 能力）：</div>` +
-      grants.map((g) => `
-        <div class="row" style="margin:4px 0">
-          <span style="flex:1"><b>${esc(bots.find((b) => b.id === g.botId)?.name || g.botId)}</b>
-            <span class="hint">${esc(caps.find((c) => c.id === g.cap)?.label || g.cap)}${g.once ? " · 一次" : ""}${g.expiresAt ? " · 到期 " + new Date(g.expiresAt).toLocaleString("zh-CN", { hour12: false }) : " · 长期"}</span>
-          </span>
-          <button class="ghost-btn" data-revoke="${g.botId}" data-cap="${g.cap}" style="flex:none">撤销</button>
-        </div>`).join("") || `<span class="hint">暂无授权 — bot 请求系统能力时会弹窗征求你的同意</span>`;
-    box.querySelectorAll("[data-revoke]").forEach((b) => (b.onclick = async () => {
-      await api.consent.revoke(b.dataset.revoke, b.dataset.cap);
-      renderMatrix();
-    }));
-  };
-  renderMatrix();
-
-  const renderAudit = async () => {
-    const events = await api.audit.list({ limit: 50 });
-    const box = modal.querySelector("#sa-audit");
-    box.innerHTML = `<div class="hint">审计日志（最近 ${events.length} 条）：</div>` +
-      events.map((ev) => `
-        <div class="row" style="margin:2px 0;font-size:12px">
-          <span class="hint" style="flex:none">${new Date(ev.at).toLocaleTimeString("zh-CN", { hour12: false })}</span>
-          <span style="flex:none">${esc(bots.find((b) => b.id === ev.botId)?.name || ev.botId)}</span>
-          <span style="flex:none">${esc(ev.cap)}</span>
-          <span style="flex:1" class="hint">${esc(ev.action)} ${ev.granted ? "✅" : "🚫"}${ev.ok === false ? " ❌" : ev.ok ? " ✓" : ""}</span>
-        </div>`).join("") || `<span class="hint">暂无审计记录</span>`;
-  };
-  renderAudit();
-
-  modal.querySelector("#sa-audit-refresh").onclick = renderAudit;
-  modal.querySelector("#sa-audit-export").onclick = async () => {
-    const path = await askInput("导出审计日志到（绝对路径）", "/tmp/harness-audit-export.json", "/tmp/harness-audit-export.json");
-    if (path) {
-      const n = await api.audit.export(path);
-      alert(`已导出 ${n} 条审计日志 → ${path}`);
-    }
-  };
-  modal.querySelector("#sa-close").onclick = closeModal;
-}
-
-// ---- bind ----
-$("#new-bot-btn").onclick = createBotFlow;
-$("#settings-btn").onclick = settingsFlow;
-$("#migrate-btn").onclick = migrateFlow;
-$("#memory-btn").onclick = memoryFlow;
-$("#skills-btn").onclick = skillsFlow;
-$("#tasks-btn").onclick = tasksFlow;
-$("#groups-btn").onclick = groupsFlow;
-$("#plans-btn").onclick = plansFlow;
-$("#sysaccess-btn").onclick = sysaccessFlow;
-$("#mcp-btn").onclick = mcpFlow;
-$("#send-btn").onclick = send;
-// V3：图片粘贴/拖入 → 消息以富块发送
-let pendingImages = [];
-
-function addPendingImage(dataUrl, name) {
-  const shown = dataUrl.length;
-  pendingImages.push({ type: "image", dataUrl, alt: name || "粘贴图片" });
-  const hint = $("#img-hint");
-  if (!hint) {
-    const el = document.createElement("div");
-    el.id = "img-hint";
-    el.style.cssText = "font-size:12px;color:var(--dim);padding:4px 8px;border:1px dashed #444;border-radius:8px;margin-bottom:4px;";
-    $("#composer").insertBefore(el, $("#input"));
-    el.textContent = `${pendingImages.length} 张图片待发送（可继续粘贴/输入文字）`;
-  } else {
-    hint.textContent = `${pendingImages.length} 张图片待发送`;
-  }
-}
-
-function clearImgHint() {
-  const hint = $("#img-hint");
-  if (hint) hint.remove();
-  pendingImages = [];
-}
-
-function fileToDataUrl(file) {
-  return new Promise((resolve, reject) => {
-    const rd = new FileReader();
-    rd.onload = () => resolve(rd.result);
-    rd.onerror = () => reject(rd.error);
-    rd.readAsDataURL(file);
-  });
-}
-
-document.addEventListener("paste", async (e) => {
-  const items = [...(e.clipboardData?.items ?? [])];
-  const imgs = items.filter((i) => i.type.startsWith("image/"));
-  if (!imgs.length) return;
-  e.preventDefault();
-  for (const item of imgs) {
-    const file = item.getAsFile();
-    if (!file) continue;
-    try { addPendingImage(await fileToDataUrl(file), file.name); } catch { /* ignore */ }
-  }
-});
-
-$("#composer").addEventListener("dragover", (e) => { e.preventDefault(); });
-$("#composer").addEventListener("drop", async (e) => {
-  e.preventDefault();
-  const files = [...(e.dataTransfer?.files ?? [])].filter((f) => f.type.startsWith("image/"));
-  for (const f of files) {
-    try { addPendingImage(await fileToDataUrl(f), f.name); } catch { /* ignore */ }
-  }
-});
-
-// G1 搜索（防抖，输入即查，空词隐藏）
-let searchTimer = null;
-$("#search-input").addEventListener("input", async (e) => {
-  clearTimeout(searchTimer);
-  const v = e.target.value.trim();
-  const box = $("#search-results");
-  if (!v) { box.classList.add("hidden"); box.innerHTML = ""; return; }
-  searchTimer = setTimeout(async () => {
-    const hits = await api.messages.search({ q: v, limit: 20 });
-    box.innerHTML = "";
-    if (!hits.length) { box.innerHTML = `<div class="sr"><span class="sr-bot">无结果</span></div>`; box.classList.remove("hidden"); return; }
-    for (const h of hits) {
-      const el = document.createElement("div");
-      el.className = "sr";
-      const bot = bots.find((b) => b.id === h.botId);
-      el.innerHTML = `<div class="sr-bot">${esc(bot?.name || h.botId)} · ${esc(new Date(h.createdAt).toLocaleString())}</div><div class="sr-snippet">${esc(h.snippet)}</div>`;
-      el.onclick = () => openSessionById(h.sessionId);
-      box.appendChild(el);
-    }
-    box.classList.remove("hidden");
-  }, 250);
-});
-document.addEventListener("click", (e) => { if (!e.target.closest("#search-box")) $("#search-results")?.classList.add("hidden"); });
-
-/** G1：按 session 打开（搜索跳转 / 宠物跳转共用） */
-async function openSessionById(sid) {
-  const sessions = await api.sessions.page({ limit: 100 });
-  const s = sessions.sessions.find((x) => x.id === sid);
-  if (!s) return;
-  const bot = bots.find((b) => b.id === s.botId);
-  if (!bot) return;
-  currentBot = bot;
-  currentSession = sid;
-  document.querySelectorAll(".bot-item").forEach((el) => el.classList.remove("active"));
-  const item = [...document.querySelectorAll(".bot-item")].find((el) => el.textContent.includes(bot.name));
-  if (item) item.classList.add("active");
+/** 选中 bot：左栏高亮、顶部名片、右栏详情、输入框提示 */
+function markActiveBot(b) {
+  document.querySelectorAll(".bot-item").forEach((el) => el.classList.toggle("active", !!el.dataset.botId && el.dataset.botId === b.id));
   $("#empty-state").style.display = "none";
-  $("#messages").innerHTML = "";
-  await loadSessionMessages(sid, true);
+  $("#input").placeholder = `给 ${b.name} 发消息，输入 @ 让它去找其他 bot`;
+  const title = $("#chat-title");
+  title.innerHTML = `<span class="t-avatar${isBusy(b.id) ? " busy" : ""}" data-av-bot="${esc(b.id)}">${avatarHtml(b)}</span>${esc(b.name)}`;
+  $("#chat-bar").classList.remove("hidden");
+  title.onclick = () => toggleDetails(true);
+  renderHero();
+  if (detailsPinned && window.innerWidth >= 1100) toggleDetails(true);
+  else if (!$("#details").classList.contains("hidden")) renderDetails(b);
 }
 
-// G1：会话右键（归档/取消归档/删除）
-$("#messages").addEventListener("contextmenu", async (e) => {
-  if (!currentSession) return;
-  e.preventDefault();
-  const sid = currentSession;
-  const sessions = await api.sessions.page({ limit: 100 });
-  const s = sessions.sessions.find((x) => x.id === sid);
-  if (!s) { // 可能已归档
-    const all = await api.sessions.page({ limit: 100, archived: true });
-    if (!all.sessions.some((x) => x.id === sid)) return;
+/** 会话发生过上下文压缩：顶部提示，点开看发给模型的摘要 */
+function compactNote(info) {
+  const el = document.createElement("div");
+  el.className = "compact-note";
+  el.innerHTML = `<div class="cn-head">🗜 早期消息已压缩为摘要，模型只看到摘要和最近的对话 <span>查看摘要 ›</span></div><div class="cn-body hidden">${renderMarkdown(esc(info.summary))}</div>`;
+  el.querySelector(".cn-head").onclick = () => el.querySelector(".cn-body").classList.toggle("hidden");
+  return el;
+}
+
+function clearMessages() {
+  const box = $("#messages");
+  box.innerHTML = "";
+  delete box.dataset.lastTs;
+}
+
+function botById(id) { return bots.find((b) => b.id === id); }
+
+function fmtTime(ts) {
+  const d = new Date(ts), now = new Date();
+  const hm = d.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" });
+  if (d.toDateString() === now.toDateString()) return `今天 ${hm}`;
+  const y = new Date(now); y.setDate(now.getDate() - 1);
+  if (d.toDateString() === y.toDateString()) return `昨天 ${hm}`;
+  return `${d.getMonth() + 1}月${d.getDate()}日 ${hm}`;
+}
+
+/** bot.ask：一条「已发消息给 X」+ 一条「X 的回复」，按发生顺序夹在对话里，点开看原文 */
+const askTarget = (call) => {
+  const to = String(call.args?.to ?? "");
+  return bots.find((x) => x.name === to) ?? bots.find((x) => to && (to.includes(x.name) || x.name.includes(to)));
+};
+function b2bWho(call) {
+  const t = askTarget(call);
+  const name = t?.name ?? (String(call.args?.to ?? "") || "bot");
+  return `<span class="b2b-av">${avatarHtml(t, "🤖")}</span><a class="ref ref-bot b2b-name" data-ref="bot" data-id="${esc(name)}">${esc(name)}</a>${t?.role && t.role !== t.name ? `<span class="b2b-role">· ${esc(t.role)}</span>` : ""}`;
+}
+function b2bOutHtml(call) {
+  return `<details class="b2b-msg out"><summary><span class="b2b-dir">已发消息给</span>${b2bWho(call)}<span class="b2b-caret">›</span></summary><div class="b2b-body">${renderMarkdown(esc(call.args?.message ?? ""))}</div></details>`;
+}
+function b2bInHtml(call) {
+  const name = askTarget(call)?.name ?? String(call.args?.to ?? "");
+  const answer = String(call.result ?? "").replace(new RegExp(`^${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} 回复：`), "");
+  const failed = answer.startsWith("❌");
+  return `<details class="b2b-msg in ${failed ? "err" : ""}"><summary><span class="b2b-dir">${failed ? "没联系上" : "收到回复"}</span>${b2bWho(call)}<span class="b2b-caret">›</span></summary><div class="b2b-body">${renderMarkdown(esc(answer))}</div></details>`;
+}
+function b2bLiveHtml(call, text) {
+  return `<div class="b2b-msg in live"><div class="b2b-sum"><span class="b2b-dir">等待回复</span>${b2bWho(call)}<span class="dots"></span></div>${text ? `<div class="b2b-body">${renderMarkdown(esc(text))}</div>` : ""}</div>`;
+}
+
+/** 技能引用的文字写成了 key 时换成技能名 */
+let skillNameByKey = {};
+const loadSkillNames = () => api.skills.list().then((list) => { skillNameByKey = Object.fromEntries(list.map((k) => [k.key, k.name])); }).catch(() => {});
+loadSkillNames();
+api.onAppChanged((what) => { if (what === "skills") loadSkillNames(); if (what === "groups" || what === "bots") refreshBots(); });
+
+/** 正文里的 @bot名 → 可点的 bot 引用 */
+function mentionLinks(html) {
+  html = html.replace(/(<a class="ref ref-skill" data-ref="skill" data-id="([^"]+)"[^>]*><span class="ref-ico">🧩<\/span>)([^<]*)<\/a>/g,
+    (m, head, key, label) => label === key && skillNameByKey[key] ? `${head}${esc(skillNameByKey[key])}</a>` : m);
+  const names = bots.map((b) => b.name).filter(Boolean).sort((a, b) => b.length - a.length);
+  if (!names.length || !html.includes("@")) return html;
+  const re = new RegExp(`@(${names.map((n) => esc(n).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")})`, "g");
+  return html.replace(/(<[^>]*>)|([^<]+)/g, (m, tag, text) => tag ? m : text.replace(re, (_, n) => `<a class="ref ref-bot" data-ref="bot" data-id="${n}">@${n}</a>`));
+}
+
+function msgText(m) {
+  return typeof m.content === "string" ? m.content : (m.content ?? []).filter((b) => b.type === "text").map((b) => b.text ?? "").join("\n");
+}
+
+/** 代码块：轻量高亮（注释 / 字符串 / 数字 / 关键字）+ 复制按钮；code 内是已转义 HTML，先还原再逐 token 转义 */
+const CODE_KW = /^(?:const|let|var|function|return|if|else|for|while|do|switch|case|break|continue|new|class|extends|import|from|export|default|async|await|try|catch|finally|throw|typeof|instanceof|in|of|def|lambda|pass|None|True|False|self|elif|with|as|yield|fn|pub|struct|impl|enum|match|use|mod|mut|func|package|type|interface|go|defer|select|null|undefined|true|false|this|echo|then|fi|done|esac|local|export|sudo)$/;
+function highlightCode(src) {
+  const re = /(\/\/[^\n]*|#[^\n]*|\/\*[\s\S]*?\*\/)|("(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*'|`(?:\\.|[^`\\])*`)|(\b\d+(?:\.\d+)?\b)|([A-Za-z_$][\w$]*)/g;
+  let out = "", last = 0, mt;
+  while ((mt = re.exec(src))) {
+    out += esc(src.slice(last, mt.index));
+    const [tok, cm, str, num, word] = mt;
+    if (cm) out += `<span class="hl-c">${esc(tok)}</span>`;
+    else if (str) out += `<span class="hl-s">${esc(tok)}</span>`;
+    else if (num) out += `<span class="hl-n">${esc(tok)}</span>`;
+    else if (word && CODE_KW.test(word)) out += `<span class="hl-k">${esc(tok)}</span>`;
+    else out += esc(tok);
+    last = re.lastIndex;
   }
-  const menu = document.createElement("div");
-  menu.className = "ctx-menu";
-  menu.style.cssText = "position:fixed;z-index:99;background:#17171c;border:1px solid #333;border-radius:8px;padding:4px;min-width:140px;font-size:12.5px;box-shadow:0 8px 30px rgba(0,0,0,.5)";
-  menu.style.left = Math.min(e.clientX, window.innerWidth - 160) + "px";
-  menu.style.top = Math.min(e.clientY, window.innerHeight - 120) + "px";
-  const archived = s?.archived;
-  menu.innerHTML = `
-    <div class="ctx-item" data-act="${archived ? "unarchive" : "archive"}">${archived ? "↩ 取消归档" : "🗂 归档会话"}</div>
-    <div class="ctx-item danger" data-act="delete">🗑 删除会话</div>`;
-  Object.assign(menu.style, {});
-  document.body.appendChild(menu);
-  menu.querySelectorAll(".ctx-item").forEach((it) => {
-    it.style.cssText = "padding:7px 12px;border-radius:6px;cursor:pointer";
-    it.onmouseenter = () => it.style.background = "#23232a";
-    it.onmouseleave = () => it.style.background = "transparent";
-    it.onclick = async () => {
-      menu.remove();
-      const act = it.dataset.act;
-      if (act === "archive" || act === "unarchive") {
-        await api.sessions.archive(sid, act === "archive");
-      } else if (act === "delete") {
-        if (!confirm("确定删除该会话及全部消息？")) return;
-        await api.sessions.remove(sid);
-        currentSession = null;
-        $("#messages").innerHTML = "";
-      }
-      // 刷新会话（无 UI 会话列表，仅清空/保留）
-      if (act === "delete" && currentBot) { /* 重新选 bot 刷新 */ }
+  return out + esc(src.slice(last));
+}
+
+function decorateCode(root) {
+  root.querySelectorAll("pre.code-block").forEach((pre) => {
+    if (pre.dataset.decorated) return;
+    pre.dataset.decorated = "1";
+    const code = pre.querySelector("code");
+    const raw = code.textContent;
+    code.innerHTML = highlightCode(raw);
+    const btn = document.createElement("button");
+    btn.className = "code-copy";
+    btn.textContent = "复制";
+    btn.onclick = (e) => {
+      e.stopPropagation();
+      api.system.copy(raw);
+      btn.textContent = "已复制";
+      setTimeout(() => (btn.textContent = "复制"), 1200);
     };
+    pre.appendChild(btn);
   });
-  const off = (e) => { if (!e.target.closest(".ctx-menu")) { menu.remove(); document.removeEventListener("click", off); } };
-  setTimeout(() => document.addEventListener("click", off), 0);
-});
+}
 
-$("#input").addEventListener("keydown", (e) => {
-  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
-});
-document.querySelectorAll(".chip").forEach((c) => (c.onclick = async () => {
-  const bot = await api.bots.create(c.dataset.tpl);
-  await refreshBots();
+/** 消息悬浮操作：复制 / 重新生成（仅最后一条 bot 回复）/ 删除 */
+function attachMsgActions(wrapper, m) {
+  if (m.id === undefined || m.id === null) return;
+  const bar = document.createElement("div");
+  bar.className = "msg-actions";
+  const mine = m.from === "user";
+  bar.innerHTML = `<button data-a="copy" title="复制">⧉</button>${mine ? `<button data-a="edit" title="编辑后重新发送">✎</button>` : `<button data-a="speak" title="朗读">🔊</button><button data-a="quote" title="引用回复">↩</button><button data-a="regen" title="重新生成">↻</button>`}<button data-a="share" title="分享这段问答">⇪</button><button data-a="del" title="删除">🗑</button>`;
+  bar.onclick = async (e) => {
+    const a = e.target.closest("button")?.dataset.a;
+    if (!a) return;
+    if (a === "copy") { api.system.copy(msgText(m)); e.target.textContent = "✓"; setTimeout(() => (e.target.textContent = "⧉"), 1000); }
+    if (a === "del") {
+      if (!confirm("删除这条消息？")) return;
+      await api.messages.remove(m.sessionId, [m.id]);
+      await loadSessionMessages(m.sessionId, true);
+    }
+    if (a === "regen") regenerate(m);
+    if (a === "speak") toggleSpeak(msgText(m), e.target.closest("button"));
+    if (a === "share") shareFlow(m);
+    if (a === "edit") editAndResend(wrapper, m);
+    if (a === "quote") {
+      const q = msgText(m).replace(/```tool[\s\S]*?```/g, "").replace(/\s+/g, " ").trim().slice(0, 80);
+      $("#input").value = `> ${q}${q.length >= 80 ? "…" : ""}\n` + $("#input").value;
+      $("#input").focus();
+      $("#input").dispatchEvent(new Event("input"));
+    }
+  };
+  wrapper.appendChild(bar);
+}
 
-// G3：宠物「打开完整会话」→ 主面板聚焦并跳转
-api.onOpenSession(async (sid) => {
-  if (!sid) { alert("没有可打开的会话，先和宠物聊一句吧"); return; }
-  await openSessionById(sid);
-});
-  selectBot(bot);
-}));
-// 双击 bot 头像 → 生成形象
-$("#bot-list").addEventListener("dblclick", (e) => {
-  const item = e.target.closest(".bot-item");
-  if (item && currentBot) personaFlow();
-});
-
-refreshBots();
-
-// G3：宠物「打开完整会话」→ 主面板聚焦并跳转
-api.onOpenSession(async (sid) => {
-  if (!sid) { alert("没有可打开的会话，先和宠物聊一句吧"); return; }
-  await openSessionById(sid);
-});
+/** 编辑一条已发的消息：原地改字，发送后删掉它及之后的所有消息，用新内容重来 */
+function editAndResend(wrapper, m) {
+  const bubble = wrapper.querySelector(".bubble");
+  if (!bubble || wrapper.querySelector(".edit-box") || pending.has(m.sessionId)) return;
+  const box = document.createElement("div");
+  box.className = "edit-box";
+  box.innerHTML = `<textarea rows="3"></textarea><div class="edit-ops"><button class="ghost-btn" data-e="cancel">取消</button><button class="primary-btn" data-e="send">发送</button></div>`;
+  const ta = box.querySelector("textarea");
+  ta.value = msgText(m);
+  bubble.replaceWith(box);
+  ta.focus();
+  ta.setSelectionRange(ta.value.length, ta.value.length);
+  box.querySelector("[data-e=cancel]").onclick = () => box.replaceWith(bubble);
+  const go = async () => {
+    const text = ta.value.trim();
+    if (!text) return;
+    const msgs = await api.messages.list(m.sessionId);
+    const idx = msgs.findIndex((x) => x.id === m.id);
+    if (idx < 0) return;
+    await api.messages.remove(m.sessionId, msgs.slice(idx).map((x) => x.id));
+    await loadSessionMessages(m.sessionId, true);
+    (Array.isArray(m.content) ? m.content : []).filter((b) => b.type === "image" || b.type === "file").forEach(addPending);
+    $("#input").value = text;
+    send();
+  };
+  box.querySelector("[data-e=send]").onclick = go;
+  ta.onkeydown = (e) => {
+    if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); go(); }
+    if (e.key === "Escape") box.replaceWith(bubble);
+  };
+}

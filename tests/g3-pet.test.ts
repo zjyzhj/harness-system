@@ -33,11 +33,12 @@ describe("G3 pet-skin", () => {
     expect(reg.frame("test", "idle", 1)).toBe("B");
   });
 
-  test("T3.0d pixel 皮肤可用且帧数正确", () => {
-    const pixel = petSkins.get("pixel");
-    expect(pixel.name).toBe("像素");
-    expect(petSkins.frame("pixel", "idle", 0)).toBe("🐾");
-    expect(petSkins.frameCount("pixel", "idle")).toBe(3);
+  test("T3.0d 内置仅 Live2D，未知 id 回落到默认 Live2D", () => {
+    const ids = petSkins.list().map((s) => s.id);
+    expect(ids).toContain("live2d-hiyori");
+    expect(ids).not.toContain("pixel");
+    expect(ids).not.toContain("deepseek");
+    expect(petSkins.get("pixel").id).toBe("live2d-hiyori");
   });
 });
 
@@ -99,25 +100,12 @@ describe("G3 persona skin link", () => {
   });
 });
 
-describe("G5.5 brand skins", () => {
-  test("品牌预设皮肤齐全且帧可用", () => {
+describe("G5.5 live2d builtins", () => {
+  test("内置 Live2D 齐全", () => {
     const ids = petSkins.list().map((s) => s.id);
-    for (const id of ["deepseek", "claude", "doro", "guga", "grok", "default", "pixel", "cute"]) {
+    for (const id of ["live2d-hiyori", "live2d-haru", "live2d-mao"]) {
       expect(ids).toContain(id);
-    }
-    for (const id of ["deepseek", "claude", "doro", "guga", "grok"]) {
-      const sk = petSkins.get(id);
-      expect(sk.frames.idle.length).toBeGreaterThan(0);
-      expect(sk.color).toBeTruthy();
-      expect(petSkins.frame(id, "idle", 0)).toBeTruthy();
-    }
-  });
-
-  test("品牌皮肤动作帧非空", () => {
-    for (const a of ["idle", "walk", "jump", "sleep", "celebrate", "work", "think"] as PetAction[]) {
-      for (const id of ["deepseek", "claude", "doro", "guga", "grok"]) {
-        expect(petSkins.frameCount(id, a)).toBeGreaterThan(0);
-      }
+      expect(petSkins.get(id).live2d?.model).toBeTruthy();
     }
   });
 });
@@ -135,16 +123,17 @@ describe("G5.5 skin persistence (community sprite)", () => {
     expect(restored.name).toBe("Claude 测试");
     expect(restored.sprite?.path).toBe(sprite.path);
     expect(restored.sprite?.rows).toBe(9);
-    // 内置品牌不受影响
-    expect(reg2.list().map((s) => s.id)).toContain("deepseek");
+    expect(reg2.list().map((s) => s.id)).toContain("live2d-hiyori");
+    expect(reg2.list().map((s) => s.id)).not.toContain("deepseek");
   });
 
   test("内置皮囊不需要 assetsDir 也能工作", () => {
     const reg = new PetSkinRegistry();
-    expect(reg.get("default").id).toBe("default");
-    // 无 assetsDir 时 register 不落盘也不报错
+    expect(reg.get("default").id).toBe("live2d-hiyori");
+    // 无 assetsDir 时 register 不落盘也不报错；无 sprite/live2d 不进 list
     reg.register({ id: "x", name: "X", frames: { idle: ["A"], walk: ["B"], jump: ["C"], sleep: ["D"], celebrate: ["E"], work: ["F"], think: ["G"] }, fps: 2 });
     expect(reg.get("x").name).toBe("X");
+    expect(reg.list().map((s) => s.id)).not.toContain("x");
   });
 });
 

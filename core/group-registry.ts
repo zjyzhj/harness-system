@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { readJsonSafe, writeJsonAtomic } from "./atomic-fs";
 import { join } from "node:path";
 
 /**
@@ -14,6 +14,14 @@ export interface Group {
   members: string[];
   admin: string;          // "user" 或 bot id
   createdAt: number;
+  settings?: GroupSettings;
+}
+
+export interface GroupSettings {
+  goal?: string;          // 群目标：注入每个成员的群聊提示
+  relay?: boolean;        // 自动接力（默认开）
+  maxTurns?: number;      // 一次接力最多几轮发言（默认 12）
+  moderator?: string;     // 主持人 bot id：每轮小结 + 最终结论
 }
 
 export class GroupRegistry {
@@ -26,15 +34,11 @@ export class GroupRegistry {
   }
 
   private load() {
-    if (existsSync(this.file)) {
-      try {
-        const raw = JSON.parse(readFileSync(this.file, "utf8")) as Group[];
-        for (const g of raw) this.groups.set(g.id, g);
-      } catch { /* 损坏则重置 */ }
-    }
+    const raw = readJsonSafe<Group[]>(this.file, []);
+    if (Array.isArray(raw)) for (const g of raw) if (g?.id) this.groups.set(g.id, g);
   }
   private persist() {
-    writeFileSync(this.file, JSON.stringify([...this.groups.values()], null, 2), "utf8");
+    writeJsonAtomic(this.file, [...this.groups.values()]);
   }
 
   create(name: string, admin: string, members: string[] = []): Group {
@@ -55,6 +59,16 @@ export class GroupRegistry {
     const g = this.groups.get(groupId);
     if (!g) return null;
     g.members = g.members.filter((m) => m !== botId);
+    this.persist();
+    return g;
+  }
+
+  update(groupId: string, patch: { name?: string; members?: string[]; settings?: GroupSettings }) {
+    const g = this.groups.get(groupId);
+    if (!g) return null;
+    if (patch.name?.trim()) g.name = patch.name.trim();
+    if (patch.members) g.members = [...new Set(patch.members)];
+    if (patch.settings) g.settings = { ...g.settings, ...patch.settings };
     this.persist();
     return g;
   }

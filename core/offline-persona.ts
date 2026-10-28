@@ -19,7 +19,7 @@ export class OfflinePersona {
   reply(bot: Bot, text: string, memory: MemoryEntry[]): string {
     const card = bot.personaCard;
     const greeting = /^(嗨|hi|hello|你好|在吗|早安|晚安|早|哈喽|hey)/i.test(text.trim());
-    const question = /[?？]$|(什么|怎么|为什么|如何|多少|吗)\b/.test(text);
+    const question = /[?？]$|什么|怎么|为什么|如何|多少|吗|能不能|可以/.test(text);
     const thanks = /(谢谢|感谢|thx|thanks)/i.test(text);
     const bye = /(再见|拜拜|bye|晚安)/i.test(text);
 

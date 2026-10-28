@@ -48,4 +48,39 @@ describe("G1 context-budget", () => {
     expect(r.compressed).toBe(false);
     expect(r.messages.length).toBeLessThan(20);
   });
+
+  test("摘要失败：不推进压缩边界、不改已有摘要，只临时截掉最旧的消息", async () => {
+    const hist = Array.from({ length: 60 }, (_, i) => mk(i + 1, "x".repeat(200)));
+    for (const fail of [() => null, () => "", () => { throw new Error("429"); }]) {
+      const r = await trimHistoryToBudget(hist, 5, fail as never, { budgetTokens: 1000, prevSummary: "旧摘要" });
+      expect(r.compressed).toBe(false);
+      expect(r.compactedUpToSeq).toBe(5);
+      expect(r.summaryText).toBe("旧摘要");
+      expect(r.messages[0].content).toContain("旧摘要");
+      expect(r.messages.length).toBeLessThan(56);
+      expect(r.messages.at(-1)!.content).toBe("x".repeat(200));
+    }
+  });
+
+  test("系统提示占用计入预算", async () => {
+    const hist = Array.from({ length: 10 }, (_, i) => mk(i + 1, "x".repeat(200)));
+    expect((await trimHistoryToBudget(hist, 0, () => "s", { budgetTokens: 1000, systemTokens: 0 })).compressed).toBe(false);
+    expect((await trimHistoryToBudget(hist, 0, () => "s", { budgetTokens: 1000, systemTokens: 600 })).compressed).toBe(true);
+  });
+
+  test("已有摘要会放在最前，并在再次压缩时并入新摘要", async () => {
+    const hist = Array.from({ length: 10 }, (_, i) => mk(i + 1, "x".repeat(200)));
+    const under = await trimHistoryToBudget(hist.slice(8), 8, () => "never", { budgetTokens: 8000, prevSummary: "用户叫小周，要做发布" });
+    expect(under.compressed).toBe(false);
+    expect(under.messages[0]).toEqual({ role: "system", content: "【历史摘要】\n用户叫小周，要做发布" });
+    expect(under.messages).toHaveLength(3);
+
+    let seen: { role: string; content: string }[] = [];
+    const over = await trimHistoryToBudget(hist, 2, (msgs) => { seen = msgs; return "合并摘要"; }, { budgetTokens: 400, prevSummary: "用户叫小周" });
+    expect(over.compressed).toBe(true);
+    expect(seen[0].content).toContain("已有摘要：用户叫小周");
+    expect(over.summaryText).toBe("合并摘要");
+    expect(over.messages[0].content).toContain("合并摘要");
+    expect(over.messages.slice(1).every((m) => m.role !== "system")).toBe(true);
+  });
 });

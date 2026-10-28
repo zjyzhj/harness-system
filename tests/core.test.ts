@@ -1,5 +1,5 @@
 import { describe, test, expect, afterAll, beforeAll } from "bun:test";
-import { mkdtempSync, existsSync, readFileSync, statSync } from "node:fs";
+import { mkdtempSync, existsSync, readFileSync, writeFileSync, mkdirSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Store } from "../core/store";
@@ -7,7 +7,9 @@ import { AgentRegistry, ruleParse, extractModel } from "../core/agent-registry";
 import { contentText } from "../core/types";
 import { MessageBus } from "../core/message-bus";
 import { ProviderCenter } from "../core/provider-center";
-import { PersonaGenerator, fallbackAvatar, buildCard } from "../core/persona";
+import { PersonaGenerator, buildCard } from "../core/persona";
+import { avatarFromDescription } from "../core/avatar";
+import { SHAPE_SKIN_ID } from "../core/pet-skin";
 import { SystemKit } from "../core/system-kit";
 import { Migration } from "../core/migration";
 
@@ -103,23 +105,95 @@ describe("provider-center", () => {
 });
 
 describe("persona", () => {
-  test("一句话生成形象（降级头像 + 角色卡）", async () => {
+  test("无生图且无强匹配时保持原皮，只代码画聊天头像", async () => {
     const reg = new AgentRegistry(store);
     const bot = await reg.createBotFromText("创建 bot：小狐");
     const assets = join(home, "assets");
     const pg = new PersonaGenerator(store, assets);
     const r = await pg.generate(bot, "一只蓝色狐狸，可爱");
     expect(r.card.traits).toContain("蓝色色系");
-    expect(existsSync(r.avatarPath!)).toBe(true);
+    expect(r.imaged).toBe(false);
+    expect(r.codeDrawn).toBe(true);
+    expect(r.avatarPath).toBeUndefined();
+    expect(r.avatar?.color).toBe("#3b82f6");
+    expect(r.avatar?.shape).toMatch(/bean|cloud/);
+    expect(r.message).toMatch(/代码画/);
+    expect(r.message).toMatch(/保持/);
     const saved = store.getBot(bot.id);
     expect(saved?.personaCard?.name).toBe("小狐");
-    expect(saved?.avatarPath).toBe(r.avatarPath);
+    expect(saved?.avatarPath).toBeUndefined();
+    expect(saved?.avatar?.color).toBe("#3b82f6");
+    // 智能优先：不对不上号的描述硬切形状色块
+    expect(r.appliedSkin).toBeUndefined();
+    expect(saved?.skinId).not.toBe(SHAPE_SKIN_ID);
   });
-  test("fallbackAvatar 产出 SVG 文件", () => {
-    const path = join(home, "assets", "x.svg");
-    const p = fallbackAvatar({ id: "x", name: "狐", role: "", persona: "", providerId: "p1", petEnabled: false, createdAt: Date.now() }, "蓝色狐狸", path);
-    expect(existsSync(p)).toBe(true);
-    expect(readFileSync(p, "utf8")).toContain("<svg");
+  test("画个球：几何意图上台形状皮并画圆", async () => {
+    const reg = new AgentRegistry(store);
+    const bot = await reg.createBotFromText("创建 bot：小球");
+    const assets = join(home, "assets");
+    const r = await new PersonaGenerator(store, assets).generate(bot, "画个球", undefined, {
+      localSkins: [
+        { id: "live2d-hiyori", name: "日和 Hiyori", desc: "少女" },
+        { id: SHAPE_SKIN_ID, name: "形状色块", desc: "代码绘制" },
+      ],
+    });
+    expect(r.codeDrawn).toBe(true);
+    expect(r.avatar?.shape).toBe("circle");
+    expect(r.appliedSkin?.id).toBe(SHAPE_SKIN_ID);
+    expect(store.getBot(bot.id)?.skinId).toBe(SHAPE_SKIN_ID);
+  });
+  test("无生图时优先换可落地的 Live2D，同时代码画头像", async () => {
+    const reg = new AgentRegistry(store);
+    const bot = await reg.createBotFromText("创建 bot：魔法少女");
+    const assets = join(home, "assets");
+    const r = await new PersonaGenerator(store, assets).generate(bot, "二次元魔法少女", undefined, {
+      localSkins: [
+        { id: "live2d-mao", name: "真央 Mao", desc: "魔法少女" },
+        { id: "live2d-hiyori", name: "日和 Hiyori", desc: "少女" },
+      ],
+    });
+    expect(r.imaged).toBe(false);
+    expect(r.codeDrawn).toBe(true);
+    expect(r.appliedSkin?.id).toBe("live2d-mao");
+    expect(r.suggestions.some((s) => s.kind === "live2d")).toBe(true);
+  });
+  test("模型选型优先于规则", async () => {
+    const reg = new AgentRegistry(store);
+    const bot = await reg.createBotFromText("创建 bot：选皮");
+    const assets = join(home, "assets");
+    const r = await new PersonaGenerator(store, assets).generate(bot, "随便来个可爱的", undefined, {
+      localSkins: [
+        { id: "live2d-hiyori", name: "日和 Hiyori", desc: "少女" },
+        { id: SHAPE_SKIN_ID, name: "形状色块", desc: "代码绘制" },
+      ],
+      pickSmart: async () => ({ action: "skin", id: "live2d-hiyori", name: "日和 Hiyori" }),
+    });
+    expect(r.appliedSkin?.id).toBe("live2d-hiyori");
+  });
+  test("avatarFromDescription 按颜色/形态选形", () => {
+    expect(avatarFromDescription("红色爱心").shape).toBe("heart");
+    expect(avatarFromDescription("红色爱心").color).toBe("#ef4444");
+    expect(avatarFromDescription("紫色星星").shape).toBe("sparkle");
+    expect(avatarFromDescription("画个球").shape).toBe("circle");
+    expect(avatarFromDescription("蓝色圆球").shape).toBe("circle");
+    expect(avatarFromDescription("蓝色圆球").color).toBe("#3b82f6");
+  });
+  test("有生图才写头像文件", async () => {
+    const reg = new AgentRegistry(store);
+    const bot = await reg.createBotFromText("创建 bot：画狐");
+    const assets = join(home, "assets");
+    mkdirSync(assets, { recursive: true });
+    const pg = new PersonaGenerator(store, assets, {
+      generate: async (_prompt, dest) => {
+        writeFileSync(dest, "fake-png");
+        return { path: dest, degraded: false };
+      },
+    });
+    const r = await pg.generate(bot, "蓝色狐狸");
+    expect(r.imaged).toBe(true);
+    expect(r.codeDrawn).toBe(false);
+    expect(r.avatarPath).toBeTruthy();
+    expect(existsSync(r.avatarPath!)).toBe(true);
   });
   test("buildCard 性格提取", () => {
     const card = buildCard({ id: "x", name: "小狐", role: "", persona: "活泼", providerId: "p1", petEnabled: false, createdAt: Date.now() }, "蓝色狐狸可爱");
@@ -148,13 +222,16 @@ describe("migration", () => {
     const reg = new AgentRegistry(store);
     const bot = await reg.createBotFromText("创建 bot：迁移测试助手");
     const assets = join(home, "assets");
-    const pg = new PersonaGenerator(store, assets);
+    mkdirSync(assets, { recursive: true });
+    // 用假生图写出真实头像文件，验证迁移带走图片
+    const pg = new PersonaGenerator(store, assets, {
+      generate: async (_p, dest) => { writeFileSync(dest, "png"); return { path: dest, degraded: false }; },
+    });
     await pg.generate(bot, "一只猫");
     const mig = new Migration(store, assets);
     const payload = mig.exportPayload();
     expect(payload.format).toBe("harness-bot-migration/v2");
     expect(payload.bots.length).toBeGreaterThan(0);
-    // 导入到干净 store
     const store2 = new Store(join(home, "imported"));
     const mig2 = new Migration(store2, join(home, "assets-imported"));
     const r = mig2.importFromPayload(payload);
@@ -199,5 +276,5 @@ describe("codex provider base-url/key passthrough", () => {
     const p = pc.addProvider({ kind: "cli", name: "Codex via key", cliName: "codex", baseUrl: "http://127.0.0.1:1/v1", apiKey: "sk-abc", model: "deepseek-chat" });
     // complete 会尝试 spawn codex；本机 codex 不存在时抛错 → 降级到 API（URL 不通 → 抛错）
     await expect(pc.complete(p, { user: "hi" })).rejects.toThrow();
-  });
+  }, 60_000);
 });

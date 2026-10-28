@@ -1,5 +1,6 @@
 {
   "name": "harness-bot",
+  "productName": "harness-bot",
   "version": "0.1.0",
   "description": "Harness Bot — macOS 桌面端 AI 智能体指挥中心（Grok-Bot 风格 + 桌面宠物）",
   "type": "module",
@@ -10,14 +11,44 @@
     "test": "bun test",
     "typecheck": "bunx tsc --noEmit",
     "build": "bun run scripts/gen-icon.ts && bun run scripts/build-shell.ts",
-    "start": "bun run build && electron ."
+    "start": "bun run build && electron .",
+    "eval": "bun run scripts/build-shell.ts && electron . --run-evals",
+    "dist": "bun run build && electron-builder --mac --arm64"
   },
   "devDependencies": {
     "@types/bun": "latest",
+    "electron": "^42",
+    "electron-builder": "^26.18.0",
     "typescript": "^5.6.0"
   },
   "dependencies": {
-    "electron": "^33.0.0"
+    "@huggingface/transformers": "^4.3.2"
   },
-  "main": "dist/main.cjs"
+  "main": "dist/main.cjs",
+  "build": {
+    "appId": "com.harness.bot",
+    "files": ["dist/**", "assets/**", "package.json"],
+    "asarUnpack": ["node_modules/onnxruntime-node/**", "node_modules/sharp/**", "node_modules/@img/**"],
+    "directories": {
+      "output": "release"
+    },
+    "mac": {
+      "category": "public.app-category.productivity",
+      "target": [{
+        "target": "dmg",
+        "arch": ["arm64"]
+      }, {
+        "target": "dir",
+        "arch": ["arm64"]
+      }],
+      "identity": "Apple Development: jyz551180@gmail.com (Z2QN882468)",
+      "hardenedRuntime": false,
+      "extendInfo": {
+        "NSMicrophoneUsageDescription": "语音输入需要使用麦克风",
+        "NSUserNotificationAlertStyle": "alert",
+        "NSAppleEventsUsageDescription": "Bot 通过辅助功能操控本机应用",
+        "NSScreenCaptureUsageDescription": "Bot 截屏以理解当前界面（电脑操控）"
+      }
+    }
+  }
 }

@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { ScheduledTask } from "./types";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { readJsonSafe, writeJsonAtomic } from "./atomic-fs";
 import { join } from "node:path";
 
 /**
@@ -19,6 +19,8 @@ export class Scheduler {
   onRun: ((task: ScheduledTask) => Promise<void>) | null = null;
   /** G3：一次性闹钟到期回调（notifyPet 时才由上层接宠物推送） */
   onAlarm: ((task: ScheduledTask) => void) | null = null;
+  /** 任务列表有增删改时通知 UI 刷新（如一次性任务执行后自动删除） */
+  onChange: (() => void) | null = null;
 
   constructor(private home: string) {
     this.file = join(home, "tasks.json");
@@ -26,12 +28,11 @@ export class Scheduler {
   }
 
   private load() {
-    if (existsSync(this.file)) {
-      try { this.tasks = JSON.parse(readFileSync(this.file, "utf8")); } catch { this.tasks = []; }
-    }
+    const tasks = readJsonSafe<ScheduledTask[]>(this.file, []);
+    this.tasks = Array.isArray(tasks) ? tasks : [];
   }
   private persist() {
-    writeFileSync(this.file, JSON.stringify(this.tasks, null, 2), "utf8");
+    writeJsonAtomic(this.file, this.tasks);
   }
 
   list(): ScheduledTask[] {
@@ -41,7 +42,7 @@ export class Scheduler {
     return this.tasks.filter((t) => t.botId === botId);
   }
 
-  create(input: { botId: string; name: string; cron: string; prompt?: string; maxRetries?: number; kind?: "cron" | "once"; alarmAt?: number; notifyPet?: boolean }): ScheduledTask {
+  create(input: { botId: string; name: string; cron: string; prompt?: string; maxRetries?: number; kind?: "cron" | "once"; alarmAt?: number; notifyPet?: boolean; runPrompt?: boolean; deleteAfterRun?: boolean; sessionId?: string }): ScheduledTask {
     const kind = input.kind ?? "cron";
     if (kind === "cron" && !isValidCron(input.cron)) throw new Error(`cron 表达式无效: ${input.cron}（应为 5 段：分 时 日 月 周）`);
     const t: ScheduledTask = {
@@ -58,9 +59,13 @@ export class Scheduler {
       kind,
       alarmAt: input.alarmAt,
       notifyPet: input.notifyPet,
+      runPrompt: input.runPrompt,
+      deleteAfterRun: input.deleteAfterRun,
+      sessionId: input.sessionId,
     };
     this.tasks.push(t);
     this.persist();
+    this.onChange?.();
     return t;
   }
 
@@ -74,8 +79,10 @@ export class Scheduler {
   }
 
   delete(id: string) {
+    const n = this.tasks.length;
     this.tasks = this.tasks.filter((t) => t.id !== id);
     this.persist();
+    if (this.tasks.length !== n) this.onChange?.();
   }
 
   setEnabled(id: string, enabled: boolean) {
@@ -104,6 +111,11 @@ export class Scheduler {
           // 一次性闹钟：触发一次即禁用；通知宠物
           this.update(t.id, { lastRunAt: now, runCount: t.runCount + 1, enabled: false, lastResult: "ok", lastRunLog: `⏰ ${new Date(now).toISOString()} 闹钟触发` });
           if (t.notifyPet && this.onAlarm) this.onAlarm(t);
+          if (t.runPrompt && this.onRun) {
+            try { await this.onRun(t); } catch (e) { this.update(t.id, { lastResult: "error", lastError: e instanceof Error ? e.message : String(e) }); }
+          }
+          if (t.deleteAfterRun) this.delete(t.id);
+          else this.onChange?.(); // 一次性已触发（enabled=false），面板同步
           continue;
         }
         const next = nextCronTime(t.cron, now);
@@ -125,6 +137,7 @@ export class Scheduler {
             });
           }
         }
+        this.onChange?.();
       }
     } finally {
       this.running = false;
@@ -139,24 +152,52 @@ export class Scheduler {
   }
 }
 
-/** 5 段 cron → 下一个触发时间戳（分钟级精度） */
-export function nextCronTime(cron: string, from = Date.now()): number {
+const CRON_RANGES: [number, number][] = [[0, 59], [0, 23], [1, 31], [1, 12], [0, 7]];
+
+/** 一段 cron → 允许的取值集合；null = 任意（*）。支持 *、n、a-b、a-b/n、* /n、逗号列表；周里 7 也算周日 */
+function parseCronField(field: string, [lo, hi]: [number, number]): Set<number> | null {
+  if (field === "*") return null;
+  const out = new Set<number>();
+  for (const part of field.split(",")) {
+    const m = part.match(/^(\*|\d+)(?:-(\d+))?(?:\/(\d+))?$/);
+    if (!m) throw new Error(`cron 段无效: ${field}`);
+    const step = m[3] ? Number(m[3]) : 1;
+    const start = m[1] === "*" ? lo : Number(m[1]);
+    const end = m[1] === "*" ? hi : m[2] !== undefined ? Number(m[2]) : m[3] ? hi : start;
+    if (step < 1 || start < lo || end > hi || start > end) throw new Error(`cron 段超出范围: ${field}`);
+    for (let v = start; v <= end; v += step) out.add(v);
+  }
+  return out;
+}
+
+function parseCron(cron: string) {
   const parts = cron.trim().split(/\s+/);
   if (parts.length !== 5) throw new Error(`cron 需 5 段: ${cron}`);
-  const [min, hour, dom, mon, dow] = parts.map((p) => p === "*" ? null : (p.startsWith("*/") ? parseInt(p.slice(2), 10) : parseInt(p, 10)));
-  const d = new Date(from + 60_000); // 从下一分钟开始
+  const [min, hour, dom, mon, dow] = parts.map((p, i) => parseCronField(p, CRON_RANGES[i]));
+  if (dow?.has(7)) dow.add(0);
+  return { min, hour, dom, mon, dow };
+}
+
+/** 5 段 cron → 下一个触发时间戳（分钟级精度）；日和周都限定时按标准 cron 取「任一满足」 */
+export function nextCronTime(cron: string, from = Date.now()): number {
+  const { min, hour, dom, mon, dow } = parseCron(cron);
+  const ok = (s: Set<number> | null, v: number) => !s || s.has(v);
+  const d = new Date(from);
+  d.setSeconds(0, 0);
+  d.setMinutes(d.getMinutes() + 1);
   for (let i = 0; i < 60 * 24 * 370; i++) {
-    const m = d.getMinutes(), h = d.getHours(), day = d.getDate(), month = d.getMonth() + 1, wd = d.getDay();
-    if ((min === null || m === min) && (hour === null || h === hour) && (dom === null || day === dom) && (mon === null || month === mon) && (dow === null || wd === dow)) {
-      return d.getTime();
-    }
+    const dayOk = dom && dow ? dom.has(d.getDate()) || dow.has(d.getDay()) : ok(dom, d.getDate()) && ok(dow, d.getDay());
+    if (ok(mon, d.getMonth() + 1) && dayOk && ok(hour, d.getHours()) && ok(min, d.getMinutes())) return d.getTime();
     d.setMinutes(d.getMinutes() + 1);
   }
-  return from + 3600_000; // 兜底：1 小时后
+  return from + 3600_000;
 }
 
 export function isValidCron(cron: string): boolean {
-  const parts = cron.trim().split(/\s+/);
-  if (parts.length !== 5) return false;
-  return parts.every((p) => p === "*" || /^(\d{1,2}|\*\/\d{1,2}|\d{1,2}-\d{1,2}|\d{1,2},\d{1,2})$/.test(p));
+  try {
+    parseCron(cron);
+    return true;
+  } catch {
+    return false;
+  }
 }

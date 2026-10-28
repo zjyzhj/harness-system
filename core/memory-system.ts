@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { MemoryEntry } from "./types";
-import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { readJsonSafe, writeFileAtomic, writeJsonAtomic } from "./atomic-fs";
 import { join, basename } from "node:path";
 import { HashVectorEmbedder, cosine, keywordScore, type Embedder } from "./embedders";
 
@@ -13,6 +14,19 @@ import { HashVectorEmbedder, cosine, keywordScore, type Embedder } from "./embed
  * 旧路径 memory/<botId>.json 自动兼容映射到 bot:<botId>。
  */
 const nsFile = (ns: string) => ns.replace(/[^a-zA-Z0-9:_-]/g, "_");
+
+/** 两段文字共有的相邻两字（去空白、标点）个数 */
+function bigramHits(text: string, query: string): number {
+  const clean = (s: string) => Array.from(s.toLowerCase().replace(/[\s\p{P}\p{S}]+/gu, ""));
+  const t = clean(text).join("");
+  const q = clean(query);
+  const seen = new Set<string>();
+  for (let i = 0; i < q.length - 1; i++) {
+    const g = q[i] + q[i + 1];
+    if (t.includes(g)) seen.add(g);
+  }
+  return seen.size;
+}
 
 export class MemorySystem {
   private mem: Record<string, MemoryEntry[]> = {};
@@ -39,13 +53,10 @@ export class MemorySystem {
   private loadAll() {
     for (const f of readdirSync(this.dir).filter((f) => f.endsWith(".json"))) {
       const key = basename(f, ".json");
-      try {
-        const arr = JSON.parse(readFileSync(join(this.dir, f), "utf8")) as MemoryEntry[];
-        const ns = key.startsWith("bot:") || key.startsWith("group:") || key === "global" ? key : `bot:${key}`;
-        this.mem[ns] = arr;
-      } catch {
-        // ignore corrupt
-      }
+      const arr = readJsonSafe<MemoryEntry[] | null>(join(this.dir, f), null);
+      if (!Array.isArray(arr)) continue;
+      const ns = key.startsWith("bot:") || key.startsWith("group:") || key === "global" ? key : `bot:${key}`;
+      this.mem[ns] = arr;
     }
     // MEMORY.md
     for (const d of readdirSync(this.dir, { withFileTypes: true })) {
@@ -70,7 +81,7 @@ export class MemorySystem {
           const arr = JSON.parse(readFileSync(legacyPath, "utf8")) as MemoryEntry[];
           arr.forEach((e) => (e.namespace = `bot:${key}`));
           this.mem[ns] = arr;
-          writeFileSync(dest, JSON.stringify(arr, null, 2), "utf8");
+          writeJsonAtomic(dest, arr);
           rmSync(legacyPath, { force: true });
           changed = true;
         } catch { /* ignore */ }
@@ -80,7 +91,7 @@ export class MemorySystem {
   }
 
   private persist(ns: string) {
-    writeFileSync(this.fileFor(ns), JSON.stringify(this.mem[ns] ?? [], null, 2), "utf8");
+    writeJsonAtomic(this.fileFor(ns), this.mem[ns] ?? []);
   }
 
   // ---- CRUD（namespace 感知，兼容旧 botId 签名） ----
@@ -101,6 +112,16 @@ export class MemorySystem {
     const ns = this.normNs(botId, entry.namespace);
     const arr = this.mem[ns] || (this.mem[ns] = []);
     const now = Date.now();
+    const key = normText(entry.content);
+    const same = arr.findIndex((x) => x.kind === entry.kind && normText(x.content) === key);
+    if (same >= 0) {
+      // 同一句话再说一遍：不新增，只把它挪到最新（冲突时以新的为准）
+      const [old] = arr.splice(same, 1);
+      old.updatedAt = now;
+      arr.push(old);
+      this.persist(ns);
+      return old;
+    }
     const e: MemoryEntry = {
       id: entry.id ?? randomUUID(),
       botId,
@@ -213,18 +234,14 @@ export class MemorySystem {
     const recent = (this.mem[ns] ?? []).slice(-30);
     const text = await summarize(this.memoNames[ns] ?? "", recent);
     this.memoNames[ns] = text;
-    const d = join(this.dir, nsFile(ns));
-    if (!existsSync(d)) mkdirSync(d, { recursive: true });
-    writeFileSync(this.memoFile(ns), text, "utf8");
+    writeFileAtomic(this.memoFile(ns), text);
     return text;
   }
 
   setMemo(nsOrBotId: string, text: string, namespace?: string) {
     const ns = this.normNs(nsOrBotId, namespace);
     this.memoNames[ns] = text;
-    const d = join(this.dir, nsFile(ns));
-    if (!existsSync(d)) mkdirSync(d, { recursive: true });
-    writeFileSync(this.memoFile(ns), text, "utf8");
+    writeFileAtomic(this.memoFile(ns), text);
   }
 
   /** 触发条件：新 fact 数 ≥ 5 或距上次 ≥24h 且有变更 */
@@ -239,25 +256,30 @@ export class MemorySystem {
 
   // ---- 构建注入上下文（含 memo + 级联） ----
 
-  buildContext(botId: string, query?: string, groups: string[] = []): string {
+  buildContext(botId: string, query?: string, groups: string[] = [], opts?: { rules?: boolean }): string {
     const parts: string[] = [];
-    const botNs = `bot:${botId}`;
-    // 1) MEMORY.md 权威总结常驻
+    const own = this.list(`bot:${botId}`);
+    const shared = [...groups.flatMap((g) => this.list(`group:${g}`)), ...this.list("global")];
+    // 1) 规范：用户定的做事要求，全部常驻（不靠检索命中，不会因为条数多被挤掉）
+    const rules = opts?.rules === false ? [] : [...shared, ...own].filter((e) => e.kind === "rule").sort((a, b) => a.updatedAt - b.updatedAt).slice(-40);
+    if (rules.length) parts.push("【必须遵守的规范（用户定下的，长期有效，与人设冲突时以这里为准；按时间从旧到新排列，互相矛盾时以靠后的为准）】\n" + rules.map((r) => `- ${r.content}`).join("\n"));
+    // 2) MEMORY.md 权威总结常驻
     const memo = this.memoOf(botId);
-    if (memo.trim()) parts.push(`【长期记忆·权威总结】\n${memo.trim().slice(0, 3200)}`);
-    // 2) facts / summaries（bot 私有）
-    const all = this.list(botNs);
-    const facts = all.filter((e) => e.kind === "fact").slice(-6);
-    const summaries = all.filter((e) => e.kind === "summary").slice(-3);
+    if (memo.trim()) parts.push(`【长期记忆·权威总结】\n${memo.trim().slice(0, 1500)}`);
+    // 3) 关于用户的事实 / 偏好（自己的 + 所有 bot 共享的）
+    const facts = [...shared, ...own].filter((e) => e.kind === "fact").slice(-20);
     if (facts.length) parts.push("【长期记忆·事实】\n" + facts.map((f) => `- ${f.content}`).join("\n"));
+    const summaries = own.filter((e) => e.kind === "summary").slice(-3);
     if (summaries.length) parts.push("【长期记忆·过往摘要】\n" + summaries.map((s) => `- ${s.content}`).join("\n"));
-    // 3) 语义级联命中（bot → group → global）
+    // 4) 其他记忆只放和这次问题相关的
     if (query && query.trim()) {
-      const allHits = this.list(botNs).filter((e) => e.kind !== "fact" && e.kind !== "summary");
-      void allHits;
-      // 用关键词快速兜底 + 级联语义（异步不阻塞：这里用同步关键词先给，完整语义在 retrieveCascade 供工具用）
-      const hits = this.search(botId, query, 4);
-      if (hits.length) parts.push("【相关记忆】\n" + hits.map((h) => `- ${h.content}`).join("\n"));
+      const hits = own
+        .filter((e) => e.kind === "note" || e.kind === "event")
+        .map((e) => ({ e, s: bigramHits(e.content, query) }))
+        .filter((x) => x.s >= 2)
+        .sort((a, b) => b.s - a.s)
+        .slice(0, 4);
+      if (hits.length) parts.push("【相关记忆】\n" + hits.map((h) => `- ${h.e.content}`).join("\n"));
     }
     return parts.join("\n\n");
   }
@@ -271,25 +293,22 @@ export class MemorySystem {
 
   // ---- 维护：合并相似 + 容量淘汰 ----
 
-  /** 合并内容相似（余弦 > 0.9）或完全相同的条目；返回合并数 */
+  /**
+   * 只合并同类、文字完全相同（忽略空白标点）的条目，保留较新的一条。
+   * 不按相似度合并：「回复用中文」和「回复不要用中文」字面很像，意思相反。
+   */
   mergeDuplicate(nsOrBotId: string, namespace?: string): number {
     const ns = this.normNs(nsOrBotId, namespace);
     const arr = this.mem[ns] ?? [];
-    const kept: MemoryEntry[] = [];
-    let merged = 0;
+    const latest = new Map<string, MemoryEntry>();
     for (const e of arr) {
-      const dup = kept.find((k) => {
-        if (k.content === e.content) return true;
-        if (k.vector && e.vector) return cosine(k.vector, e.vector) > 0.9;
-        return false;
-      });
-      if (dup) {
-        merged++;
-        dup.updatedAt = Math.max(dup.updatedAt, e.updatedAt);
-      } else {
-        kept.push(e);
-      }
+      const k = `${e.kind}\u0000${normText(e.content)}`;
+      const prev = latest.get(k);
+      if (!prev || e.updatedAt >= prev.updatedAt) latest.set(k, e);
     }
+    const keepIds = new Set([...latest.values()].map((e) => e.id));
+    const kept = arr.filter((e) => keepIds.has(e.id));
+    const merged = arr.length - kept.length;
     if (merged) {
       this.mem[ns] = kept;
       this.persist(ns);
@@ -302,13 +321,17 @@ export class MemorySystem {
     const ns = this.normNs(nsOrBotId, namespace);
     const arr = this.mem[ns] ?? [];
     if (arr.length <= budget) return 0;
-    const sorted = [...arr].sort((a, b) => {
+    // 用户定的规范不参与淘汰
+    const rules = arr.filter((e) => e.kind === "rule");
+    const others = arr.filter((e) => e.kind !== "rule").sort((a, b) => {
       const aScore = (a.tags?.length ?? 0) + (a.kind === "fact" ? 2 : 0);
       const bScore = (b.tags?.length ?? 0) + (b.kind === "fact" ? 2 : 0);
       return bScore - aScore || b.updatedAt - a.updatedAt;
     });
-    const keep = sorted.slice(0, budget);
+    const keepIds = new Set([...rules, ...others.slice(0, Math.max(0, budget - rules.length))].map((e) => e.id));
+    const keep = arr.filter((e) => keepIds.has(e.id));
     const removed = arr.length - keep.length;
+    if (!removed) return 0;
     this.mem[ns] = keep;
     this.persist(ns);
     return removed;
@@ -321,6 +344,10 @@ export class MemorySystem {
     for (const f of Object.keys(this.mem)) set.add(f);
     return [...set];
   }
+}
+
+function normText(s: string): string {
+  return s.replace(/^\s*(用户定下的规范|用户要求|规范)\s*[:：]/, "").replace(/[\s\p{P}\p{S}]/gu, "").toLowerCase();
 }
 
 function dedupe(arr: MemoryEntry[]): MemoryEntry[] {

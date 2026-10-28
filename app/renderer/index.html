@@ -2,57 +2,81 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8" />
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: file:;" />
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: file: https:; frame-src 'self' file:; media-src 'self' file: data:;" />
 <title>Harness Bot</title>
 <link rel="stylesheet" href="./style.css" />
+<link rel="stylesheet" href="./avatar-shapes.css" />
 </head>
 <body>
 <div id="app">
   <aside id="sidebar">
-    <div class="brand"><span class="logo">🤖</span><h1>Harness Bot</h1></div>
-    <div id="search-box">
-      <input id="search-input" placeholder="🔍 搜索会话/消息…" />
+    <div class="side-top">
+      <button id="search-toggle" class="icon-btn" title="搜索会话/消息">⌕</button>
+      <button id="new-bot-btn" class="icon-btn" title="新建 bot">＋</button>
+    </div>
+    <div id="search-box" class="hidden">
+      <input id="search-input" placeholder="搜索会话/消息…" />
       <div id="search-results" class="hidden"></div>
     </div>
-    <button id="new-bot-btn" class="primary-btn">＋ 一句话创建 bot</button>
-    <div id="quick-templates" class="chips">
-      <button class="chip" data-tpl="创建 bot：翻译助手，用 claude，风格专业">翻译</button>
-      <button class="chip" data-tpl="创建 bot：代码助手，用 codex，风格严谨">代码</button>
-      <button class="chip" data-tpl="创建 bot：写作助手，用 gpt-4o，风格文艺">写作</button>
-      <button class="chip" data-tpl="创建 bot：灵感小助手，用 deepseek-chat，风格活泼">灵感</button>
-    </div>
+    <div id="side-hero"></div>
     <div id="bot-list" class="bot-list"></div>
-    <div class="sidebar-foot">
-      <button id="memory-btn" class="ghost-btn">🧠 记忆</button>
-      <button id="skills-btn" class="ghost-btn">🛠 技能</button>
-      <button id="mcp-btn" class="ghost-btn">🔌 MCP</button>
-    </div>
-    <div class="sidebar-foot">
-      <button id="tasks-btn" class="ghost-btn">⏰ 定时</button>
-      <button id="groups-btn" class="ghost-btn">👥 群组</button>
-      <button id="plans-btn" class="ghost-btn">🧩 编排</button>
-    </div>
-    <div class="sidebar-foot">
-      <button id="settings-btn" class="ghost-btn">⚙ 设置</button>
-      <button id="sysaccess-btn" class="ghost-btn">🛡 系统授权</button>
-      <button id="migrate-btn" class="ghost-btn">⇄ 迁移</button>
+    <div class="side-foot">
+      <button id="more-btn" class="foot-btn">⚙ 工具与设置</button>
+      <div id="more-menu" class="pop-menu hidden">
+        <button id="settings-btn">⚙ 模型设置</button>
+        <button id="memory-btn">🧠 记忆</button>
+        <button id="skills-btn">🛠 技能</button>
+        <button id="mcp-btn">🔌 MCP</button>
+        <button id="tasks-btn">⏰ 定时任务</button>
+        <button id="groups-btn">👥 群组</button>
+        <button id="plans-btn">🧩 编排</button>
+        <button id="env-btn">🔑 环境配置</button>
+        <button id="sysaccess-btn">🛡 系统授权</button>
+        <button id="pet-smart-btn">🐾 桌面宠物智能</button>
+        <button id="projects-btn">📁 项目与自定义指令</button>
+        <button id="migrate-btn">⇄ 迁移</button>
+      </div>
     </div>
   </aside>
   <main id="chat">
+    <header id="chat-bar" class="hidden">
+      <div id="chat-title"></div>
+      <div id="chat-actions">
+        <button id="wb-toggle" class="icon-btn" title="工作台：预览和编辑 bot 写的文档 / 网页">▤</button>
+        <button id="share-btn" class="icon-btn" title="分享对话（长图 / 网页）">⇪</button>
+      </div>
+    </header>
     <div id="empty-state">
       <div class="empty-icon">🦊</div>
-      <p>选一个 bot，或一句话创建一个新 bot</p>
+      <p>选一个 bot，或点左上角 ＋ 一句话创建</p>
       <p class="sub">试着说：「创建 bot：一只负责提醒我的小狐狸，可爱一点」</p>
     </div>
     <div id="messages" class="messages"></div>
+    <button id="scroll-down" class="hidden" title="回到底部">↓</button>
     <div id="composer">
-      <textarea id="input" rows="1" placeholder="给 bot 发消息，@bot名 可让 bot 互相通信…"></textarea>
-      <button id="send-btn" class="primary-btn send">发送</button>
+      <div id="relay-bar" class="hidden"></div>
+      <div id="voice-bar" class="hidden"></div>
+      <div class="composer-box">
+        <button id="attach-btn" class="icon-btn" title="添加附件：图片 / PDF / Word / 表格 / 代码（也可以直接拖进来）">＋</button>
+        <textarea id="input" rows="1" placeholder="给 bot 发消息，@bot名 可让 bot 互相通信…"></textarea>
+        <button id="mic-btn" class="icon-btn" title="语音输入（右键设置）">🎙</button>
+        <button id="send-btn" class="send-btn" title="发送">↑</button>
+      </div>
+      <div id="composer-tools"></div>
     </div>
   </main>
+  <section id="workbench" class="hidden"></section>
+  <button id="details-mask" class="hidden" type="button" aria-label="关闭详情"></button>
+  <aside id="details" class="hidden"></aside>
   <div id="modal-root"></div>
 </div>
 <script src="./common-render.js"></script>
+<script src="./avatar-shapes.js"></script>
 <script src="./renderer.js"></script>
+<script src="./chat-blocks.js"></script>
+<script src="./settings-pages.js"></script>
+<script src="./side-panels.js"></script>
+<script src="./composer.js"></script>
+<script src="./workbench.js"></script>
 </body>
 </html>

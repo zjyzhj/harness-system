@@ -4,3 +4,4 @@ dist/
 .DS_Store
 .harness-bot/
 core/data/
+release/

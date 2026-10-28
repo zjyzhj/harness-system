@@ -96,7 +96,8 @@ describe("G1 store: jsonl 分片 + 分页 + 搜索 + 归档 + 迁移", () => {
   });
 
   test("estimateTokens：text/code/image 估测合理", () => {
-    expect(estimateTokens("你好你好你好你好")).toBe(2); // 8 chars / 4
+    expect(estimateTokens("你好你好你好你好")).toBe(8); // 中文约一字一 token
+    expect(estimateTokens("hello 你好")).toBe(4);
     expect(estimateTokens([{ type: "text", text: "12345678" }])).toBe(2);
     expect(estimateTokens([{ type: "image", dataUrl: "data:..." }])).toBe(85);
     expect(estimateTokens([{ type: "tool_call", tool: "x", args: {} }])).toBe(60);

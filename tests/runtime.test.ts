@@ -31,7 +31,7 @@ class FakeProviderCenter extends ProviderCenter {
   override async streamComplete(p: any, req: any): Promise<any> {
     this.lastSystem = req.system ?? "";
     const user = contentText(req.user ?? "");
-    const hasToolResult = (req.history ?? []).some((h: any) => contentText(h.content).includes("[工具执行返回]"));
+    const hasToolResult = user.includes("[工具执行返回]");
     if (!hasToolResult && (user.includes("调用 web-search") || (user.startsWith("执行工具") && user.includes("web-search")))) {
       req._onChunk({ type: "tool_call", tool: "skill:web-search", callId: "c1", args: { query: "最新AI新闻" } });
       return { text: "```tool\n{\"tool\":\"skill:web-search\",\"args\":{\"query\":\"最新AI新闻\"}}\n```", content: [] };
@@ -55,7 +55,7 @@ beforeAll(() => {
   for (const [k, md] of Object.entries(BUILTIN_SKILL_TEMPLATES)) skills.create(k, md);
   runtime = new BotRuntime({ store, providers, memory, skills });
   reg = new AgentRegistry(store);
-  providers.addProvider({ kind: "openai-compat", name: "默认", baseUrl: "https://fake/v1", apiKey: "x", model: "gpt-4o-mini", isDefault: true });
+  providers.addProvider({ kind: "openai-compat", toolMode: "text", name: "默认", baseUrl: "https://fake/v1", apiKey: "x", model: "gpt-4o-mini", isDefault: true });
 });
 
 afterAll(() => store.close());
@@ -148,6 +148,13 @@ describe("bot-runtime", () => {
     const r = await runtime.handle({ bot, from: "user", text: "记住：我喜欢喝美式咖啡", sessionId: "s3" });
     expect(r.memoryEvents!.length).toBeGreaterThan(0);
     expect(memory.list(bot.id).some((m) => m.content.includes("美式咖啡"))).toBe(true);
+  });
+  test("记忆抽取：「我叫什么？」是提问不入库，「我叫小周」记成完整的一句", async () => {
+    const bot = await reg.createBotFromText("创建 bot：名字助手");
+    await runtime.handle({ bot, from: "user", text: "我叫什么？做什么的？", sessionId: "s3q" });
+    expect(memory.list(bot.id)).toEqual([]);
+    await runtime.handle({ bot, from: "user", text: "我叫小周", sessionId: "s3q" });
+    expect(memory.list(bot.id).map((m) => m.content)).toContain("用户叫小周");
   });
 });
 

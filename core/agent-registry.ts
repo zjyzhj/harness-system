@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { Bot, Provider } from "./types";
 import type { Store } from "./store";
+import { defaultAvatar } from "./avatar";
 
 export interface ParsedCreateRequest {
   name: string;
@@ -34,9 +35,11 @@ export class AgentRegistry {
       providerId,
       model: parsed.model,
       systemPrompt: parsed.systemPrompt || buildSystemPrompt(parsed),
-      petEnabled: opts?.petEnabled ?? parsed.petEnabled ?? false,
+      // 默认上台桌宠：定义靠一句话，不必再去开关「打开宠物」
+      petEnabled: opts?.petEnabled ?? parsed.petEnabled ?? true,
       createdAt: Date.now(),
     };
+    bot.avatar = defaultAvatar(bot.id);
     this.store.saveBot(bot);
     return bot;
   }
@@ -89,12 +92,14 @@ export function ruleParse(text: string): ParsedCreateRequest {
     return m?.[1] ?? "助手";
   })();
   const hint = ROLE_HINTS[name] || inferRole(text);
+  const noPet = /不要宠物|别出台|不要桌宠|关闭宠物|无宠物/.test(text);
   return {
     name,
     role: hint.role,
     persona: hint.persona,
     model: extractModel(text),
     systemPrompt: hint.systemPrompt,
+    petEnabled: noPet ? false : true,
   };
 }
 

@@ -4,6 +4,8 @@
  * - OpenAIEmbedder：可选真向量（baseUrl/key/model），缺失时上层降级到 Hash
  */
 
+import type { VectorEmbedder } from "./semantic-recall";
+
 export interface Embedder {
   readonly dim: number;
   embed(text: string): Promise<number[]> | number[];
@@ -70,6 +72,68 @@ export class OpenAIEmbedder implements Embedder {
     for (const x of v) sum += x * x;
     const n = Math.sqrt(sum) || 1;
     return v.map((x) => x / n);
+  }
+}
+
+const HF_HOSTS = ["https://huggingface.co/", "https://hf-mirror.com/"];
+
+/**
+ * 本地语义向量：transformers.js 跑 multilingual-e5-small（量化版约 120MB，首次自动下载到 cacheDir，之后离线）。
+ * 官方站下载失败时换国内镜像。
+ */
+export class LocalEmbedder implements VectorEmbedder {
+  readonly id = "local:multilingual-e5-small";
+  readonly minScore = 0.86;
+  private pipe: Promise<(texts: string[], o: object) => Promise<{ tolist(): number[][] }>> | null = null;
+  constructor(private cacheDir: string, private load: () => Promise<any> = () => import("@huggingface/transformers")) {}
+
+  private model() {
+    this.pipe ??= (async () => {
+      const t = await this.load();
+      t.env.cacheDir = this.cacheDir;
+      let last: unknown;
+      for (const host of HF_HOSTS) {
+        try {
+          t.env.remoteHost = host;
+          return await t.pipeline("feature-extraction", "Xenova/multilingual-e5-small", { dtype: "q8" });
+        } catch (e) { last = e; }
+      }
+      throw last;
+    })().catch((e) => { this.pipe = null; throw e; });
+    return this.pipe;
+  }
+
+  async embedMany(texts: string[], kind: "query" | "passage"): Promise<number[][]> {
+    const fe = await this.model();
+    const out = await fe(texts.map((s) => `${kind}: ${s.slice(0, 1500)}`), { pooling: "mean", normalize: true });
+    return out.tolist();
+  }
+}
+
+/** 在线语义向量：OpenAI 兼容 /embeddings（如 SiliconFlow BAAI/bge-m3、OpenAI text-embedding-3-small） */
+export class ApiEmbedder implements VectorEmbedder {
+  readonly id: string;
+  readonly minScore: number;
+  constructor(private opts: { baseUrl: string; apiKey?: string; model: string; minScore?: number }) {
+    this.id = `api:${opts.model}`;
+    this.minScore = opts.minScore ?? (/bge|e5|gte/i.test(opts.model) ? 0.5 : 0.3);
+  }
+
+  async embedMany(texts: string[], _kind?: "query" | "passage"): Promise<number[][]> {
+    const res = await fetch(this.opts.baseUrl.replace(/\/+$/, "") + "/embeddings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...(this.opts.apiKey ? { Authorization: `Bearer ${this.opts.apiKey}` } : {}) },
+      body: JSON.stringify({ model: this.opts.model, input: texts.map((s) => s.slice(0, 4000)) }),
+      signal: AbortSignal.timeout(30_000),
+    });
+    if (!res.ok) throw new Error(`向量接口 ${res.status}：${(await res.text()).slice(0, 160)}`);
+    const data = (await res.json()) as { data?: { embedding: number[]; index?: number }[] };
+    const rows = [...(data.data ?? [])].sort((a, b) => (a.index ?? 0) - (b.index ?? 0));
+    if (rows.length !== texts.length) throw new Error("向量接口返回条数不对");
+    return rows.map((r) => {
+      const n = Math.sqrt(r.embedding.reduce((s, x) => s + x * x, 0)) || 1;
+      return r.embedding.map((x) => x / n);
+    });
   }
 }
 

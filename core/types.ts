@@ -11,6 +11,12 @@ export interface Provider {
   cliName?: "codex" | "cursor" | "claude";
   /** 手动指定 wire 协议（探测失败时兜底）：chat/completions 或 responses */
   wireApi?: "chat" | "responses";
+  /** 工具调用方式：默认 native（原生 function calling，端点不支持时自动退回 text 工具块） */
+  toolMode?: "native" | "text";
+  /** 深度思考时换用的推理模型（DeepSeek 不填自动用 deepseek-reasoner） */
+  thinkModel?: string;
+  /** 模型上下文窗口（token），不填按模型名估计 */
+  contextTokens?: number;
   createdAt: number;
 }
 
@@ -24,10 +30,20 @@ export interface Bot {
   systemPrompt?: string;
   petEnabled: boolean;
   avatarPath?: string;
+  /** 形状头像（没有 avatarPath 时显示） */
+  avatar?: { shape: string; color: string };
   personaCard?: PersonaCard;
   createdAt: number;
   /** G3：宠物皮肤 id（pixel/cute/default…） */
   skinId?: string;
+  /** 换装前的皮肤，便于「换回去」 */
+  prevSkinId?: string;
+  /** 主控 bot：置顶显示，负责调度其他成员 */
+  isMaster?: boolean;
+  /** 模型路由：复杂任务先让推理模型想清楚再执行并自检。默认主控 auto、其他 off */
+  reasoning?: "auto" | "always" | "off";
+  /** 左栏手动排序（越小越靠前） */
+  order?: number;
 }
 
 export interface PersonaCard {
@@ -45,18 +61,49 @@ export type ContentBlock =
   | { type: "code"; lang?: string; code: string }
   | { type: "image"; path?: string; url?: string; dataUrl?: string; alt?: string }
   | { type: "tool_call"; tool: string; args?: Record<string, unknown>; callId?: string; result?: string; status?: "ok" | "error" | "running" | "queued" }
-  | { type: "file"; path: string; name: string; size?: number }
-  | { type: "thinking"; text: string };
+  /** textPath：附件抽出的全文（PDF / Word / 表格等），chars 为字数 */
+  | { type: "file"; path: string; name: string; size?: number; textPath?: string; chars?: number; error?: string }
+  /** ms：思考用时 */
+  | { type: "thinking"; text: string; ms?: number }
+  /** 撤回本轮已流式推送的正文（纠偏 / 截断工具块后的假结果），不落盘 */
+  | { type: "retract" }
+  /** 联网搜索 / 打开过的网页，正文里的 [1] [2] 对应这里的序号 */
+  | { type: "sources"; items: SourceItem[] }
+  /** 让用户点选的问题卡片：mode=confirm 时是「确认 / 修改 / 取消」 */
+  | { type: "choice"; id: string; question: string; options: string[]; mode?: "choice" | "confirm"; detail?: string; answer?: string }
+  /** 让用户在加密输入框里填写的密钥，值只存本机，不进对话 */
+  | { type: "secret"; name: string; label: string; note?: string; scope?: "all"; saved?: boolean }
+  /** 群聊主持人的结论卡片：决定了什么、谁负责什么、还有什么没定 */
+  | { type: "conclusion"; summary: string; decisions: string[]; tasks: ConclusionTask[]; open?: string[] };
+
+export interface SourceItem { title: string; url: string; snippet?: string }
+
+export interface ConclusionTask { owner: string; ownerId?: string; task: string; done?: boolean; dispatched?: boolean }
 
 export type MessageContent = string | ContentBlock[];
 
 /** 消息 meta（V3）：模型/耗时/token */
 export interface MessageMeta {
+  /** 发给模型时按原样带上图片等块（工具循环里的当前问题） */
+  inline?: boolean;
+  /** 定时任务到点后发回原会话的结果（值为任务名） */
+  scheduled?: string;
+  /** bot 主动跟进（不是对用户消息的回复） */
+  proactive?: boolean;
+  /** 这一轮所有模型调用的用量合计（含推理预想、自检、工具轮、压缩） */
+  /** cached：输入里命中前缀缓存的部分（DeepSeek 约 1/10 计费） */
+  usage?: { input: number; output: number; calls: number; cached?: number };
   providerId?: string;
   model?: string;
   latencyMs?: number;
   tokensUsed?: number;
   streamed?: boolean;
+  /** 群聊：这条是回应谁的（bot id 或 "user"） */
+  replyTo?: string;
+  /** 群聊：主持人的小结 / 结论 */
+  tag?: "summary" | "conclusion";
+  /** 回复后给用户的追问建议 */
+  suggestions?: string[];
 }
 
 export interface ChatMessage {
@@ -75,8 +122,21 @@ export interface ChatMessage {
 export function contentText(c: string | ContentBlock[]): string {
   if (typeof c === "string") return c;
   return c
-    .filter((b) => b.type === "text" || b.type === "thinking")
-    .map((b) => (b as { text?: string }).text ?? "")
+    .map((b) => {
+      if (b.type === "text") return b.text ?? "";
+      if (b.type === "thinking") return null;
+      if (b.type === "file") return `[附件 ${b.name}${b.textPath ? `，全文 ${b.textPath}` : ""}]`;
+      if (b.type === "choice") {
+        const opts = b.options.map((o, i) => `${String.fromCharCode(65 + i)}. ${o}`).join(" / ");
+        return `[${b.mode === "confirm" ? "请用户确认" : "请用户选择"}] ${b.question}${b.detail ? `（${b.detail}）` : ""}${b.mode === "confirm" ? "" : ` 选项：${opts}`}${b.answer ? ` → 用户已选：${b.answer}` : ""}`;
+      }
+      if (b.type === "secret") return `[请用户填写密钥「${b.label}」(${b.name})${b.saved ? "，已保存" : ""}]`;
+      if (b.type === "conclusion") {
+        return [`【讨论结论】${b.summary}`, ...b.decisions.map((d) => `- 决定：${d}`), ...b.tasks.map((t) => `- ${t.owner} 负责：${t.task}${t.done ? "（已完成）" : t.dispatched ? "（已分派）" : ""}`), ...(b.open ?? []).map((o) => `- 待定：${o}`)].join("\n");
+      }
+      return null;
+    })
+    .filter((t): t is string => t !== null)
     .join("\n");
 }
 
@@ -97,8 +157,12 @@ export interface Session {
   messageCount?: number;
   /** G1：已压缩边界 seq（增量摘要去重） */
   lastSeq?: number;
+  /** 压缩边界之前所有消息的累计摘要 */
+  summary?: string;
   /** G1：token 估算（累计） */
   tokenEstimate?: number;
+  /** 所属项目（共用项目指令和资料） */
+  projectId?: string;
 }
 
 /** G1：搜索命中 */
@@ -153,6 +217,14 @@ export interface MigrationPayload {
   /** G4：群组与编排计划随迁移往返 */
   groups?: Group[];
   plans?: OrchestrationPlan[];
+  /** 普通配置（env.json） */
+  env?: { key: string; value: string; label?: string; note?: string; botId?: string; updatedAt: number; updatedBy?: string }[];
+  /** 项目与自定义指令；files 里的 path / textPath 是导出端的本机路径，导入时复制 */
+  projects?: { id: string; name: string; instructions: string; files: Extract<ContentBlock, { type: "file" }>[]; createdAt: number; updatedAt: number }[];
+  instructions?: { about?: string; style?: string };
+  commandRules?: { botId: string; command: string; decision: "allow" | "deny"; createdAt: number }[];
+  /** 密钥绑定本机钥匙串不能带走，只带名单，导入后提示重新填写 */
+  secretNames?: { name: string; label?: string; note?: string; botId?: string }[];
 }
 
 // ---- V3 适配器抽象（对齐 CowAgent LLMModel）----
@@ -176,7 +248,7 @@ export interface LLMRequest {
 export interface LLMResponse {
   content: ContentBlock[];
   raw?: unknown;
-  usage?: { inputTokens?: number; outputTokens?: number };
+  usage?: { inputTokens?: number; outputTokens?: number; cachedTokens?: number };
   model?: string;
   finishReason?: string;
 }
@@ -194,12 +266,14 @@ export interface Skill {
   enabled: boolean;
   always?: boolean;            // true = 总是注入
   requires?: string[];         // 依赖的命令
+  owner?: string;              // 私有技能所属 bot id；空 = 所有 bot 共享
 }
 
 export interface MemoryEntry {
   id: string;
   botId: string;
-  kind: "fact" | "summary" | "note" | "event";
+  /** rule：用户给 bot 定的做事规范，始终注入；fact：关于用户的事实 / 偏好 */
+  kind: "rule" | "fact" | "summary" | "note" | "event";
   content: string;
   tags?: string[];
   createdAt: number;
@@ -235,6 +309,10 @@ export interface ScheduledTask {
   alarmAt?: number;
   /** G3：到期是否推送到宠物气泡 */
   notifyPet?: boolean;
+  /** once 任务到点时把 prompt 交给 bot 执行（而不只是闹钟提醒） */
+  runPrompt?: boolean;
+  /** once 任务执行后自动删除 */
+  deleteAfterRun?: boolean;
   /** G3：一次性闹钟关联的会话 id（用于宠物「打开会话」跳转） */
   sessionId?: string;
 }
@@ -269,6 +347,8 @@ export interface AgentStatus {
   lastRunAt?: number;
   lastError?: string;
   currentTask?: string;
+  /** 正在哪个会话里干活；群聊发言时为 group-* */
+  sessionId?: string;
 }
 
 export interface SkillUsageLog {
@@ -296,6 +376,7 @@ export interface Group {
   members: string[];
   admin: string;          // "user" 或 bot id
   createdAt: number;
+  settings?: { goal?: string; relay?: boolean; maxTurns?: number; moderator?: string };
 }
 
 export type OrchestrationStageMode = "seq" | "fan";
@@ -311,6 +392,9 @@ export interface OrchestrationStage {
   startedAt?: number;
   finishedAt?: number;
   retries: number;
+  /** 运行中的实时产出 / 当前动作，不持久化 */
+  live?: string;
+  activity?: string;
 }
 
 export interface OrchestrationPlan {
@@ -322,4 +406,6 @@ export interface OrchestrationPlan {
   stages: OrchestrationStage[];
   currentStage?: string;
   result?: string;          // 最终产出
+  startedAt?: number;
+  finishedAt?: number;
 }

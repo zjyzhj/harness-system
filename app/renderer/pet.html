@@ -2,15 +2,17 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8" />
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: file:;" />
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: file: blob:; connect-src 'self' file: data: blob:;" />
 <title>Pet</title>
 <link rel="stylesheet" href="./pet.css" />
+<link rel="stylesheet" href="./avatar-shapes.css" />
 </head>
 <body>
-<div id="pet" class="draggable">
+<div id="pet">
   <div id="pet-avatar">
-    <span id="pet-sprite">🤖</span>
-    <span id="pet-mood-badge">🙂</span>
+    <canvas id="pet-live2d" class="hidden"></canvas>
+    <span id="pet-sprite"></span>
+    <div id="pet-fx" aria-hidden="true"></div>
   </div>
   <div id="pet-name"></div>
   <div id="pet-status" class="status-idle"></div>
@@ -21,10 +23,15 @@
     <button id="bubble-open" class="bubble-btn">📂 查看完整会话</button>
     <button id="bubble-close" class="bubble-btn">✕</button>
   </div>
-  <textarea id="bubble-input" placeholder="发消息…"></textarea>
+  <textarea id="bubble-input" placeholder="试试：放出龟派气功 / 跳一下 / 换成咕嘎…"></textarea>
   <button id="bubble-send">发送</button>
 </div>
+<script src="./vendor/live2dcubismcore.min.js"></script>
+<script src="./vendor/pixi.min.js"></script>
+<script src="./vendor/unsafe-eval.min.js"></script>
+<script src="./vendor/cubism4.min.js"></script>
 <script src="./common-render.js"></script>
+<script src="./avatar-shapes.js"></script>
 <script src="./pet.js"></script>
 </body>
 </html>

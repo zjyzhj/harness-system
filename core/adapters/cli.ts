@@ -1,7 +1,12 @@
 import { spawn } from "node:child_process";
-import type { Provider } from "../types";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { contentText, type ChatMessage, type Provider } from "../types";
 
 export type CliName = "codex" | "cursor" | "claude";
+
+const CLI_BIN: Record<CliName, string> = { codex: "codex", cursor: "cursor-agent", claude: "claude" };
 
 export interface CliCapability {
   installed: boolean;
@@ -10,7 +15,7 @@ export interface CliCapability {
 }
 
 export async function detectCli(name: CliName): Promise<CliCapability> {
-  const v = await runQuiet(name, ["--version"]);
+  const v = await runQuiet(CLI_BIN[name], ["--version"]);
   if (v.code === 0 && v.stdout.trim()) {
     return { installed: true, version: v.stdout.trim().split("\n")[0], chat: true };
   }
@@ -20,18 +25,121 @@ export async function detectCli(name: CliName): Promise<CliCapability> {
 /**
  * CLI 适配器：spawn 子进程调用。
  * 不同 CLI 参数差异封装在 cliArgs 中；失败抛出可读错误，由上层降级到 API。
+ * 模型只取 provider.model：留空即沿用 CLI 本地配置（~/.codex/config.toml、claude/cursor 登录态等），
+ * 不使用 bot.model，避免把 API 类模型名错误地塞给 CLI。
  */
-export async function completeCli(p: Provider, user: string, system?: string, model?: string): Promise<string> {
+export async function completeCli(p: Provider, user: string, system?: string, history?: ChatMessage[], onDelta?: (text: string) => void, signal?: AbortSignal): Promise<string> {
   const cli = p.cliName ?? "claude";
-  const args = cliArgs(cli, user, system, model ?? p.model);
-  const env = cliEnv(cli, p);
-  const r = await runQuiet(cli, args, { timeoutMs: 120_000, env });
-  if (r.code !== 0) {
-    throw new Error(`${cli} CLI 调用失败(${r.code}): ${r.stderr.trim().slice(0, 300) || r.stdout.trim().slice(0, 300)}`);
+  const prompt = buildPrompt(cli, user, system, history);
+  if (onDelta && cli !== "codex") return streamCli(cli, p, prompt, system, onDelta, signal);
+  const outDir = cli === "codex" ? mkdtempSync(join(tmpdir(), "harness-codex-")) : undefined;
+  const outFile = outDir ? join(outDir, "last.txt") : undefined;
+  try {
+    const args = cliArgs(cli, prompt, system, p.model, outFile);
+    const env = cliEnv(cli, p);
+    const r = await runQuiet(CLI_BIN[cli], args, { timeoutMs: 180_000, env });
+    if (r.code !== 0) {
+      throw new Error(`${cli} CLI 调用失败(${r.code}): ${r.stderr.trim().slice(0, 300) || r.stdout.trim().slice(0, 300)}`);
+    }
+    const text = extractOutput(r.stdout, outFile);
+    if (!text) throw new Error(`${cli} CLI 返回为空`);
+    if (onDelta) onDelta(text);
+    return text;
+  } finally {
+    if (outDir) rmSync(outDir, { recursive: true, force: true });
   }
-  const text = extractOutput(cli, r.stdout);
-  if (!text) throw new Error(`${cli} CLI 返回为空`);
-  return text;
+}
+
+/**
+ * claude / cursor-agent 流式：stream-json 逐行解析文本增量。
+ * claude 用轻量参数跳过 MCP、工具、斜杠命令与会话落盘，降低冷启动；思考强度压到 low。
+ */
+export function streamCliArgs(cli: "claude" | "cursor", prompt: string, system?: string, model?: string): string[] {
+  if (cli === "cursor") {
+    return ["-p", "--output-format", "stream-json", "--stream-partial-output", "--trust", ...(model ? ["--model", model] : []), prompt];
+  }
+  return [
+    "-p", prompt,
+    "--output-format", "stream-json", "--include-partial-messages", "--verbose",
+    "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
+    "--tools", "", "--disable-slash-commands", "--no-session-persistence",
+    ...(system ? ["--system-prompt", system] : []),
+    ...(model ? ["--model", model] : []),
+  ];
+}
+
+/** 解析一行 stream-json，返回新增文本（cursor 最后会重发一次完整消息，需跳过）与最终结果 */
+export function parseStreamLine(cli: "claude" | "cursor", line: string, acc: string): { delta?: string; result?: string; error?: string } {
+  let e: any;
+  try { e = JSON.parse(line); } catch { return {}; }
+  if (e.type === "result") {
+    if (e.is_error) return { error: String(e.result || e.error || "CLI 返回错误") };
+    return { result: typeof e.result === "string" ? e.result : undefined };
+  }
+  if (cli === "claude") {
+    const d = e.type === "stream_event" ? e.event : null;
+    if (d?.type === "content_block_delta" && d.delta?.type === "text_delta" && d.delta.text) return { delta: d.delta.text };
+    return {};
+  }
+  if (e.type === "assistant") {
+    const text = (e.message?.content ?? []).filter((c: any) => c?.type === "text").map((c: any) => c.text ?? "").join("");
+    if (!text || (acc && text === acc)) return {};
+    return { delta: text };
+  }
+  return {};
+}
+
+function streamCli(cli: "claude" | "cursor", p: Provider, prompt: string, system: string | undefined, onDelta: (t: string) => void, signal?: AbortSignal): Promise<string> {
+  const args = streamCliArgs(cli, prompt, system, p.model);
+  const extra: NodeJS.ProcessEnv = { ...(cliEnv(cli, p) ?? {}) };
+  if (cli === "claude") Object.assign(extra, { CLAUDE_CODE_EFFORT_LEVEL: "low", CLAUDE_EFFORT: "low" });
+  return new Promise((resolve, reject) => {
+    let proc: ReturnType<typeof spawn>;
+    try {
+      proc = spawn(CLI_BIN[cli], args, { stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, ...extra } });
+    } catch (e) {
+      reject(new Error(`${cli} CLI 启动失败: ${e}`));
+      return;
+    }
+    let buf = "", acc = "", err = "", result: string | undefined, failure: string | undefined;
+    const to = setTimeout(() => proc.kill(), 180_000);
+    signal?.addEventListener("abort", () => proc.kill(), { once: true });
+    const handle = (line: string) => {
+      if (!line.trim()) return;
+      const r = parseStreamLine(cli, line, acc);
+      if (r.delta) { acc += r.delta; onDelta(r.delta); }
+      if (r.result !== undefined) result = r.result;
+      if (r.error) failure = r.error;
+    };
+    proc.stdout!.on("data", (d) => {
+      buf += d.toString();
+      let i: number;
+      while ((i = buf.indexOf("\n")) >= 0) { handle(buf.slice(0, i)); buf = buf.slice(i + 1); }
+    });
+    proc.stderr!.on("data", (d) => (err += d.toString()));
+    proc.on("error", (e) => { clearTimeout(to); reject(new Error(`${cli} CLI 启动失败: ${e.message}`)); });
+    proc.on("close", (code) => {
+      clearTimeout(to);
+      handle(buf);
+      const text = (acc || result || "").trim();
+      if (failure && !text) return reject(new Error(`${cli} CLI 调用失败: ${failure.slice(0, 300)}`));
+      if (code !== 0 && !text) return reject(new Error(`${cli} CLI 调用失败(${code}): ${err.trim().slice(0, 300)}`));
+      if (!text) return reject(new Error(`${cli} CLI 返回为空`));
+      if (!acc && result) onDelta(result);
+      resolve(text);
+    });
+  });
+}
+
+/** CLI 是单轮调用：把最近历史折叠进 prompt；claude 有独立 system 参数，其余 CLI 把 system 也拼进去 */
+function buildPrompt(cli: CliName, user: string, system?: string, history?: ChatMessage[]): string {
+  const parts: string[] = [];
+  if (system && cli !== "claude") parts.push(`[系统设定]\n${system}`);
+  const hist = (history ?? []).slice(-10).map((m) => `${m.role === "assistant" ? "助手" : "用户"}: ${contentText(m.content)}`);
+  if (hist.length) parts.push(`[对话历史]\n${hist.join("\n")}`);
+  if (!parts.length) return user;
+  parts.push(`[用户最新消息]\n${user}`);
+  return parts.join("\n\n");
 }
 
 /**
@@ -53,26 +161,27 @@ function cliEnv(cli: CliName, p: Provider): NodeJS.ProcessEnv | undefined {
   return env;
 }
 
-function cliArgs(cli: CliName, user: string, system?: string, model?: string): string[] {
+export function cliArgs(cli: CliName, prompt: string, system?: string, model?: string, outFile?: string): string[] {
   switch (cli) {
     case "codex":
-      return ["exec", "--skip-git-repo-check", "--sandbox", "read-only", ...(model ? ["--model", model] : []), "-f", `system: ${system ?? ""}`, `user: ${user}`];
+      return ["exec", "--skip-git-repo-check", "--sandbox", "read-only", ...(model ? ["-m", model] : []), ...(outFile ? ["-o", outFile] : []), prompt];
     case "cursor":
-      return ["--spawn", user];
+      return ["-p", "--output-format", "text", "--trust", ...(model ? ["--model", model] : []), prompt];
     case "claude":
     default:
-      return ["-p", user, ...(system ? ["--system-prompt", system] : [])];
+      return ["-p", prompt, ...(system ? ["--system-prompt", system] : []), ...(model ? ["--model", model] : [])];
   }
 }
 
-function extractOutput(cli: CliName, stdout: string): string {
-  switch (cli) {
-    case "codex":
-      // codex exec 输出首行可能包含状态摘要，取后续正文
-      return stdout.trim();
-    default:
-      return stdout.trim();
+/** codex exec 的 stdout 混有运行日志，优先读 -o 写出的最终消息 */
+function extractOutput(stdout: string, outFile?: string): string {
+  if (outFile) {
+    try {
+      const last = readFileSync(outFile, "utf8").trim();
+      if (last) return last;
+    } catch {}
   }
+  return stdout.trim();
 }
 
 function runQuiet(cmd: string, args: string[], opts?: { timeoutMs?: number; env?: NodeJS.ProcessEnv }): Promise<{ code: number; stdout: string; stderr: string }> {

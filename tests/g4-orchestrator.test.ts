@@ -1,5 +1,5 @@
 import { describe, test, expect, beforeAll } from "bun:test";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Store } from "../core/store";
@@ -95,6 +95,17 @@ describe("G4 orchestrator", () => {
     expect(stages.map((s) => s.botId)).toEqual([a.id, b.id, c.id]);
   });
 
+  test("指定了不存在的 bot：报错，不偷偷换成别的 bot", async () => {
+    const complete = async () => ({ text: '[{"bot":"A","prompt":"调研"},{"bot":"乙","prompt":"总结"}]' });
+    await expect(planFromText("让 A 调研，乙 总结", [a, b, c], { provider: { id: "p" }, complete })).rejects.toThrow(/找不到 bot：乙/);
+  });
+
+  test("规则降级：长名字优先（「灵感助手 2」不会被当成「灵感助手」）", async () => {
+    const x = { ...a, id: "x", name: "灵感助手" }, y = { ...a, id: "y", name: "灵感助手 2" };
+    const stages = await planFromText("让 灵感助手 调研，灵感助手 2 写报告", [x, y]);
+    expect(stages.map((s) => s.botId)).toEqual(["x", "y"]);
+  });
+
   test("T4.7 权限：非 admin bot 不能发起", () => {
     expect(() => orch.create({ ownerBotId: a.id, title: "越权", stages: [{ botId: b.id, prompt: "x" }] })).toThrow(/权限不足/);
     // admin bot 可发起
@@ -110,6 +121,49 @@ describe("G4 orchestrator", () => {
     const done = await slow.run(plan.id, { timeoutMs: 80 });
     expect(done.status).toBe("error");
     expect(done.stages[0].error).toContain("超时");
+  });
+
+  test("重新运行：先清空上一轮的阶段状态和结果，过程实时推送", async () => {
+    const o = new Orchestrator({ store, groups }, home);
+    let round = 0;
+    o.stageRunner = async (stage, _prev, ctx) => {
+      ctx.onActivity("调用 web.search");
+      ctx.onText("第一段");
+      ctx.onText("第二段");
+      if (stage.botId === b.id && ++round === 1) throw new Error("首轮失败");
+      return `${stage.botId} 完成`;
+    };
+    const plan = o.create({ ownerBotId: "user", title: "重跑", stages: [{ botId: a.id, prompt: "x" }, { botId: b.id, prompt: "y" }] });
+    expect((await o.run(plan.id)).status).toBe("error");
+    const seen: string[] = [];
+    o.onChange = (p) => seen.push(`${p.status}:${p.stages.map((s) => `${s.status}${s.error ? "!" : ""}${s.live ?? ""}`).join(",")}`);
+    const done = await o.run(plan.id);
+    expect(seen[0]).toBe("running:pending,pending");
+    expect(seen).toContain("running:running第一段第二段,pending");
+    expect(done.status).toBe("done");
+    expect(done.stages.every((s) => s.status === "done" && !s.error && s.live === undefined)).toBe(true);
+    expect(done.startedAt).toBeLessThanOrEqual(done.finishedAt!);
+  });
+
+  test("停止：中断正在跑的阶段，后续阶段不再执行", async () => {
+    const o = new Orchestrator({ store, groups }, home);
+    let aborted = false;
+    const ran: string[] = [];
+    o.stageRunner = (stage, _prev, ctx) => new Promise((resolve) => {
+      ran.push(stage.botId);
+      ctx.signal.addEventListener("abort", () => { aborted = true; resolve("被打断"); });
+    });
+    const plan = o.create({ ownerBotId: "user", title: "停", stages: [{ botId: a.id, prompt: "x" }, { botId: b.id, prompt: "y" }] });
+    const running = o.run(plan.id);
+    await expect(o.run(plan.id)).rejects.toThrow(/正在运行/);
+    await new Promise((r) => setTimeout(r, 10));
+    o.cancel(plan.id);
+    const done = await running;
+    expect(aborted).toBe(true);
+    expect(ran).toEqual([a.id]);
+    expect(done.result).toBe("（已取消）");
+    expect(done.stages[0].error).toBe("已取消");
+    expect(done.stages[1].status).toBe("pending");
   });
 });
 
@@ -139,5 +193,18 @@ describe("G4 migration groups/plans", () => {
     expect(r.importedPlans).toBeGreaterThan(0);
     expect(groups2.list().length).toBe(groups.list().length);
     expect(orch2.list().length).toBe(orch.list().length);
+  });
+});
+
+describe("编排计划的持久状态", () => {
+  test("上次退出时还在跑的计划，重启后标为中断；删除后不再出现", () => {
+    const dir = mkdtempSync(join(tmpdir(), "harness-g4-stale-"));
+    writeFileSync(join(dir, "plans.json"), JSON.stringify([{ id: "p1", ownerBotId: "user", title: "t", createdAt: 1, status: "running", stages: [{ id: "s1", botId: "x", prompt: "p", status: "running" }, { id: "s2", botId: "y", prompt: "q", status: "pending" }] }]));
+    const o = new Orchestrator({ store: new Store(dir), groups: new GroupRegistry(dir) }, dir);
+    const p = o.list()[0];
+    expect(p.status).toBe("error");
+    expect(p.stages.map((s) => s.status)).toEqual(["error", "pending"]);
+    o.delete("p1");
+    expect(new Orchestrator({ store: new Store(dir), groups: new GroupRegistry(dir) }, dir).list().length).toBe(0);
   });
 });

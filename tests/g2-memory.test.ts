@@ -74,8 +74,12 @@ describe("G2 memory namespace + 级联 + memo", () => {
   test("T2.5 mergeDuplicate + evict", () => {
     const m3 = new MemorySystem(mkdtempSync(join(tmpdir(), "harness-g2merge-")));
     for (let i = 0; i < 10; i++) m3.add("botE", { kind: "fact", content: "重复内容", tags: ["x"] });
+    expect(m3.list("botE").length).toBe(1);
+    // 旧数据里已经存在的重复条目由 mergeDuplicate 清理
+    const arr = m3.list("botE");
+    for (let i = 0; i < 9; i++) arr.push({ ...arr[0], id: `dup${i}`, updatedAt: arr[0].updatedAt - i - 1 });
     const merged = m3.mergeDuplicate("botE");
-    expect(merged).toBeGreaterThanOrEqual(9);
+    expect(merged).toBe(9);
     expect(m3.list("botE").filter((e) => e.content === "重复内容").length).toBe(1);
     // evict
     const m4 = new MemorySystem(mkdtempSync(join(tmpdir(), "harness-g2evict-")));

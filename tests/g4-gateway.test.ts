@@ -13,7 +13,7 @@ let store: Store;
 let bus: MessageBus;
 let gateway: GatewayServer;
 let port: number;
-const TOKEN = "test-token-123";
+const TOKEN = "test-token-1234567890";
 
 beforeAll(async () => {
   home = mkdtempSync(join(tmpdir(), "harness-g4gw-"));

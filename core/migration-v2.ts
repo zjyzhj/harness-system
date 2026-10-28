@@ -8,6 +8,17 @@ import type { SkillRegistry } from "./skill-registry";
 import type { Scheduler } from "./scheduler";
 import type { GroupRegistry } from "./group-registry";
 import type { Orchestrator } from "./orchestrator";
+import type { EnvStore } from "./env-store";
+import type { SecretStore } from "./secret-store";
+import type { ProjectRegistry, GlobalInstructions } from "./projects";
+import type { ConsentCenter } from "./consent-center";
+
+export interface MigrationExtras {
+  env?: EnvStore;
+  secrets?: SecretStore;
+  projects?: ProjectRegistry;
+  consent?: ConsentCenter;
+}
 
 /**
  * V2 全量迁移：bots / providers / memory / skills / tasks / pets / assets
@@ -26,6 +37,12 @@ export class MigrationV2 {
     private skinsDir = "",
   ) {
     if (!this.skinsDir) this.skinsDir = join(assetsDir, "skins");
+  }
+
+  private extras: MigrationExtras = {};
+  /** 配置、项目、命令规则、密钥名单这些在 main 里后创建的存储，创建好后挂上 */
+  attachExtras(extras: MigrationExtras) {
+    this.extras = { ...this.extras, ...extras };
   }
 
   /** G5.5：皮肤导出负载 —— 读 index.json + 扫描 spritesheet 文件 */
@@ -77,6 +94,11 @@ export class MigrationV2 {
       groups: this.groups?.list() ?? [],
       plans: this.orchestrator?.list() ?? [],
       skins: this.exportSkins(),
+      env: this.extras.env?.list(),
+      projects: this.extras.projects?.list(),
+      instructions: this.store.readConfig().instructions as GlobalInstructions | undefined,
+      commandRules: this.extras.consent?.listCommandRules(),
+      secretNames: this.extras.secrets?.list().map(({ name, label, note, botId }) => ({ name, label, note, botId })),
     };
     // 每个 bot 的记忆
     for (const b of payload.bots) {
@@ -96,7 +118,7 @@ export class MigrationV2 {
     writeFileSync(filePath, JSON.stringify(this.exportPayload(opts), null, 2), "utf8");
   }
 
-  importFromPayload(payload: MigrationPayload): { importedProviders: number; importedBots: number; importedPets: number; importedMemories: number; importedSkills: number; importedTasks: number; importedGroups: number; importedPlans: number; importedSkins: number } {
+  importFromPayload(payload: MigrationPayload): { importedProviders: number; importedBots: number; importedPets: number; importedMemories: number; importedSkills: number; importedTasks: number; importedGroups: number; importedPlans: number; importedSkins: number; importedEnv: number; importedProjects: number; importedRules: number; secretsToReenter: { name: string; label?: string; bot?: string }[] } {
     if (!payload.format?.startsWith("harness-bot-migration/v")) throw new Error(`不支持的迁移格式：${payload.format}`);
     const usedNames = new Set(this.store.listBots().map((b) => b.name.toLowerCase()));
     let importedBots = 0, importedPets = 0, importedMemories = 0, importedSkills = 0, importedTasks = 0, importedGroups = 0, importedPlans = 0;
@@ -226,7 +248,41 @@ export class MigrationV2 {
         }
       }
     }
-    return { importedProviders: payload.providers?.length ?? 0, importedBots, importedPets, importedMemories, importedSkills, importedTasks, importedGroups, importedPlans, importedSkins };
+    const mapBot = (id?: string) => (id ? idMap.get(id) ?? (this.store.getBot(id) ? id : null) : undefined);
+    // 普通配置：本机已有同名同范围的不覆盖
+    let importedEnv = 0;
+    const env = this.extras.env;
+    if (env) {
+      for (const e of payload.env ?? []) {
+        const botId = mapBot(e.botId);
+        if (botId === null) continue;
+        if (env.list().some((x) => x.key === e.key && x.botId === botId)) continue;
+        env.set({ key: e.key, value: e.value, label: e.label, note: e.note, botId, updatedBy: "migrated" });
+        importedEnv++;
+      }
+    }
+    let importedProjects = 0;
+    const projects = this.extras.projects;
+    if (projects) {
+      const names = new Set(projects.list().map((p) => p.name));
+      for (const p of payload.projects ?? []) {
+        if (names.has(p.name)) continue;
+        projects.importProject(p);
+        importedProjects++;
+      }
+    }
+    const cur = this.store.readConfig().instructions as GlobalInstructions | undefined;
+    if (payload.instructions && !cur?.about?.trim() && !cur?.style?.trim()) this.store.writeConfig({ ...this.store.readConfig(), instructions: payload.instructions });
+    let importedRules = 0;
+    for (const r of payload.commandRules ?? []) {
+      const botId = r.botId === "*" ? "*" : mapBot(r.botId);
+      if (!botId || !this.extras.consent || this.extras.consent.commandRule(botId, r.command) !== null) continue;
+      try { this.extras.consent.setCommandRule(botId, r.command, r.decision); importedRules++; } catch {}
+    }
+    const secretsToReenter = (payload.secretNames ?? [])
+      .filter((x) => !this.extras.secrets?.has(x.name))
+      .map((x) => ({ name: x.name, label: x.label, bot: x.botId ? this.store.getBot(mapBot(x.botId) ?? "")?.name : undefined }));
+    return { importedProviders: payload.providers?.length ?? 0, importedBots, importedPets, importedMemories, importedSkills, importedTasks, importedGroups, importedPlans, importedSkins, importedEnv, importedProjects, importedRules, secretsToReenter };
   }
 
   importFromFile(filePath: string) {
