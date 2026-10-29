@@ -1222,6 +1222,65 @@ async function petSmartFlow() {
   await render();
 }
 
+const GITHUB_REPO = "https://github.com/zjyzhj/harness-system";
+const APP_VERSION = "0.1.0";
+
+/** 关于：GitHub 链接、开源与第三方声明 */
+async function aboutFlow() {
+  const modal = sheet({
+    icon: "ℹ",
+    title: "关于 Harness Bot",
+    sub: `版本 ${APP_VERSION} · 本地优先的 AI 智能体指挥中心`,
+    wide: true,
+  });
+  const body = modal.querySelector(".mx-body");
+  body.innerHTML = `
+    <div class="d-sec about-hero">
+      <p>一句话创建 bot、主控统一对话；bot 可变成桌面宠物（Live2D / 精灵），多 bot 可协作，统一接入 OpenAI 兼容 API 与主流 CLI。</p>
+      <div class="about-actions">
+        <a class="primary-btn about-ext" href="${GITHUB_REPO}" target="_blank" rel="noopener noreferrer">打开 GitHub 仓库</a>
+        <a class="ghost-btn about-ext" href="${GITHUB_REPO}/issues" target="_blank" rel="noopener noreferrer">反馈 Issue</a>
+        <button type="button" class="ghost-btn" id="about-copy">复制仓库链接</button>
+      </div>
+      <p class="hint about-url"><code>${esc(GITHUB_REPO)}</code></p>
+    </div>
+    <div class="d-sec">
+      <h4>声明</h4>
+      <ul class="about-list">
+        <li>本项目<strong>开源</strong>，欢迎 Fork、提 PR 与下载使用；源码与更新以 GitHub 仓库为准。</li>
+        <li><strong>本地优先</strong>：会话、密钥与配置默认保存在本机；不会把你的 API Key 上传到本项目服务器（本项目无云端账号体系）。</li>
+        <li>界面风格参考 xAI Grok Bot 桌面端体验，<strong>非</strong> xAI / Grok 官方产品，亦无隶属或背书关系。</li>
+        <li>调用第三方模型、CLI 或 MCP 时，请遵守对应服务商的条款与用量规定；风险与费用由你自行承担。</li>
+        <li>经你授权后，bot 可能访问通知、剪贴板、文件、截屏等系统能力——请在「系统授权」中按需批准与撤销。</li>
+      </ul>
+    </div>
+    <div class="d-sec">
+      <h4>第三方与样本资源</h4>
+      <ul class="about-list">
+        <li><strong>Live2D</strong>：内置 Cubism 样本模型（Haru / Hiyori / Mao 等）及运行时，遵循 Live2D 开放软件许可 / 专有软件许可；企业用途请自行确认
+          <a class="about-ext" href="https://www.live2d.com/eula/live2d-open-software-license-agreement_cn.html" target="_blank" rel="noopener noreferrer">开放软件许可</a>
+          与
+          <a class="about-ext" href="https://www.live2d.com/zh-CHS/download/cubism-sdk/release-license/" target="_blank" rel="noopener noreferrer">发行许可</a>。
+          详情见仓库 <code>app/renderer/live2d/LICENSE-samples.md</code>。</li>
+        <li>运行时还可能用到 Electron、PixiJS、Hugging Face Transformers 等依赖，各自遵循其许可证。</li>
+      </ul>
+    </div>
+    <div class="d-sec">
+      <h4>参与</h4>
+      <p class="hint">提交代码前请跑通 <code>bun test</code>；大功能建议先阅读 <code>docs/goals/</code> 中对应 Goal 的边界说明。</p>
+    </div>`;
+  body.querySelector("#about-copy").onclick = async () => {
+    try {
+      await api.system.copy(GITHUB_REPO);
+      const tip = document.createElement("span");
+      tip.className = "hint";
+      tip.textContent = " 已复制";
+      body.querySelector("#about-copy").after(tip);
+      setTimeout(() => tip.remove(), 1500);
+    } catch (e) { alert(errText(e)); }
+  };
+}
+
 // ---- bind ----
 $("#new-bot-btn").onclick = createBotFlow;
 $("#settings-btn").onclick = settingsFlow;
@@ -1235,5 +1294,7 @@ $("#sysaccess-btn").onclick = sysaccessFlow;
 $("#env-btn").onclick = () => envFlow();
 $("#mcp-btn").onclick = mcpFlow;
 $("#pet-smart-btn").onclick = petSmartFlow;
+$("#about-btn").onclick = aboutFlow;
+api.onOpenAbout?.(() => aboutFlow());
 $("#realm-btn").onclick = () => { $("#more-menu").classList.add("hidden"); realmListFlow(); };
 $("#send-btn").onclick = send;

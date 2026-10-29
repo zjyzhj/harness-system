@@ -312,6 +312,7 @@ const SETTINGS_PAGES = {
   plans: () => plansFlow(),
   access: () => sysaccessFlow(),
   pet: () => petSmartFlow(),
+  about: () => aboutFlow(),
   notifications: () => api.system.openPrefs("notifications"),
   instructions: () => projectsFlow(),
   projects: () => projectsFlow(),

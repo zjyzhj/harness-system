@@ -338,6 +338,7 @@ contextBridge.exposeInMainWorld("harness", {
   ...api, onPetEvent, onChatStream, onOpenSession, onPetCursor, onB2bStream, onNewMessage, onStatus, onAppChanged,
   onConsentRequest: on("consent:request"), onConsentResolved: on("consent:resolved"), onGroupProgress: on("group:progress"), onNotifyState: on("notify:state"),
   onSuggestions: on("chat:suggestions"), onPlanUpdate: on("plans:update"), onFileChanged: on("files:changed"), onImportLink: on("bots:importLink"),
+  onOpenAbout: on("app:openAbout"),
 });
 export type { StreamBlock };
 export type HarnessApi = typeof api;

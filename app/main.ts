@@ -1722,6 +1722,10 @@ function createMainWindow() {
     clearTimeout(loadWatchdog);
     console.log("[harness] 主控面板渲染完成 ✅");
     for (const s of pendingImports.splice(0)) mainWin?.webContents.send("bots:importLink", s);
+    if (pendingAbout) {
+      pendingAbout = false;
+      mainWin?.webContents.send("app:openAbout");
+    }
     mainWin?.webContents.executeJavaScript("typeof window.harness !== 'undefined' ? 'bridge-ok' : 'bridge-missing'")
       .then((r) => console.log("[harness] preload bridge:", r))
       .catch(() => console.log("[harness] bridge check skipped"));
@@ -1860,6 +1864,9 @@ function refreshTray() {
     { label: "宠物：全部隐藏", click: () => hidePetWindow() },
     { type: "separator" },
     { label: "打开日志文件夹", click: () => void shell.openPath(logger.dir) },
+    { type: "separator" },
+    { label: "GitHub 仓库", click: () => void shell.openExternal("https://github.com/zjyzhj/harness-system") },
+    { label: "关于与开源声明…", click: () => openAboutInApp() },
     { label: "退出", click: () => app.quit() },
   ]);
   tray?.setContextMenu(menu);
@@ -1868,11 +1875,23 @@ function refreshTray() {
 
 /** 别人分享的 bot 模板：harnessbot:// 链接或 .harnessbot 文件，交给界面预览后导入 */
 const pendingImports: string[] = [];
+let pendingAbout = false;
 function deliverImport(payload: string) {
   if (mainWin && !mainWin.webContents.isLoading()) {
     mainWin.show();
     mainWin.webContents.send("bots:importLink", payload);
   } else pendingImports.push(payload);
+}
+function openAboutInApp() {
+  if (mainWin && !mainWin.isDestroyed() && !mainWin.webContents.isLoading()) {
+    mainWin.show();
+    mainWin.focus();
+    mainWin.webContents.send("app:openAbout");
+    return;
+  }
+  pendingAbout = true;
+  if (!mainWin || mainWin.isDestroyed()) createMainWindow();
+  else { mainWin.show(); mainWin.focus(); }
 }
 if (process.defaultApp && process.argv[1]) app.setAsDefaultProtocolClient(TEMPLATE_SCHEME, process.execPath, [resolve(process.argv[1])]);
 else app.setAsDefaultProtocolClient(TEMPLATE_SCHEME);

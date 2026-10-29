@@ -91,6 +91,19 @@ body {
   font-size: 13px; color: var(--text); cursor: pointer;
 }
 .pop-menu button:hover { background: var(--hover); }
+.pop-menu .menu-sep {
+  border: none; border-top: 1px solid var(--border); margin: 4px 8px; height: 0;
+}
+
+/* ---- 关于 / 开源声明 ---- */
+.about-hero p { margin: 0 0 12px; line-height: 1.55; font-size: 14px; }
+.about-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 8px; }
+.about-actions .primary-btn,
+.about-actions .ghost-btn { text-decoration: none; display: inline-flex; align-items: center; }
+.about-url { word-break: break-all; margin: 0; }
+.about-list { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 8px; }
+.about-list li { font-size: 13px; line-height: 1.55; color: var(--text); }
+.about-list a.about-ext { color: var(--acc); }
 
 /* ---- 中栏会话 ---- */
 #chat { flex: 1; display: flex; flex-direction: column; position: relative; min-width: 0; overflow: hidden; }
