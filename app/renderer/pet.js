@@ -106,16 +106,17 @@ function playFx(spec = {}) {
   fxTimer = setTimeout(() => { fxEl.innerHTML = ""; delete fxEl.dataset.dir; }, ms + 80);
 }
 
-function setAction(a, { hold } = {}) {
-  if (action === a && !hold) return;
+function setAction(a, { hold, motion } = {}) {
+  if (action === a && !hold && !motion) return;
   action = a;
-  const moodOf = ACTION_MOOD[a] || "idle";
-  setMood(moodOf, { seconds: hold });
+  const moodOf = (motion && motion.mood) || ACTION_MOOD[a] || "idle";
+  const holdSec = hold ?? (motion && motion.holdSec) ?? undefined;
+  setMood(moodOf, { seconds: holdSec });
   if (actionTimer) { clearTimeout(actionTimer); actionTimer = null; }
-  if (hold) actionTimer = setTimeout(() => setAction("idle"), hold * 1000);
+  if (holdSec) actionTimer = setTimeout(() => setAction("idle"), holdSec * 1000);
   frameIndex = 0;
-  if (renderMode === "live2d") live2dOnAction(a);
-  else if (renderMode === "sprite") spriteSetRow(SPRITE_ACTION_ROW[a] ?? 0);
+  if (renderMode === "live2d") live2dOnAction(a, motion);
+  else if (renderMode === "sprite") spriteSetRow((motion && motion.spriteRow != null) ? motion.spriteRow : (SPRITE_ACTION_ROW[a] ?? 0));
   refreshFrame();
   scheduleNext();
 }
@@ -284,13 +285,21 @@ function live2dExpression() {
   const exprs = m?.internalModel.motionManager.expressionManager?.definitions;
   if (exprs?.length) m.expression(Math.floor(Math.random() * exprs.length));
 }
-function live2dOnAction(a) {
-  l2d.sleeping = a === "sleep";
-  if (a === "celebrate" || a === "jump") live2dMotion("TapBody");
-  else if (a === "walk") live2dMotion("Idle") || live2dMotion("TapBody");
-  else if (a === "work") { live2dMotion("TapBody"); live2dExpression(); }
-  else if (a === "think" || a === "sleep") live2dExpression();
-  else if (a === "idle") live2dMotion("Idle");
+function live2dOnAction(a, motion) {
+  const plan = motion || null;
+  l2d.sleeping = plan ? !!plan.sleepEyes : a === "sleep";
+  const group = plan?.live2dGroup;
+  if (group === "TapBody") live2dMotion("TapBody");
+  else if (group === "Idle") live2dMotion("Idle");
+  else if (group === "none") { /* 只表情/闭眼 */ }
+  else {
+    // 无 plan 时的旧映射兜底
+    if (a === "celebrate" || a === "jump" || a === "work") live2dMotion("TapBody");
+    else if (a === "walk" || a === "idle") live2dMotion("Idle");
+  }
+  if (plan ? plan.expression : (a === "work" || a === "think" || a === "sleep" || a === "celebrate")) {
+    live2dExpression();
+  }
 }
 function live2dTalk(ms) {
   l2d.talkUntil = Math.max(l2d.talkUntil, Date.now() + ms);
@@ -491,7 +500,7 @@ api.onPetEvent(async (ev) => {
     setAction(ev.action || (ev.type === "companion-work" ? "work" : "celebrate"), { hold: ev.hold ?? 3 });
     bounce();
   } else if (ev.type === "action") {
-    if (ev.action) setAction(ev.action, { hold: ev.hold ?? 3 });
+    if (ev.action) setAction(ev.action, { hold: ev.hold ?? 3, motion: ev.motion });
     if (ev.action === "jump" || ev.action === "celebrate") { bounce(); pop(); }
   } else if (ev.type === "fx") {
     if (ev.fx) playFx(ev.fx);
@@ -984,7 +993,7 @@ function celebrateEvo(level, stageName) {
   setAction("celebrate", { hold: 4 });
   bounce();
   pop();
-  showBubble(`✨ 进化！Lv.${level} ${stageName}`, {});
+  showBubble(`✨ 娱乐成长！Lv.${level} ${stageName}`, {});
   setTimeout(hideBubble, 4000);
   // 洒落粒子
   for (let i = 0; i < 8; i++) {

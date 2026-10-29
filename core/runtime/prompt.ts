@@ -137,7 +137,7 @@ export class PromptBuilder {
     const skin = host?.skinLabel(bot.id) || bot.skinId || "默认";
     const shown = host?.isShown?.(bot.id);
     const stage = !bot.petEnabled ? "未上台" : shown === false ? "已上台但窗口藏着" : "在桌面";
-    return `【桌宠】你当前${stage}；形象「${skin}」。用户问外形/在不在桌面时按这里说。需要操作时用 pet.*（细则见工具清单；用户这轮在谈桌宠时会附操作手册）。`;
+    return `【桌宠·娱乐】你当前${stage}；形象「${skin}」。桌宠不干扰工作任务。用户问外形/在不在桌面时按这里说；操作手册仅在谈桌宠时附上。`;
   }
 
   /** 仅在用户这轮像在谈桌宠时注入（进 volatile，不打断 system 前缀缓存） */
@@ -146,8 +146,8 @@ export class PromptBuilder {
     const maySpawn = host?.maySpawn() === true;
     const mayVisit = host?.mayVisit?.() === true;
     return [
-      "【桌宠操作】不需要用户 @ 你才知道桌宠——直接调工具。",
-      "查：pet.status / list / peers / prefs / visits；进化 pet.evolve action=list|history|accept|reject。",
+      "【桌宠操作 · 纯娱乐】桌宠表演/串门/换装不代替真正干活；用户要做事时用正常工具，不要用 pet.act/fx 糊弄。",
+      "查：pet.status / list / peers / prefs / visits / mind（心智只读）/ activity（自主行动日志）；进化 pet.evolve action=list|history|accept|reject。",
       "形象：pet.skin / pet.search→install。pet.generate：有生图才画头像；没有则只改角色卡并换已有 Live2D/社区皮，绝不伪造占位图——做不到就照工具结果如实说。",
       "动作：pet.act action=jump|walk|sleep|celebrate|think|work；pet.say text=… 冒泡。",
       "特效：pet.fx phrase=…（有相近则复用并说明；否则现场发明配方并记住；规则仅兜底）。list / pin / forget / gc；不改皮肤。",
@@ -243,5 +243,5 @@ export class PromptBuilder {
 export function isPetTopic(text: string): boolean {
   const t = (text || "").trim();
   if (!t) return false;
-  return /宠物|桌宠|形象|换装|换皮|皮肤|串门|拜访|出台|下台|藏起来|Live2D|petdex|咕嘎|奶龙|进化提议|桌面宠物|pet\.(show|hide|skin|list|status|visit|install|search|generate|evolve|remind)/i.test(t);
+  return /宠物|桌宠|形象|换装|换皮|皮肤|串门|拜访|出台|下台|藏起来|Live2D|petdex|咕嘎|奶龙|进化提议|桌面宠物|龟派|气功|pet\.(show|hide|skin|list|status|visit|install|search|generate|evolve|remind|mind|activity|act|fx)/i.test(t);
 }

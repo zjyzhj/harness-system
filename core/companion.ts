@@ -144,9 +144,8 @@ export class CompanionEngine {
     const ranked = [...pets].sort((a, b) => (this.state.last[a.id] ?? 0) - (this.state.last[b.id] ?? 0));
     for (const bot of ranked) {
       const prefs = this.livePrefs(bot.id);
-      // 同宠间隔跟「空闲多久」对齐，避免开了开关却要等数小时
-      const gapMs = Math.max(prefs.idleMs, this.o.gapMs);
-      if (!opts?.force && now - (this.state.last[bot.id] ?? 0) < gapMs) continue;
+      // 同宠最短间隔（默认 45 分钟；测试可设 gapMs:1）。不再用 3 小时默默饿死进阶开关。
+      if (!opts?.force && now - (this.state.last[bot.id] ?? 0) < this.o.gapMs) continue;
       if (!prefs.companionChat && !prefs.idleWork && !prefs.autoAppearance) continue;
       if (!opts?.force && now - this.deps.lastUserActivity() < prefs.idleMs) continue;
 

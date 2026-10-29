@@ -32,6 +32,11 @@ const api = {
       agentMaySpawn: boolean; selfEvolve: boolean; autoEvolve: boolean; petVisit: boolean;
       idleMinutes: number; maxChatPerDay: number; maxWorkPerDay: number; maxAppearPerWeek: number;
     }>,
+    activity: (botId?: string, limit?: number) => ipcRenderer.invoke("pet:activity", botId, limit) as Promise<Array<{
+      at: number; botId: string; kind: string; via: string; note: string; blocked?: boolean;
+    }>>,
+    mind: (botId: string) => ipcRenderer.invoke("pet:mind", botId),
+    trial: (kind?: string) => ipcRenderer.invoke("pet:trial", kind) as Promise<{ ok: boolean; kind?: string; message: string }>,
     evolveHistory: (botId?: string) => ipcRenderer.invoke("pet:evolveHistory", botId) as Promise<Array<{
       id: string; botId: string; kind: string; title: string; detail: string; status: string; createdAt: number;
     }>>,
@@ -159,6 +164,30 @@ const api = {
     config: (cfg?: { baseUrl: string; apiKey: string; model: string }) => ipcRenderer.invoke("voice:config", cfg),
     micAccess: () => ipcRenderer.invoke("voice:micAccess"),
     transcribe: (audio: ArrayBuffer, mime: string) => ipcRenderer.invoke("voice:transcribe", audio, mime),
+  },
+  realm: {
+    consentText: () => ipcRenderer.invoke("realm:consentText") as Promise<string>,
+    list: (includeArchived?: boolean) => ipcRenderer.invoke("realm:list", includeArchived),
+    get: (id: string) => ipcRenderer.invoke("realm:get", id),
+    create: (input: {
+      name: string; relation?: string; bio?: string; styleNotes?: string; corpus?: string;
+      providerId: string; consentRole: "self" | "with-consent" | "kin"; consentAffirmed: boolean;
+    }) => ipcRenderer.invoke("realm:create", input),
+    update: (id: string, patch: Record<string, unknown>) => ipcRenderer.invoke("realm:update", id, patch),
+    archive: (id: string) => ipcRenderer.invoke("realm:archive", id),
+    remove: (id: string) => ipcRenderer.invoke("realm:remove", id),
+    ttsConfig: (cfg?: {
+      baseUrl: string; apiKey: string; model: string;
+      cloneMode?: "none" | "upload" | "inline"; uploadPath?: string; defaultVoice?: string;
+    }) => ipcRenderer.invoke("realm:ttsConfig", cfg),
+    setPresetVoice: (presenceId: string, voiceName: string) => ipcRenderer.invoke("realm:setPresetVoice", presenceId, voiceName),
+    cloneVoice: (presenceId: string, refText: string) => ipcRenderer.invoke("realm:cloneVoice", presenceId, refText),
+    cloneVoiceBuf: (presenceId: string, audio: ArrayBuffer, mime: string, refText: string) =>
+      ipcRenderer.invoke("realm:cloneVoiceBuf", presenceId, audio, mime, refText),
+    previewVoice: (presenceId: string, text?: string) => ipcRenderer.invoke("realm:previewVoice", presenceId, text) as Promise<string>,
+    chat: (presenceId: string, text: string, sessionId?: string) => ipcRenderer.invoke("realm:chat", presenceId, text, sessionId),
+    messages: (sessionId: string) => ipcRenderer.invoke("realm:messages", sessionId),
+    sessions: (presenceId: string) => ipcRenderer.invoke("realm:sessions", presenceId),
   },
   memory: {
     list: (botId: string) => ipcRenderer.invoke("memory:list", botId),

@@ -1,7 +1,6 @@
 /**
- * 图片生成 / 编辑：OpenAI 兼容的 /images/generations 与 /images/edits。
- * 兼容 OpenAI（gpt-image-1 / dall-e-3，返回 data[].b64_json|url）
- * 和 SiliconFlow 等（Kolors / Qwen-Image，返回 images[].url，编辑时把原图放在 image 字段）。
+ * 图片生成 / 编辑：任意 OpenAI 兼容 /images/generations 与 /images/edits。
+ * 返回格式兼容 data[].b64_json|url 与 images[].url；改图：OpenAI 系走 /edits，其它常见中转在 generations 带 image。
  */
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { extname, join } from "node:path";
@@ -25,7 +24,7 @@ export async function apiFetch(url: string, init?: RequestInit): Promise<Respons
     const host = (() => { try { return new URL(url).host; } catch { return url; } })();
     const cause = e instanceof Error ? String((e as Error & { cause?: { code?: string; message?: string } }).cause?.code ?? (e as any).cause?.message ?? e.message) : String(e);
     if (/timeout|abort/i.test(cause)) throw new Error(`${host} 响应超时`);
-    throw new Error(`连不上 ${host}（${cause}）。开着代理的话，检查这个域名是不是被规则设成了直连；SiliconFlow 国际站（.com）不接受国内 IP，国内网络请用 .cn 站的 key`);
+    throw new Error(`连不上 ${host}（${cause}）。若开了代理，检查该域名是否被设成直连；若供应商分国内/国际站，确认 Base URL 与 Key 属于同一站点`);
   }
 }
 
@@ -57,14 +56,14 @@ async function saveImages(data: any, outDir: string, prefix: string): Promise<st
 async function imageApiError(kind: string, res: Response): Promise<string> {
   const body = (await res.text()).slice(0, 300);
   if (res.status === 402 || /insufficient|balance|余额/i.test(body)) {
-    return `${kind}失败：账号额度不足。国内站去 https://cloud.siliconflow.cn/account/ak 充值，国际站去 https://cloud.siliconflow.com/me/account/ak`;
+    return `${kind}失败：账号额度不足，请到该供应商控制台充值后重试`;
   }
   return `${kind}接口 ${res.status}：${body}`;
 }
 
 const authHeaders = (cfg: ImageGenConfig): Record<string, string> => (cfg.apiKey ? { Authorization: `Bearer ${cfg.apiKey}` } : {});
 const endpoint = (cfg: ImageGenConfig, path: string) => `${cfg.baseUrl.replace(/\/+$/, "")}${path}`;
-/** OpenAI 系模型用 multipart /images/edits；其他（SiliconFlow 等）在 generations 里带 image */
+/** OpenAI 官方系用 multipart /images/edits；其余供应商常见写法：在 generations 里带 image */
 const usesEditsEndpoint = (cfg: ImageGenConfig, model: string) => /^(gpt-image|dall-e)/i.test(model) || /api\.openai\.com/.test(cfg.baseUrl);
 
 export async function generateImages(cfg: ImageGenConfig, prompt: string, outDir: string, opts: { n?: number; size?: string } = {}): Promise<string[]> {

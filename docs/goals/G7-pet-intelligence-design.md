@@ -194,16 +194,18 @@ type PetBeat =
 
 ### Phase B — 体感（约 1 迭代）
 
-- [ ] `pet-motion` 驱动 Live2D/sprite  
-- [ ] `PetBeat` 脚本 + 导演多拍  
-- [ ] 互访 affinity  
+- [x] `pet-motion` 驱动 Live2D/sprite  
+- [x] `PetBeat` 脚本 + 导演多拍  
+- [x] 互访 affinity  
 
 ### Phase C — 成长（约 1 迭代）
 
-- [ ] 进化与 XP 叙事合一  
-- [ ] skill_hint → 草稿确认流  
-- [ ] `pet.mind` / `pet.activity` 工具  
-- [ ] Companion「为何开口」可解释元数据
+- [x] 进化与 XP 叙事合一（XP=娱乐称号；跨级可顺带 evolve；工作中跳过）  
+- [ ] skill_hint → 草稿确认流（仍只提议，不自动 skill.save）  
+- [x] `pet.mind` / `pet.activity` 工具  
+- [x] Companion「为何开口」可解释元数据（活动日志 + 设置页试跑）  
+
+**硬约束：** 桌宠纯娱乐——节拍/互访/进化绝不把 bot 标成 `running`；工作回合中跳过自主 tick。
 
 每期验收：**关 prefs 时行为不退化**；**开 prefs 时决策可在活动里追溯 via=model|rule**。
 

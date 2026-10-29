@@ -39,11 +39,15 @@ function renderBlock(b) {
 
 /** 思考过程：默认折叠成一行「已深度思考 N 秒」，展开看全文 */
 function thinkSecs(ms) {
-  return ms < 1000 ? "不到 1 秒" : `${Math.round(ms / 1000)} 秒`;
+  const n = Number(ms);
+  if (!Number.isFinite(n) || n < 0) return "不到 1 秒";
+  return n < 1000 ? "不到 1 秒" : `${Math.round(n / 1000)} 秒`;
 }
 
 function thinkHtml(b, live) {
-  const label = live ? "正在思考" : `已深度思考${b.ms ? ` ${thinkSecs(b.ms)}` : ""}`;
+  const ms = Number(b?.ms);
+  const hasMs = Number.isFinite(ms) && ms > 0;
+  const label = live ? "正在思考" : `已深度思考${hasMs ? ` ${thinkSecs(ms)}` : ""}`;
   return `<details class="think-box${live ? " live" : ""}"${live ? " open" : ""}><summary><span class="tb-ico">💭</span><span class="tb-label">${label}</span>${live ? `<span class="dots"></span>` : ""}<span class="tb-arrow">›</span></summary><div class="tb-body">${esc(b.text ?? "")}</div></details>`;
 }
 

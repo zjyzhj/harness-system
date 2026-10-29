@@ -63,6 +63,8 @@ export type ContentBlock =
   | { type: "tool_call"; tool: string; args?: Record<string, unknown>; callId?: string; result?: string; status?: "ok" | "error" | "running" | "queued" }
   /** textPath：附件抽出的全文（PDF / Word / 表格等），chars 为字数 */
   | { type: "file"; path: string; name: string; size?: number; textPath?: string; chars?: number; error?: string }
+  /** 灵境等：本机合成语音 */
+  | { type: "audio"; path: string; mime?: string }
   /** ms：思考用时 */
   | { type: "thinking"; text: string; ms?: number }
   /** 撤回本轮已流式推送的正文（纠偏 / 截断工具块后的假结果），不落盘 */
@@ -104,6 +106,10 @@ export interface MessageMeta {
   tag?: "summary" | "conclusion";
   /** 回复后给用户的追问建议 */
   suggestions?: string[];
+  /** 灵境 Presence 会话消息 */
+  realm?: boolean;
+  /** 合成语音本机路径（与 content 里 audio 块一致，便于检索） */
+  audioPath?: string;
 }
 
 export interface ChatMessage {
@@ -142,7 +148,7 @@ export function contentText(c: string | ContentBlock[]): string {
 
 /** 消息是否含图片等非文本块 */
 export function hasRichContent(c: string | ContentBlock[]): boolean {
-  return Array.isArray(c) && c.some((b) => b.type !== "text" && b.type !== "thinking");
+  return Array.isArray(c) && c.some((b) => b.type !== "text" && b.type !== "thinking" && b.type !== "audio");
 }
 
 export interface Session {

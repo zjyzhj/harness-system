@@ -4,6 +4,7 @@
  * 用户主动发起，不受 prefs.pet 自主开关限制。
  */
 import { RECOMMENDED_PETDEX } from "./petdex";
+import { expandPhraseToBeats, parseBeats, type PetBeat } from "./pet-script";
 
 export type PetIntent =
   | { type: "setSkin"; skinId: string; label: string }
@@ -17,6 +18,8 @@ export type PetIntent =
   | { type: "evolveReject" }
   | { type: "act"; action: "idle" | "walk" | "jump" | "sleep" | "celebrate" | "work" | "think"; holdSec?: number; note: string }
   | { type: "fx"; phrase: string }
+  /** 娱乐节拍脚本（多拍动作/特效/台词）；不占用 bot 工作回合 */
+  | { type: "script"; beats: PetBeat[]; note: string }
   | { type: "visit"; peerName: string }
   | { type: "chat"; text: string };
 
@@ -112,7 +115,12 @@ export function parsePetIntent(ctx: PetDirectorContext): PetIntent {
   const fx = text.match(FX_RE) || text.match(FX_BARE_RE);
   if (fx) {
     const phrase = (fx[1] || fx[0] || "").trim();
-    if (phrase && phrase.length <= 40) return { type: "fx", phrase };
+    if (phrase && phrase.length <= 40) {
+      // 大招类短语优先展开为娱乐节拍脚本
+      const beats = expandPhraseToBeats(phrase);
+      if (beats && beats.length > 1) return { type: "script", beats, note: `好，来一段「${phrase.slice(0, 16)}」～` };
+      return { type: "fx", phrase };
+    }
   }
 
   const visit = text.match(VISIT_RE);
@@ -224,9 +232,11 @@ export function directorSystemPrompt(ctx: PetDirectorContext): string {
     '- remind：{"type":"remind","delayMs":number,"text":"..."}',
     '- act：{"type":"act","action":"idle|walk|jump|sleep|celebrate|work|think"}',
     '- fx：{"type":"fx","phrase":"特效名"}',
+    '- script：娱乐连招 {"type":"script","beats":[{"type":"action"|"fx"|"say"|"wait",...}]} 最多 6 拍；大招/表演优先用 script',
     '- visit：{"type":"visit","peerName":"伙伴名"}',
     '- revertSkin / evolveAccept / evolveReject',
     '- chat：只有整句都不是桌宠指令时才用',
+    "桌宠是娱乐层：script/act/fx 不代替真正干活，不要把工作任务做成桌宠表演。",
     `已装形象：${skins}`,
     `可拜访伙伴：${peers}`,
     "一句可含多条（如「换成咕嘎，话少一点」→ 换皮 + companionChat:false）。不要编造不存在的形象名。",
@@ -309,6 +319,11 @@ function hydrateDraft(type: string, j: Record<string, unknown>, ctx: PetDirector
   if (type === "fx") {
     const phrase = String(j.phrase ?? j.name ?? "").trim();
     return phrase ? { type: "fx", phrase } : null;
+  }
+  if (type === "script") {
+    const beats = parseBeats(j.beats);
+    if (!beats?.length) return null;
+    return { type: "script", beats, note: String(j.note || "好，开演～").slice(0, 40) };
   }
   if (type === "visit") {
     const peerName = String(j.peerName ?? j.name ?? "").trim();

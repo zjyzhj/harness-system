@@ -34,6 +34,8 @@ export interface VisitDeps {
   enabled?: () => boolean;
   /** 当前是否在桌面可见；自发串门只挑可见的 */
   isShown?: (botId: string) => boolean;
+  /** bot 正忙（工作回合中）则不串门——娱乐不抢活 */
+  isBusy?: (botId: string) => boolean;
   /**
    * 有模型时现场写双方台词；返回 null 则用规则模板。
    * 宿主注入，引擎不直接依赖 provider。
@@ -185,6 +187,7 @@ export class PetVisitEngine {
     const pets = this.deps.bots().filter((b) => {
       if (!b.petEnabled) return false;
       if (this.deps.isShown && !this.deps.isShown(b.id)) return false;
+      if (this.deps.isBusy?.(b.id)) return false;
       return true;
     });
     if (pets.length < 2) return null;

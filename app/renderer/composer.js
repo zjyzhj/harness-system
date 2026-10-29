@@ -122,10 +122,10 @@ async function voiceConfigFlow() {
   const rate = Number(localStorage.getItem("harness.ttsRate") || 1.05);
   const modal = openModal(`
     <h2>🎙 语音</h2>
-    <div class="hint">语音输入和语音对话要把录音发给语音识别接口（OpenAI 兼容 /audio/transcriptions）。推荐 SiliconFlow 的 SenseVoice（有免费额度），也可以用 OpenAI Whisper。不想配置的话，在输入框里按两下 Fn 可以用 macOS 自带的听写。</div>
+    <div class="hint">语音输入要把录音发给任意 OpenAI 兼容的 <code>/audio/transcriptions</code>（Whisper、SenseVoice、各家中转均可）。不想配的话，在输入框按两下 Fn 可用 macOS 听写。</div>
     <div class="kv">
-      <label>识别接口</label><input id="v-url" value="${esc(cur?.baseUrl || "https://api.siliconflow.cn/v1")}" />
-      <label>识别模型</label><input id="v-model" value="${esc(cur?.model || "FunAudioLLM/SenseVoiceSmall")}" />
+      <label>识别接口</label><input id="v-url" value="${esc(cur?.baseUrl || "")}" placeholder="https://你的中转或官方/v1" />
+      <label>识别模型</label><input id="v-model" value="${esc(cur?.model || "")}" placeholder="如 whisper-1 / SenseVoiceSmall" />
       <label>API Key</label><input id="v-key" type="password" placeholder="${cur?.apiKey ? "已保存，留空不修改" : "sk-..."}" />
       <label>朗读声音</label><select id="v-voice"><option value="">自动（按内容选中文 / 英文）</option>${voices.map((v) => `<option value="${esc(v.name)}" ${v.name === savedVoice ? "selected" : ""}>${esc(v.name)} · ${esc(v.lang)}</option>`).join("")}</select>
       <label>朗读语速</label><span class="v-rate"><input id="v-rate" type="range" min="0.7" max="1.8" step="0.05" value="${rate}" /><em>${rate.toFixed(2)}×</em><button class="ghost-btn" id="v-try">试听</button></span>
@@ -214,8 +214,10 @@ async function toggleVoice() {
     btn.title = "识别中…";
     try {
       const buf = await new Blob(chunks, { type: mime }).arrayBuffer();
-      const text = await api.voice.transcribe(buf, mime.split(";")[0]);
-      if (text) {
+      const text = (await api.voice.transcribe(buf, mime.split(";")[0])).trim();
+      if (text && typeof realmPresence !== "undefined" && realmPresence && typeof realmSend === "function" && !voiceMode) {
+        await realmSend(text);
+      } else if (text) {
         const el = $("#input");
         const at = el.selectionStart ?? el.value.length;
         el.value = el.value.slice(0, at) + text + el.value.slice(at);
@@ -252,14 +254,15 @@ function chatOpts() {
 function renderComposerTools() {
   const box = $("#composer-tools");
   if (!box) return;
-  const single = !!currentBot && !currentGroup;
-  if (!single && !currentGroup) { box.innerHTML = ""; return; }
+  const inRealm = typeof realmPresence !== "undefined" && !!realmPresence;
+  const single = !!currentBot && !currentGroup && !inRealm;
+  if (!single && !currentGroup && !inRealm) { box.innerHTML = ""; return; }
   const proj = projectList.find((p) => p.id === sessionProject);
   box.innerHTML = `
     ${single ? `<button class="ct ${thinkMode ? "on" : ""}" data-ct="think" title="先推理再回答：DeepSeek 等会换用推理模型，思考过程可以展开看">💭 深度思考</button>` : ""}
     ${single ? `<button class="ct ${proj ? "on" : ""}" data-ct="project" title="项目：一组对话共用的指令和资料">📁 ${proj ? esc(proj.name) : "项目"}<span class="ct-caret">▾</span></button>` : ""}
-    <button class="ct ${autoSpeak ? "on" : ""}" data-ct="speak" title="回复完自动朗读">🔊 自动朗读</button>
-    ${single ? `<button class="ct ${voiceMode ? "on" : ""}" data-ct="voice" title="连续语音对话：说完自动发送，回复读出来，读完接着听">🎧 语音对话</button>` : ""}`;
+    ${inRealm ? "" : `<button class="ct ${autoSpeak ? "on" : ""}" data-ct="speak" title="回复完自动朗读">🔊 自动朗读</button>`}
+    ${single || inRealm ? `<button class="ct ${voiceMode ? "on" : ""}" data-ct="voice" title="${inRealm ? "灵境语音：说完自动发送，用 TA 的音色回复，说完再听" : "连续语音对话：说完自动发送，回复读出来，读完接着听"}">🎧 ${inRealm ? "灵境语音" : "语音对话"}</button>` : ""}`;
   box.querySelectorAll("[data-ct]").forEach((btn) => (btn.onclick = (e) => {
     const k = btn.dataset.ct;
     if (k === "think") { thinkMode = !thinkMode; localStorage.setItem("harness.think", thinkMode ? "1" : "0"); renderComposerTools(); }
@@ -386,7 +389,13 @@ const vc = { stream: null, rec: null, ctx: null, forceStop: false };
 function setVoiceBar(state, extra = "") {
   const bar = $("#voice-bar");
   if (!voiceMode) { bar.classList.add("hidden"); bar.innerHTML = ""; return; }
-  const label = { listening: "在听，说完停一下会自动发送", transcribing: "识别中…", thinking: "等待回复…", speaking: "正在朗读" }[state] ?? state;
+  const inRealm = typeof realmPresence !== "undefined" && !!realmPresence;
+  const label = {
+    listening: inRealm ? `在听 ${realmPresence.name}… 说完停一下会发送` : "在听，说完停一下会自动发送",
+    transcribing: "识别中…",
+    thinking: inRealm ? `${realmPresence.name} 正在回应…` : "等待回复…",
+    speaking: inRealm ? `正在用 ${realmPresence.name} 的声音说` : "正在朗读",
+  }[state] ?? state;
   bar.className = `vb-${state}`;
   bar.innerHTML = `<span class="vb-orb"><i></i></span><span class="vb-label">${esc(label)}</span>${extra}<span class="vb-level"><i></i></span>
     ${state === "listening" ? `<button class="ghost-btn" data-vb="done">说完了</button>` : ""}
@@ -395,29 +404,42 @@ function setVoiceBar(state, extra = "") {
   bar.querySelectorAll("[data-vb]").forEach((b) => (b.onclick = () => {
     if (b.dataset.vb === "exit") stopVoiceMode();
     if (b.dataset.vb === "done" && vc.rec?.state === "recording") { vc.forceStop = true; vc.rec.stop(); }
-    if (b.dataset.vb === "interrupt") { stopSpeak(); listenTurn(); }
+    if (b.dataset.vb === "interrupt") {
+      stopSpeak();
+      if (typeof stopRealmAudio === "function") stopRealmAudio();
+      listenTurn();
+    }
   }));
 }
 
 async function startVoiceMode() {
-  if (!currentBot || currentGroup) return;
+  const inRealm = typeof realmPresence !== "undefined" && !!realmPresence;
+  if ((!currentBot || currentGroup) && !inRealm) return;
+  if (inRealm && realmPresence.voice?.status !== "ready") {
+    if (confirm("尚未绑定音色。确定：去绑定；取消：继续（回复只有文字）")) {
+      return typeof realmVoiceBindFlow === "function" && realmVoiceBindFlow(realmPresence);
+    }
+  }
   if (!(await api.voice.config())) { if (!(await voiceConfigFlow())) return; }
   if (!(await api.voice.micAccess())) return alert("没有麦克风权限：系统设置 → 隐私与安全性 → 麦克风，允许 Electron");
   try { vc.stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } }); } catch (e) { return alert(`打不开麦克风：${e.message}`); }
   voiceMode = true;
   renderComposerTools();
+  if (typeof realmPresence !== "undefined" && realmPresence && typeof renderRealmHeader === "function") renderRealmHeader();
   listenTurn();
 }
 
 function stopVoiceMode() {
   voiceMode = false;
   stopSpeak();
+  if (typeof stopRealmAudio === "function") stopRealmAudio();
   if (vc.rec?.state === "recording") vc.rec.stop();
   vc.ctx?.close().catch(() => {});
   vc.stream?.getTracks().forEach((t) => t.stop());
   Object.assign(vc, { stream: null, rec: null, ctx: null });
   setVoiceBar("");
   renderComposerTools();
+  if (typeof realmPresence !== "undefined" && realmPresence && typeof renderRealmHeader === "function") renderRealmHeader();
 }
 
 function listenTurn() {
@@ -461,6 +483,19 @@ function listenTurn() {
       if (!voiceMode) return;
       if (!text) return listenTurn();
       setVoiceBar("thinking", `<span class="vb-said">“${esc(text.slice(0, 40))}${text.length > 40 ? "…" : ""}”</span>`);
+      if (typeof realmPresence !== "undefined" && realmPresence && typeof realmSend === "function") {
+        const r = await realmSend(text, { autoPlay: false, quiet: true });
+        if (!voiceMode) return;
+        if (r?.audioPath && typeof playRealmAudio === "function") {
+          setVoiceBar("speaking");
+          await playRealmAudio(r.audioPath);
+        } else if (r?.text) {
+          setVoiceBar("speaking");
+          await new Promise((res) => speak(r.text, { onEnd: res }));
+        }
+        if (voiceMode) listenTurn();
+        return;
+      }
       $("#input").value = text;
       send();
     } catch (e) {

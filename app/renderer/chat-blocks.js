@@ -152,6 +152,14 @@ function renderMedia(media) {
     box.appendChild(g);
   }
   media.filter((b) => b.type === "file").forEach((b) => box.appendChild(fileCard(b)));
+  media.filter((b) => b.type === "audio" && b.path).forEach((b) => {
+    const a = document.createElement("audio");
+    a.className = "msg-audio";
+    a.controls = true;
+    a.preload = "metadata";
+    a.src = fileUrl(b.path);
+    box.appendChild(a);
+  });
   return box;
 }
 
@@ -234,10 +242,10 @@ function makeMsgEl(m) {
     return wrapper;
   }
   const blocks = Array.isArray(m.content) ? m.content : null;
-  const media = blocks ? blocks.filter((b) => b.type === "image" || b.type === "file") : [];
+  const media = blocks ? blocks.filter((b) => b.type === "image" || b.type === "file" || b.type === "audio") : [];
   const cards = blocks ? blocks.filter((b) => b.type === "choice" || b.type === "secret" || b.type === "conclusion") : [];
   const sources = blocks?.find((b) => b.type === "sources")?.items ?? [];
-  const rest = blocks ? blocks.filter((b) => !["image", "file", "choice", "secret", "conclusion", "sources"].includes(b.type)) : null;
+  const rest = blocks ? blocks.filter((b) => !["image", "file", "audio", "choice", "secret", "conclusion", "sources"].includes(b.type)) : null;
   const isUser = m.from === "user";
   const sender = botById(m.from);
   const showWho = !isUser && (m.kind === "bot-to-bot" || !currentBot || m.from !== currentBot.id);
@@ -427,7 +435,9 @@ async function streamReply({ sid, userEl, run, firstBot, firstKey }) {
     bubbles.forEach((b) => {
       const el = b.el.querySelector(".secs");
       if (el) el.textContent = secs;
-      if (b.thinkEl?.classList.contains("live")) b.thinkEl.querySelector(".tb-label").textContent = `正在思考 ${Math.floor((Date.now() - b.thinkStart) / 1000)} 秒`;
+      if (b.thinkEl?.classList.contains("live") && b.thinkStart) {
+        b.thinkEl.querySelector(".tb-label").textContent = `正在思考 ${Math.max(0, Math.floor((Date.now() - b.thinkStart) / 1000))} 秒`;
+      }
     });
   }, 500);
   follow();
@@ -437,7 +447,8 @@ async function streamReply({ sid, userEl, run, firstBot, firstKey }) {
     b.thinkEl.classList.remove("live");
     b.thinkEl.open = false;
     b.thinkEl.querySelector(".dots")?.remove();
-    b.thinkEl.querySelector(".tb-label").textContent = `已深度思考 ${thinkSecs(Date.now() - b.thinkStart)}`;
+    const ms = b.thinkStart ? Date.now() - b.thinkStart : 0;
+    b.thinkEl.querySelector(".tb-label").textContent = `已深度思考 ${thinkSecs(ms)}`;
     b.bubble.classList.remove("hidden");
   };
   const offStream = api.onChatStream((chunk) => {
@@ -451,12 +462,16 @@ async function streamReply({ sid, userEl, run, firstBot, firstKey }) {
         b.thinkEl = holder.firstElementChild;
         b.el.insertBefore(b.thinkEl, b.bubble);
         b.think = "";
+        // thinkHtml(..., true) 已带 .live，必须在创建时记下起点，否则结束时 Date.now()-undefined → NaN
+        b.thinkStart = Date.now();
       }
       if (!b.thinkEl.classList.contains("live")) {
         b.thinkStart = Date.now();
         b.thinkEl.classList.add("live");
         b.thinkEl.open = true;
         if (b.think) b.think += "\n\n";
+      } else if (!b.thinkStart) {
+        b.thinkStart = Date.now();
       }
       if (!b.started) b.bubble.classList.add("hidden");
       b.think += chunk.text;

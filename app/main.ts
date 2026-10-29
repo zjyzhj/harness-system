@@ -25,8 +25,11 @@ import { MessageBus } from "../core/message-bus";
 import { ProviderCenter } from "../core/provider-center";
 import { PersonaGenerator, parseAppearancePick, type AppearancePick } from "../core/persona";
 import {
-  buildPetMind, formatMindForPrompt, notePetDecision, listPetActivity, extractCompanionFact, type PetMind,
+  buildPetMind, formatMindForPrompt, notePetDecision, listPetActivity, extractCompanionFact, levelFromXp, type PetMind,
 } from "../core/pet-mind";
+import { resolveMotion, traitsBlob } from "../core/pet-motion";
+import { expandPhraseToBeats, estimateScriptMs, type PetBeat } from "../core/pet-script";
+import type { PetActName } from "../core/pet-director";
 import { MigrationV2 } from "../core/migration-v2";
 import { SystemKit } from "../core/system-kit";
 import { MemorySystem } from "../core/memory-system";
@@ -80,6 +83,7 @@ import { registerShareIpc } from "./host/share";
 import { registerSecurityIpc } from "./host/security-ipc";
 import { registerSkinsIpc } from "./host/skins-ipc";
 import { registerVoiceIpc } from "./host/voice-ipc";
+import { registerRealmIpc } from "./host/realm-ipc";
 import { registerKnowledgeIpc } from "./host/knowledge-ipc";
 import { TEMPLATE_EXT, TEMPLATE_SCHEME, normalizeTemplate, parseTemplate, templateLink, templateOf, uniqueBotName, type BotTemplate } from "../core/bot-template";
 
@@ -179,7 +183,7 @@ function openStoredKey(v: unknown): string {
 function encryptLegacyConfigKeys() {
   const all = store.readConfig();
   const changed: string[] = [];
-  for (const [section, label] of [["imageGen", "图片生成"], ["asr", "语音识别"]] as const) {
+  for (const [section, label] of [["imageGen", "图片生成"], ["asr", "语音识别"], ["tts", "语音合成"]] as const) {
     const v = all[section] as Record<string, unknown> | undefined;
     if (v && typeof v.apiKey === "string" && v.apiKey && !/^(enc|b64):/.test(v.apiKey)) {
       all[section] = { ...v, apiKey: keyCipher.encrypt(v.apiKey) };
@@ -358,9 +362,23 @@ const runtime: BotRuntime = new BotRuntime({
       const allowed = new Set(["idle", "walk", "jump", "sleep", "celebrate", "work", "think"]);
       const a = String(action || "").toLowerCase();
       if (!allowed.has(a)) return { ok: false as const, error: `动作仅支持 ${[...allowed].join("/")}` };
+      const bot = store.getBot(botId);
+      if (!bot) return { ok: false as const, error: "bot 不存在" };
+      const plan = resolveMotion(a as PetActName, { holdSec, traits: { blob: traitsBlob(bot) } });
+      pushPetEvent(botId, { type: "action", action: plan.action, hold: plan.holdSec, motion: plan });
+      return { ok: true as const, action: plan.action };
+    },
+    mind: (botId) => {
+      const mind = loadPetMindFor(botId);
+      if (!mind) return { ok: false as const, error: "bot 不存在" };
+      return { ok: true as const, mind, prompt: formatMindForPrompt(mind) };
+    },
+    activity: (botId, limit) => listPetActivity(home, { botId: botId || undefined, limit: limit ?? 20 }),
+    playScript: (botId, beats) => {
       if (!store.getBot(botId)) return { ok: false as const, error: "bot 不存在" };
-      pushPetEvent(botId, { type: "action", action: a, hold: holdSec ?? (a === "idle" ? 0 : 3) });
-      return { ok: true as const, action: a };
+      if (!Array.isArray(beats) || !beats.length) return { ok: false as const, error: "beats 为空" };
+      schedulePetScript(botId, beats as PetBeat[]);
+      return { ok: true as const, ms: estimateScriptMs(beats as PetBeat[]) };
     },
     say: (botId, text, opts) => {
       if (!store.getBot(botId)) return { ok: false as const, error: "bot 不存在" };
@@ -791,32 +809,36 @@ const companion = new CompanionEngine(home, {
 
       let pick = candidates[0];
       let reason = "";
+      let via: "model" | "rule" = "rule";
+      const mind = loadPetMindFor(bot.id);
       const provider = providers.get(bot.providerId) || providers.getDefault();
       if (provider) {
         try {
           const r = await providers.complete(provider, {
             model: providers.get(bot.providerId) ? bot.model : undefined,
-            system: `你是桌宠 ${bot.name}。根据近期话题从候选形象里选一个最合适的换上。只输出 JSON：{"slug":"...","name":"...","why":"一句原因≤40字"}。必须选候选里有的 slug。`,
-            user: `人设：${bot.persona || bot.role}\n近期话题：${hint || "（无）"}\n候选：\n${candidates.map((c) => `- ${c.slug}｜${c.name}`).join("\n")}`,
+            system: `你是桌宠 ${bot.name}。根据心智与近期话题从候选里选一个形象。只输出 JSON：{"slug":"...","name":"...","why":"≤40字"}。必须选候选里有的 slug；对不上就选最不突兀的。`,
+            user: `${mind ? formatMindForPrompt(mind) + "\n\n" : ""}近期话题：${hint || "（无）"}\n候选：\n${candidates.map((c) => `- ${c.slug}｜${c.name}`).join("\n")}`,
             signal: AbortSignal.timeout(20_000),
           });
           const m = (r.text || "").match(/\{[\s\S]*\}/);
           if (m) {
             const j = JSON.parse(m[0]) as { slug?: string; name?: string; why?: string };
             const hit = candidates.find((c) => c.slug === j.slug || c.name === j.name);
-            if (hit) { pick = hit; reason = String(j.why || "").trim().slice(0, 40); }
+            if (hit) { pick = hit; reason = String(j.why || "").trim().slice(0, 40); via = "model"; }
           }
         } catch (e) {
           console.error("[companion.appear.invent]", e);
         }
       }
 
-      // 候选可能是已装 skinId 或 petdex slug
       let skinId = pick.slug;
       let label = pick.name;
       if (!petSkins.get(skinId)) {
         const entry = pets.find((p) => p.slug === pick.slug) || searchPetdex(pets, pick.slug, 1)[0];
-        if (!entry) return null;
+        if (!entry) {
+          notePetDecision(home, { botId: bot.id, kind: "autoAppearance", via, note: "候选无法安装", blocked: true });
+          return null;
+        }
         skinId = petdexSkinId(entry.slug);
         label = RECOMMENDED_PETDEX.find((r) => r.slug === entry.slug)?.name || entry.displayName;
         if (!petSkins.get(skinId)) {
@@ -824,11 +846,15 @@ const companion = new CompanionEngine(home, {
           petSkins.register(skin);
         }
       }
-      if (bot.skinId === skinId) return null;
+      if (bot.skinId === skinId) {
+        notePetDecision(home, { botId: bot.id, kind: "autoAppearance", via, note: "已是当前皮，跳过", blocked: true });
+        return null;
+      }
       applyBotSkin(bot.id, skinId, label);
       const line = reason
         ? `我换上了「${label}」——${reason}。不喜欢就说「换回去」。`
         : `我换上了「${label}」。不喜欢就说「换回去」。`;
+      notePetDecision(home, { botId: bot.id, kind: "autoAppearance", via, note: `→ ${label}` });
       return { text: line, title: "自动换装" };
     } catch (e) {
       console.error("[companion.appear]", e);
@@ -841,18 +867,19 @@ const companion = new CompanionEngine(home, {
     if (statuses.get(bot.id)?.state === "running") return null;
     const provider = providers.get(bot.providerId) || providers.getDefault();
     if (!provider) return null;
-    const mem = memory.list(bot.id).slice(0, 6).map((m) => `- ${m.content.slice(0, 48)}`).join("\n");
+    const mind = loadPetMindFor(bot.id);
     const hour = new Date().getHours();
     const slot = hour < 6 ? "深夜" : hour < 12 ? "上午" : hour < 18 ? "下午" : "晚上";
     try {
       const r = await providers.complete(provider, {
         model: providers.get(bot.providerId) ? bot.model : undefined,
-        system: `${bot.systemPrompt || `你是 ${bot.name}（${bot.role}）`}\n人设：${bot.persona || bot.personaCard?.traits?.join("、") || "友好"}\n\n你是桌面上的宠物，空闲时主动跟用户说一句短话。要像在陪着对方，可引用记忆，不要命令式、不要编造刚做完的事，不超过 60 字。`,
-        user: `现在是${slot}。记忆：\n${mem || "（暂无）"}\n说一句自然的搭话。`,
+        system: `${bot.systemPrompt || `你是 ${bot.name}`}\n你是桌宠，空闲时主动说一句。要像记得对方的事：优先引用心智里的记忆或最近用户话；不要命令式、不编造刚做完的事，不超过 60 字。`,
+        user: `${mind ? formatMindForPrompt(mind) + "\n\n" : ""}现在是${slot}。说一句自然、有记忆感的搭话。`,
         signal: AbortSignal.timeout(20_000),
       });
       const text = (r.text || "").replace(/```[\s\S]*?```/g, "").replace(/\s+/g, " ").trim().slice(0, 120);
       if (!text) return null;
+      notePetDecision(home, { botId: bot.id, kind: "companionChat", via: "model", note: text.slice(0, 80) });
       return { text, title: "搭话" };
     } catch (e) {
       console.error("[companion.chat]", e);
@@ -863,7 +890,6 @@ const companion = new CompanionEngine(home, {
     const bot = store.getBot(botId);
     const sid = store.listSessions(botId).filter((s) => /^s-/.test(s.id)).sort((a, b) => b.updatedAt - a.updatedAt)[0]?.id
       || `s-pet-companion-${botId}`;
-    // 写入会话，方便下次对话有连续性
     try {
       store.ensureSession(sid, botId, "桌宠陪伴");
       store.addMessage({
@@ -873,6 +899,13 @@ const companion = new CompanionEngine(home, {
       });
     } catch (e) {
       console.error("[companion.persist]", e);
+    }
+    // 显著句沉淀进记忆，下次搭话/互访能引用
+    const fact = extractCompanionFact(line.text);
+    if (fact) {
+      try {
+        memory.add(botId, { kind: "fact", content: fact, source: `pet-${line.kind || "chat"}` });
+      } catch { /* ignore */ }
     }
     const title = line.title || (line.kind === "work" ? "空闲小事" : line.kind === "appear" ? "自动换装" : bot?.name || "陪伴");
     const evType = line.kind === "work" ? "companion-work" : line.kind === "appear" ? "companion-appear" : "companion";
@@ -891,17 +924,23 @@ const petVisit = new PetVisitEngine(home, {
   bots: () => store.listBots(),
   enabled: () => readPetPrefs().petVisit,
   isShown: (id) => isPetShown(id),
+  isBusy: (id) => statuses.get(id)?.state === "running",
   inventLines: async (from, to) => {
     const provider = providers.get(from.providerId) || providers.get(to.providerId) || providers.getDefault();
     if (!provider) return null;
     try {
+      const fromMind = loadPetMindFor(from.id);
+      const toMind = loadPetMindFor(to.id);
+      const warm = fromMind?.bond.affinity[to.id] ?? 0;
       const r = await providers.complete(provider, {
         model: undefined,
-        system: "两个桌宠见面打招呼。只输出 JSON：{\"from\":\"访客说的一句≤40字\",\"to\":\"主人回应≤40字\"}。要贴合各自人设，口语、有趣，不要解释。",
-        user: `访客：${from.name}（${from.persona || from.personaCard?.traits?.join("、") || from.role}）\n主人：${to.name}（${to.persona || to.personaCard?.traits?.join("、") || to.role}）`,
+        system: "两个桌宠见面打招呼。只输出 JSON：{\"from\":\"访客说的一句≤40字\",\"to\":\"主人回应≤40字\"}。要贴合人设与关系温度，口语有趣，可点到共同记忆，不要解释。",
+        user: `关系温度：${warm}\n访客心智：\n${fromMind ? formatMindForPrompt(fromMind) : from.name}\n\n主人心智：\n${toMind ? formatMindForPrompt(toMind) : to.name}`,
         signal: AbortSignal.timeout(15_000),
       });
-      return parseVisitLines(r.text || "");
+      const lines = parseVisitLines(r.text || "");
+      if (lines) notePetDecision(home, { botId: from.id, kind: "visit", via: "model", note: `→ ${to.name}` });
+      return lines;
     } catch (e) {
       console.error("[pet-visit.invent]", e);
       return null;
@@ -1019,6 +1058,11 @@ function stagePetVisit(
   });
   grantPetXp(rec.fromId, 3);
   grantPetXp(rec.toId, 3);
+  try {
+    memory.add(rec.fromId, { kind: "event", content: `去找 ${rec.toName} 串门：${rec.lineFrom}`, source: "pet-visit" });
+    memory.add(rec.toId, { kind: "event", content: `${rec.fromName} 来串门：${rec.lineTo}`, source: "pet-visit" });
+  } catch { /* ignore */ }
+  notePetDecision(home, { botId: rec.fromId, kind: "visit", via: "system", note: `串门 ${rec.toName}` });
   return rec;
 }
 
@@ -1048,14 +1092,16 @@ const petEvolve = new PetEvolveEngine(home, {
   petXp: (botId) => store.listPets().find((p) => p.botId === botId)?.xp ?? 0,
   enabled: () => readPetPrefs().selfEvolve,
   autoApply: () => readPetPrefs().autoEvolve,
+  isBusy: (id) => statuses.get(id)?.state === "running",
   invent: async (bot, ctx) => {
     const provider = providers.get(bot.providerId) || providers.getDefault();
     if (!provider) return null;
     try {
+      const mind = loadPetMindFor(bot.id);
       const r = await providers.complete(provider, {
         model: providers.get(bot.providerId) ? bot.model : undefined,
-        system: `你是桌宠 ${bot.name}，观察相处后提出一条自进化小提议。只输出 JSON：{"kind":"play"|"work_style"|"habit"|"skill_hint","title":"≤20字问句","detail":"≤80字说明","personaAppend":"可选","memory":{"kind":"fact"|"rule","content":"可选"}}。要具体、可拒绝。`,
-        user: `人设：${bot.persona || bot.role}\n等级：Lv.${ctx.level}\n记忆：\n${ctx.memory.slice(0, 6).map((m) => `- [${m.kind}] ${m.content.slice(0, 40)}`).join("\n") || "（无）"}\n最近用户话：\n${ctx.messages.map((t) => `- ${t.slice(0, 60)}`).join("\n")}`,
+        system: `你是桌宠 ${bot.name}，观察相处后提出一条自进化小提议。只输出 JSON：{"kind":"play"|"work_style"|"habit"|"skill_hint","title":"≤20字问句","detail":"≤80字说明","personaAppend":"可选","memory":{"kind":"fact"|"rule","content":"可选"}}。要具体、可拒绝，贴合心智里已有记忆，不要重复已有规矩。`,
+        user: `${mind ? formatMindForPrompt(mind) + "\n\n" : ""}等级：Lv.${ctx.level}\n最近用户话：\n${ctx.messages.map((t) => `- ${t.slice(0, 60)}`).join("\n") || "（无）"}`,
         signal: AbortSignal.timeout(20_000),
       });
       return parseEvolveInvent(r.text || "");
@@ -1074,9 +1120,11 @@ const petEvolve = new PetEvolveEngine(home, {
     if (proposal.memory) {
       memory.add(botId, { kind: proposal.memory.kind, content: proposal.memory.content, source: "pet-evolve" });
     }
+    notePetDecision(home, { botId, kind: "evolveAccept", via: "user", note: proposal.title });
     pushPetEvent(botId, { type: "proactive", title: "进化生效", text: `好，我记下了：${proposal.title}` });
   },
   deliver: (botId, proposal) => {
+    notePetDecision(home, { botId, kind: "evolvePropose", via: "model", note: proposal.title });
     pushPetEvent(botId, {
       type: "proactive",
       title: "进化提议",
@@ -1084,6 +1132,32 @@ const petEvolve = new PetEvolveEngine(home, {
     });
   },
 });
+
+/** 聚合一只宠的心智投影（须在 companion/visit/evolve 之后定义） */
+function loadPetMindFor(botId: string): PetMind | null {
+  const bot = store.getBot(botId);
+  if (!bot) return null;
+  const sessions = store.listSessions(botId).filter((s) => /^s-/.test(s.id)).sort((a, b) => b.updatedAt - a.updatedAt).slice(0, 3);
+  const recentUserLines: string[] = [];
+  for (const s of sessions) {
+    for (const m of store.listMessages(s.id).filter((x) => x.role === "user").slice(-4)) {
+      const t = contentText(m.content).trim();
+      if (t) recentUserLines.push(t);
+    }
+  }
+  const q = companion.snapshotQuotas();
+  const pending = petEvolve.listPending(botId)[0];
+  return buildPetMind({
+    bot,
+    xp: store.listPets().find((p) => p.botId === botId)?.xp ?? 0,
+    prefs: readPetPrefs(botId),
+    memories: memory.list(botId),
+    recentUserLines: recentUserLines.reverse().slice(0, 8),
+    affinity: petVisit.affinityOf(botId),
+    pendingEvolveTitle: pending?.title,
+    companionQuotas: { dayCount: q.dayCount, workCount: q.workCount, appearCount: q.appearCount },
+  });
+}
 
 function forgetPetSideState(botId: string) {
   try { petEvolve.forgetBot(botId); } catch { /* ignore */ }
@@ -1507,9 +1581,57 @@ ipcMain.on("pet:drag", (e, phase: "start" | "end") => {
 /** G5.5：宠物成长经验 +n（落盘 pets.json，返回新 xp） */
 function grantPetXp(botId: string, n: number): number {
   const pet = store.listPets().find((p) => p.botId === botId) || { botId, x: 0, y: 0, visible: true };
-  const xp = (pet.xp || 0) + n;
+  const prevXp = pet.xp || 0;
+  const xp = prevXp + n;
   store.savePet({ ...pet, xp });
+  const prevLv = levelFromXp(prevXp);
+  const nextLv = levelFromXp(xp);
+  // 娱乐成长：跨级可顺带提议（不打断工作回合；关 selfEvolve 则只涨 XP/称号）
+  if (nextLv > prevLv) {
+    notePetDecision(home, { botId, kind: "xpLevelUp", via: "system", note: `Lv.${prevLv}→${nextLv}（娱乐成长）` });
+    if (readPetPrefs(botId).selfEvolve && statuses.get(botId)?.state !== "running") {
+      void petEvolve.onLevelUp(botId, nextLv).catch((e) => console.error("[pet-evolve.levelup]", e));
+    }
+  }
   return xp;
+}
+
+/** 娱乐节拍：异步推事件，绝不把 bot 标成 running */
+function schedulePetScript(botId: string, beats: PetBeat[]) {
+  notePetDecision(home, { botId, kind: "script", via: "user", note: `${beats.length} 拍` });
+  void (async () => {
+    const bot = store.getBot(botId);
+    for (const b of beats.slice(0, 6)) {
+      if (b.type === "wait") {
+        await new Promise((r) => setTimeout(r, b.ms));
+        continue;
+      }
+      if (b.type === "action") {
+        const plan = resolveMotion(b.action, {
+          holdSec: b.hold,
+          traits: { blob: bot ? traitsBlob(bot) : "" },
+        });
+        pushPetEvent(botId, { type: "action", action: plan.action, hold: plan.holdSec, motion: plan });
+        await new Promise((r) => setTimeout(r, Math.max(400, (plan.holdSec || 1) * 700)));
+        continue;
+      }
+      if (b.type === "fx") {
+        try { await resolveAndPlayFx(botId, b.phrase); } catch (e) { console.error("[pet-script.fx]", e); }
+        await new Promise((r) => setTimeout(r, 900));
+        continue;
+      }
+      if (b.type === "say") {
+        pushPetEvent(botId, {
+          type: "say",
+          text: b.text,
+          title: b.title || bot?.name || "表演",
+          action: "celebrate",
+          hold: 2,
+        });
+        await new Promise((r) => setTimeout(r, 1100));
+      }
+    }
+  })();
 }
 
 /** 向某 bot 的宠物窗口推送事件（不存在则跳过） */
@@ -1518,6 +1640,7 @@ function pushPetEvent(botId: string, event: {
   sessionId?: string; model?: string; xp?: number;
   peerId?: string; peerName?: string; role?: string;
   action?: string; hold?: number;
+  motion?: ReturnType<typeof resolveMotion>;
   fx?: { id?: string; overlay: string; color?: string; durationMs?: number; label?: string; dir?: string };
 }) {
   const win = petWins.get(botId);
@@ -2165,10 +2288,23 @@ async function executePetIntent(botId: string, intent: PetIntent): Promise<{ han
       return { handled: true, message: `好，先不改：${p.title}` };
     }
     case "act": {
-      pushPetEvent(botId, { type: "action", action: intent.action, hold: intent.holdSec ?? 3 });
+      const plan = resolveMotion(intent.action, {
+        holdSec: intent.holdSec,
+        traits: { blob: traitsBlob(bot) },
+      });
+      pushPetEvent(botId, { type: "action", action: plan.action, hold: plan.holdSec, motion: plan });
+      return { handled: true, message: intent.note };
+    }
+    case "script": {
+      schedulePetScript(botId, intent.beats);
       return { handled: true, message: intent.note };
     }
     case "fx": {
+      const beats = expandPhraseToBeats(intent.phrase);
+      if (beats && beats.length > 1) {
+        schedulePetScript(botId, beats);
+        return { handled: true, message: `好，来一段「${intent.phrase.slice(0, 16)}」～` };
+      }
       const { message } = await resolveAndPlayFx(botId, intent.phrase);
       return { handled: true, message };
     }
@@ -2406,6 +2542,35 @@ ipcMain.handle("config:set", (_e, key: "instructions" | "imageGen" | "prefs", va
 });
 
 ipcMain.handle("pet:prefs", () => readPetPrefs());
+ipcMain.handle("pet:activity", (_e, botId?: string, limit?: number) =>
+  listPetActivity(home, { botId: botId || undefined, limit: limit ?? 30 }));
+ipcMain.handle("pet:mind", (_e, botId: string) => {
+  const mind = loadPetMindFor(botId);
+  return mind ? { ...mind, prompt: formatMindForPrompt(mind) } : null;
+});
+/** 设置页「立即试跑」：忽略空闲/间隔，按已开开关跑一轮陪伴或互访 */
+ipcMain.handle("pet:trial", async (_e, kind?: string) => {
+  const k = kind || "auto";
+  if (k === "visit" || (k === "auto" && readPetPrefs().petVisit)) {
+    const pets = store.listBots().filter((b) => b.petEnabled && isPetShown(b.id));
+    if (pets.length >= 2) {
+      const rec = await runPetVisit(pets[0].id, pets[1].id, true);
+      if (rec) return { ok: true, kind: "visit", message: `${rec.fromName} → ${rec.toName}` };
+    }
+    if (k === "visit") return { ok: false, message: "需要至少两只可见桌宠才能互访" };
+  }
+  if (k === "evolve" || (k === "auto" && readPetPrefs().selfEvolve)) {
+    const p = await petEvolve.tick();
+    if (p) return { ok: true, kind: "evolve", message: p.title };
+    if (k === "evolve") return { ok: false, message: "暂无合适进化提议（可能今天已提过或缺少聊天）" };
+  }
+  const id = await companion.tick({ force: true });
+  if (id) {
+    const b = store.getBot(id);
+    return { ok: true, kind: "companion", message: `${b?.name || id} 已行动` };
+  }
+  return { ok: false, message: "没有可行动的宠（需上台可见，且至少开一项：搭话/做事/换装）" };
+});
 
 registerShareIpc({ appRoot: APP_ROOT, store, groups });
 
@@ -2734,6 +2899,14 @@ ipcMain.handle("workspace:info", (_e, botId: string) => {
 });
 
 registerVoiceIpc({ store, keyCipher, openStoredKey });
+registerRealmIpc({
+  home,
+  store,
+  providers,
+  keyCipher,
+  openStoredKey,
+  getMainWin: () => mainWin,
+});
 ipcMain.handle("messages:list", (_e, sessionId: string) => store.listMessages(sessionId));
 ipcMain.handle("messages:page", (_e, sessionId: string, opts?: { limit?: number; beforeId?: number }) => store.listMessagesPage(sessionId, opts));
 ipcMain.handle("messages:search", (_e, opts?: { q?: string; botId?: string; from?: number; to?: number; limit?: number }) => store.searchMessages(opts));

@@ -56,6 +56,8 @@ export interface EvolveDeps {
   enabled?: () => boolean;
   /** 是否自动接受（prefs.pet.autoEvolve） */
   autoApply?: () => boolean;
+  /** 工作中则跳过——进化是娱乐提议，不打断干活 */
+  isBusy?: (botId: string) => boolean;
   apply: (botId: string, proposal: EvolveProposal) => void;
   /** 有模型时现场发明一条提议；null 则走规则观察 */
   invent?: (bot: Bot, ctx: EvolveInventContext) => Promise<{
@@ -104,6 +106,7 @@ export class PetEvolveEngine {
     if (this.deps.enabled && !this.deps.enabled()) return null;
     const now = this.deps.now?.() ?? Date.now();
     for (const bot of this.deps.bots().filter((b) => b.petEnabled)) {
+      if (this.deps.isBusy?.(bot.id)) continue;
       if (now - (this.state.lastPropose[bot.id] ?? 0) < DAY) continue;
       const proposal = (await this.observeSmart(bot, now)) || this.observe(bot, now);
       if (!proposal) continue;
@@ -169,6 +172,31 @@ export class PetEvolveEngine {
     p.status = "rejected";
     writeJsonAtomic(this.file, this.state);
     return p;
+  }
+
+  /**
+   * XP 跨级时的娱乐钩子：若今日尚未提议且有聊天素材，顺带观察一条。
+   * 不阻塞宿主；工作中直接跳过。
+   */
+  async onLevelUp(botId: string, level: number): Promise<EvolveProposal | null> {
+    if (this.deps.enabled && !this.deps.enabled()) return null;
+    if (this.deps.isBusy?.(botId)) return null;
+    const bot = this.deps.bots().find((b) => b.id === botId);
+    if (!bot?.petEnabled) return null;
+    const now = this.deps.now?.() ?? Date.now();
+    if (now - (this.state.lastPropose[bot.id] ?? 0) < DAY) return null;
+    // 临时把一条「升级」线索塞进 observeSmart 的 messages 语境：通过 invent user 侧已有 level
+    const proposal = (await this.observeSmart(bot, now)) || null;
+    if (!proposal) return null;
+    proposal.detail = `（Lv.${level} 娱乐成长）` + proposal.detail;
+    this.state.lastPropose[bot.id] = now;
+    this.state.seen[proposal.id] = now;
+    this.state.seen[`t:${hash(proposal.title)}`] = now;
+    this.state.proposals.push(proposal);
+    writeJsonAtomic(this.file, this.state);
+    if (this.deps.autoApply?.()) this.accept(proposal.id);
+    else this.deps.deliver(bot.id, proposal);
+    return proposal;
   }
 
   /** 用户说「好 / 接受进化」时，取该 bot 最近一条 pending */

@@ -520,7 +520,7 @@ export class BotRuntime {
       });
     }
     R.registerPrefix("app.", "查看软件现状 app.state（bot、群聊、定时任务、编排、项目、技能、模型的完整清单）；改自己资料、切模型、建 bot/群", (ctx) => this.appTool(ctx.bot, ctx.tool, ctx.args));
-    R.registerPrefix("pet.", "桌宠工具（status/list/skin/act/say/fx/search/install/generate/show/hide/disable/prefs/evolve/visits/remind/visit/create）。细则见各工具说明；用户谈桌宠时系统会附操作手册", (ctx) => this.petTool(ctx.bot, ctx.tool, ctx.args));
+    R.registerPrefix("pet.", "桌宠娱乐工具（status/list/mind/activity/skin/act/say/fx/search/install/generate/show/hide/disable/prefs/evolve/visits/remind/visit/create）。桌宠不代替干活；用户谈桌宠时附手册", (ctx) => this.petTool(ctx.bot, ctx.tool, ctx.args));
     R.registerPrefix("plan.", "编排计划 plan.start（让几个 bot 按阶段接力）/ plan.list / plan.cancel", (ctx) => this.planTool(ctx.bot, ctx.tool, ctx.args, ctx.depth, ctx.sessionId, turn(ctx)));
     R.registerPrefix("skill.", "技能管理 skill.list / skill.get(key) / skill.save(name, description, instructions, key?) / skill.update(key, append?: 新规范数组, replace?: [{find, with}] 改掉冲突的旧规则) / skill.delete(key)", (ctx) => this.appTool(ctx.bot, ctx.tool, ctx.args));
 
@@ -615,7 +615,7 @@ export class BotRuntime {
   /** 画图 / 改图：结果存进 bot 工作区并作为图片附在回复里 */
   private async imageTool(bot: Bot, tool: string, args: Record<string, unknown>, sessionId: string | undefined, turn: TurnCtx): Promise<ToolOutcome> {
     const cfg = this.deps.imageConfig?.();
-    if (!cfg) return { output: "❌ 还没配置图片生成接口。请告诉用户去 [图片生成设置](app:settings/image) 填一个接口（如 SiliconFlow 的 Kwai-Kolors/Kolors，或 OpenAI 的 gpt-image-1）" };
+    if (!cfg) return { output: "❌ 还没配置图片生成接口。请告诉用户去 [图片生成设置](app:settings/image) 填任意 OpenAI 兼容的 Base URL / Key / 模型名" };
     const prompt = String(args.prompt ?? args.description ?? "").trim();
     if (!prompt) return { output: `${tool} 需要 prompt（画面描述）` };
     const outDir = join(this.workspaceOf(bot) ?? join(homedir(), "Downloads"), "images");
@@ -1093,13 +1093,35 @@ export class BotRuntime {
         const r = await host.visit(bot.id, target.id);
         return { output: r.ok ? r.line : `❌ ${r.error}` };
       }
+      case "pet.mind": {
+        if (!host.mind) return { output: "❌ 心智投影未就绪" };
+        const q = str("name") ?? str("bot");
+        const target = q && !isSelfQuery(q) ? find(q) : bot;
+        if (!target) return { output: `找不到「${q}」` };
+        const r = host.mind(target.id);
+        if (!r.ok) return { output: `❌ ${r.error}` };
+        return { output: `【桌宠心智 · 娱乐只读】\n${r.prompt}` };
+      }
+      case "pet.activity": {
+        if (!host.activity) return { output: "❌ 活动日志未就绪" };
+        const q = str("name") ?? str("bot");
+        const targetId = q && !isSelfQuery(q) ? find(q)?.id : bot.id;
+        const rows = host.activity(targetId, args.limit != null ? Number(args.limit) : 12);
+        if (!rows.length) return { output: "还没有桌宠自主行动记录（娱乐向；开智能开关后才会有）。" };
+        return {
+          output: [
+            "【桌宠活动 · 娱乐】",
+            ...rows.map((a) => `- ${new Date(a.at).toLocaleString()} · ${a.via} · ${a.kind}${a.blocked ? "（未执行）" : ""}：${a.note}`),
+          ].join("\n"),
+        };
+      }
       case "pet.act": {
         if (!host.act) return { output: "❌ 动作未就绪" };
         const action = (str("action") ?? str("act") ?? str("motion") ?? "").toLowerCase();
-        if (!action) return { output: "pet.act 需要 action（idle/walk/jump/sleep/celebrate/work/think）" };
+        if (!action) return { output: "pet.act 需要 action（idle/walk/jump/sleep/celebrate/work/think）；这是娱乐表演，不代替真正干活" };
         const hold = args.hold != null ? Number(args.hold) : args.seconds != null ? Number(args.seconds) : undefined;
         const r = host.act(bot.id, action, Number.isFinite(hold) ? hold : undefined);
-        return { output: r.ok ? `已做动作：${r.action}` : `❌ ${r.error}` };
+        return { output: r.ok ? `已做娱乐动作：${r.action}` : `❌ ${r.error}` };
       }
       case "pet.say": {
         if (!host.say) return { output: "❌ 气泡说话未就绪" };

@@ -119,11 +119,17 @@ export interface RuntimeDeps {
       { ok: true; title: string; status: string } | { ok: false; error: string };
     /** 纯宠物闹钟（气泡提醒，不跑对话） */
     remind?: (botId: string, delayMs: number, text: string) => { ok: true; at: number } | { ok: false; error: string };
-    /** 让桌宠做动作：idle/walk/jump/sleep/celebrate/work/think */
+    /** 让桌宠做动作：idle/walk/jump/sleep/celebrate/work/think（娱乐，不占工作回合） */
     act?: (botId: string, action: string, holdSec?: number) => { ok: true; action: string } | { ok: false; error: string };
     /** 气泡说一句（不跑整轮对话）；可选顺带做动作 */
     say?: (botId: string, text: string, opts?: { title?: string; action?: string; holdSec?: number }) =>
       { ok: true } | { ok: false; error: string };
+    /** 只读心智投影（娱乐调试） */
+    mind?: (botId: string) => { ok: true; mind: unknown; prompt: string } | { ok: false; error: string };
+    /** 最近自主行动日志 */
+    activity?: (botId?: string, limit?: number) => Array<{ at: number; botId: string; kind: string; via: string; note: string; blocked?: boolean }>;
+    /** 播放娱乐节拍脚本（异步，不标 running） */
+    playScript?: (botId: string, beats: unknown[]) => { ok: true; ms: number } | { ok: false; error: string };
     /**
      * 叠加特效（不改皮肤，可还原）。phrase 可「放出龟派气功」——命中或新建自定义配方。
      * action=list|play|pin|unpin|forget|gc

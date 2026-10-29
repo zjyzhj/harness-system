@@ -105,8 +105,8 @@ describe("pet-effects", () => {
 describe("pet-director fx/act", () => {
   test("放出龟派气功", () => {
     const i = parsePetIntent({ text: "放出龟派气功", skins: [] });
-    expect(i.type).toBe("fx");
-    if (i.type === "fx") expect(i.phrase).toContain("龟派气功");
+    expect(i.type).toBe("script");
+    if (i.type === "script") expect(i.beats.some((b) => b.type === "fx")).toBe(true);
   });
 
   test("跳一下", () => {

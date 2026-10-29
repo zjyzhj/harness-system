@@ -276,6 +276,7 @@ async function openOwnSession() {
 }
 
 async function selectBot(b) {
+  if (typeof leaveRealm === "function" && typeof realmPresence !== "undefined" && realmPresence) leaveRealm({ silent: true });
   currentBot = b;
   currentGroup = null;
   currentSession = null;

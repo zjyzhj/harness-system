@@ -122,9 +122,10 @@ async function settingsFlow() {
 
 /* ---- 图片生成接口（image.generate / image.edit 用） ---- */
 const IMAGE_PRESETS = {
+  custom: { name: "自定义", baseUrl: "", model: "", editModel: "" },
+  openai: { name: "OpenAI", baseUrl: "https://api.openai.com/v1", model: "gpt-image-1", editModel: "gpt-image-1" },
   siliconflow_cn: { name: "SiliconFlow 国内", baseUrl: "https://api.siliconflow.cn/v1", model: "Kwai-Kolors/Kolors", editModel: "Qwen/Qwen-Image-Edit-2509" },
   siliconflow: { name: "SiliconFlow 国际", baseUrl: "https://api.siliconflow.com/v1", model: "Tongyi-MAI/Z-Image-Turbo", editModel: "Qwen/Qwen-Image-Edit" },
-  openai: { name: "OpenAI", baseUrl: "https://api.openai.com/v1", model: "gpt-image-1", editModel: "gpt-image-1" },
 };
 async function renderImageGen(box, editing = false) {
   const cfg = await api.config.get("imageGen");
@@ -132,22 +133,22 @@ async function renderImageGen(box, editing = false) {
     box.innerHTML = `<div class="d-sec"><h4>图片生成</h4>
       <div class="d-card"><span class="ws-dot ${cfg?.baseUrl ? "ok" : ""}"></span>
         <div class="c-main"><div class="c-title">${cfg?.baseUrl ? esc(cfg.model) : "未配置"}</div>
-          <div class="c-sub">${cfg?.baseUrl ? `${esc(cfg.baseUrl)}${cfg.editModel ? ` · 改图 ${esc(cfg.editModel)}` : ""}` : "配置后 bot 可以画图、改图（image.generate / image.edit）"}</div></div>
+          <div class="c-sub">${cfg?.baseUrl ? `${esc(cfg.baseUrl)}${cfg.editModel ? ` · 改图 ${esc(cfg.editModel)}` : ""}` : "任意 OpenAI 兼容 /images/generations；预设只是快捷填充"}</div></div>
         <button class="ghost-btn" id="ig-edit">${cfg?.baseUrl ? "编辑" : "配置"}</button>
       </div></div>`;
     box.querySelector("#ig-edit").onclick = () => renderImageGen(box, true);
     return;
   }
   box.innerHTML = `<div class="d-sec mx-form"><h4>图片生成接口</h4>
+    <div class="hint">不限供应商：填该服务的 Base URL、Key、模型名即可（协议兼容 OpenAI <code>/images/generations</code>；改图另可走 <code>/images/edits</code>）。下面预设仅快捷填表。</div>
     <div class="mx-seg">${Object.entries(IMAGE_PRESETS).map(([k, v]) => `<button data-preset="${k}">${v.name}</button>`).join("")}</div>
     <div class="mx-grid">
-      <label>Base URL</label><input id="ig-url" value="${esc(cfg?.baseUrl ?? "")}" placeholder="https://api.siliconflow.com/v1" />
+      <label>Base URL</label><input id="ig-url" value="${esc(cfg?.baseUrl ?? "")}" placeholder="https://你的中转或官方/v1" />
       <label>API Key</label><input id="ig-key" type="password" placeholder="${cfg?.apiKey ? "已保存，留空不修改" : "sk-..."}" />
-      <label>生成模型</label><input id="ig-model" value="${esc(cfg?.model ?? "")}" placeholder="Tongyi-MAI/Z-Image-Turbo" />
+      <label>生成模型</label><input id="ig-model" value="${esc(cfg?.model ?? "")}" placeholder="供应商提供的模型 id" />
       <label>改图模型</label><input id="ig-edit-model" value="${esc(cfg?.editModel ?? "")}" placeholder="可选，不填用生成模型" />
       <label>尺寸</label><input id="ig-size" value="${esc(cfg?.size ?? "")}" placeholder="默认 1024x1024" />
     </div>
-    <div class="hint">兼容 OpenAI /images/generations。国内站用 .cn + Kolors；国际站（cloud.siliconflow.com 的 key）用 .com + Z-Image-Turbo / Qwen-Image。</div>
     <div class="actions">${cfg?.baseUrl ? `<button class="ghost-btn danger-text" id="ig-clear">清除</button>` : ""}<button class="ghost-btn" id="ig-cancel">取消</button><button class="primary-btn" id="ig-save">保存</button></div>
   </div>`;
   const $b = (s) => box.querySelector(s);
@@ -184,9 +185,10 @@ async function renderUsage(box) {
 
 /* ---- 语义回想（记忆 + 过往对话的向量检索） ---- */
 const EMBED_PRESETS = {
+  custom: { name: "自定义", baseUrl: "", model: "" },
+  openai: { name: "OpenAI", baseUrl: "https://api.openai.com/v1", model: "text-embedding-3-small" },
   siliconflow_cn: { name: "SiliconFlow 国内", baseUrl: "https://api.siliconflow.cn/v1", model: "BAAI/bge-m3" },
   siliconflow: { name: "SiliconFlow 国际", baseUrl: "https://api.siliconflow.com/v1", model: "BAAI/bge-m3" },
-  openai: { name: "OpenAI", baseUrl: "https://api.openai.com/v1", model: "text-embedding-3-small" },
 };
 async function renderEmbedding(box, editing = false) {
   const cfg = await api.embedding.get().catch(() => ({ mode: "local" }));
@@ -199,7 +201,7 @@ async function renderEmbedding(box, editing = false) {
     box.innerHTML = `<div class="d-sec"><h4>语义回想</h4>
       <div class="d-card"><span class="ws-dot ${cfg.mode === "off" || st?.error ? "" : st && st.indexed < st.total ? "on" : "ok"}"></span>
         <div class="c-main"><div class="c-title">${esc(modeName)}</div>
-          <div class="c-sub">${esc(stateText)}。bot 会按意思想起相关的记忆和过往对话${cfg.mode === "local" ? "；首次使用自动下载约 120MB 模型，之后离线" : ""}</div></div>
+          <div class="c-sub">${esc(stateText)}。bot 会按意思想起相关的记忆和过往对话${cfg.mode === "local" ? "；首次使用自动下载约 120MB 模型，之后离线" : cfg.mode === "api" && cfg.baseUrl ? ` · ${esc(cfg.baseUrl)}` : ""}。在线模式任意 OpenAI 兼容 /embeddings</div></div>
         <button class="ghost-btn" id="em-edit">修改</button>
       </div></div>`;
     box.querySelector("#em-edit").onclick = () => renderEmbedding(box, true);
@@ -208,13 +210,14 @@ async function renderEmbedding(box, editing = false) {
   box.innerHTML = `<div class="d-sec mx-form"><h4>语义回想</h4>
     <div class="mx-seg" id="em-mode">${[["local", "本地模型"], ["api", "在线接口"], ["off", "关闭"]].map(([v, l]) => `<button data-mode="${v}" class="${cfg.mode === v ? "on" : ""}">${l}</button>`).join("")}</div>
     <div id="em-api" style="display:${cfg.mode === "api" ? "block" : "none"}">
+      <div class="hint">不限供应商：填该服务的 Base URL、Key、向量模型即可（协议兼容 OpenAI <code>/embeddings</code>）。下面预设仅快捷填表。</div>
       <div class="mx-seg">${Object.entries(EMBED_PRESETS).map(([k, v]) => `<button data-preset="${k}">${v.name}</button>`).join("")}</div>
       <div class="mx-grid">
-        <label>Base URL</label><input id="em-url" value="${esc(cfg.baseUrl ?? "")}" placeholder="https://api.siliconflow.cn/v1" />
+        <label>Base URL</label><input id="em-url" value="${esc(cfg.baseUrl ?? "")}" placeholder="https://你的中转或官方/v1" />
         <label>API Key</label><input id="em-key" type="password" placeholder="${cfg.apiKey ? "已保存，留空不修改" : "sk-..."}" />
-        <label>向量模型</label><input id="em-model" value="${esc(cfg.model ?? "")}" placeholder="BAAI/bge-m3" />
+        <label>向量模型</label><input id="em-model" value="${esc(cfg.model ?? "")}" placeholder="供应商提供的 embedding 模型 id" />
       </div>
-      <div class="hint">兼容 OpenAI /embeddings。保存时会先测试一次连接；换模型后会在后台重建索引。</div>
+      <div class="hint">保存时会先测试一次连接；换模型后会在后台重建索引。</div>
     </div>
     <div class="pf-result" id="em-result"></div>
     <div class="actions"><button class="ghost-btn" id="em-cancel">取消</button><button class="primary-btn" id="em-save">保存</button></div>
@@ -229,11 +232,17 @@ async function renderEmbedding(box, editing = false) {
   box.querySelectorAll("[data-preset]").forEach((btn) => (btn.onclick = () => {
     const p = EMBED_PRESETS[btn.dataset.preset];
     $b("#em-url").value = p.baseUrl; $b("#em-model").value = p.model;
+    box.querySelectorAll("[data-preset]").forEach((x) => x.classList.toggle("on", x === btn));
   }));
   $b("#em-cancel").onclick = () => renderEmbedding(box);
   $b("#em-save").onclick = async () => {
     const key = $b("#em-key").value.trim();
     const res = $b("#em-result");
+    if (mode === "api") {
+      const baseUrl = $b("#em-url").value.trim(), model = $b("#em-model").value.trim();
+      if (!baseUrl || !model) return alert("填 Base URL 和向量模型");
+      if (!key && !cfg.apiKey) return alert("填 API Key");
+    }
     res.textContent = mode === "api" ? "测试连接中…" : "保存中…";
     try {
       await api.embedding.set({ mode, baseUrl: $b("#em-url").value.trim(), model: $b("#em-model").value.trim(), apiKey: key || (cfg.apiKey ? "__keep__" : "") });
@@ -1113,31 +1122,51 @@ async function petSmartFlow() {
   const modal = sheet({
     icon: "🐾",
     title: "桌面宠物智能",
-    sub: "默认只保留基础桌宠（对话、换装、任务气泡）。进阶能力全关，按需打开。",
+    sub: "桌宠是娱乐层，不干扰 bot 干活。进阶能力按需打开；打开后模型带着记忆表演，规则只兜底。",
     wide: true,
   });
   const body = modal.querySelector(".mx-body");
+  const viaLabel = (v) => (v === "model" ? "模型" : v === "rule" ? "规则" : v === "user" ? "你" : "系统");
   const render = async () => {
-    const p = await api.pet.prefs();
+    const [p, activity] = await Promise.all([
+      api.pet.prefs(),
+      api.pet.activity(undefined, 12).catch(() => []),
+    ]);
+    const actHtml = activity.length
+      ? activity.map((a) => {
+          const t = new Date(a.at).toLocaleString();
+          const block = a.blocked ? " · 未执行" : "";
+          return `<div class="hud-row" style="font-size:12px;margin:4px 0"><span>${t} · ${viaLabel(a.via)} · ${a.kind}${block}</span><b style="font-weight:500;max-width:55%;text-align:right">${esc(a.note || "")}</b></div>`;
+        }).join("")
+      : `<div class="hint">还没有自主行动记录。打开开关后点「立即试跑」，或等空闲触发。</div>`;
     body.innerHTML = `
       <div class="d-sec"><h4>进阶能力（默认全关）</h4>
-        <div class="hint">基础能力始终可用：上台、气泡对话、回复/任务提醒、手动换装、XP。进阶项有模型时优先让 AI 发挥，没模型才用规则兜底。对某只宠说「安静一点」只影响那一只。</div>
-        <div class="d-card"><div class="c-main"><div class="c-title">空闲搭话</div><div class="c-sub">闲着时主动说一句（会打模型；无模型用模板）</div></div>
+        <div class="hint">开了会读人设/记忆/最近对话再行动；同宠间隔≈「空闲多久」分钟，不再干等数小时。基础：上台、气泡、任务提醒、手动换装、XP 始终可用。</div>
+        <div class="d-card"><div class="c-main"><div class="c-title">空闲搭话</div><div class="c-sub">闲着时按记忆主动说一句（模型优先）</div></div>
           <label class="switch"><input type="checkbox" data-k="companionChat" ${p.companionChat ? "checked" : ""}/><span></span></label></div>
         <div class="d-card"><div class="c-main"><div class="c-title">主动跟进</div><div class="c-sub">悬而未决的事轻推一句（会打模型）</div></div>
           <label class="switch"><input type="checkbox" data-k="proactiveFollowup" ${p.proactiveFollowup ? "checked" : ""}/><span></span></label></div>
-        <div class="d-card"><div class="c-main"><div class="c-title">空闲做事</div><div class="c-sub">自己做一件只读小事并汇报（会打模型）</div></div>
+        <div class="d-card"><div class="c-main"><div class="c-title">空闲做事</div><div class="c-sub">只读观察未完成事项并汇报（模型 + 心智）</div></div>
           <label class="switch"><input type="checkbox" data-k="idleWork" ${p.idleWork ? "checked" : ""}/><span></span></label></div>
-        <div class="d-card"><div class="c-main"><div class="c-title">自动换装</div><div class="c-sub">按近期话题让模型从候选里选形象；可说「换回去」</div></div>
+        <div class="d-card"><div class="c-main"><div class="c-title">自动换装</div><div class="c-sub">按话题与心智从候选选形象；可说「换回去」</div></div>
           <label class="switch"><input type="checkbox" data-k="autoAppearance" ${p.autoAppearance ? "checked" : ""}/><span></span></label></div>
         <div class="d-card"><div class="c-main"><div class="c-title">允许召唤/创建桌宠</div><div class="c-sub">权限闸门：对话里可「把某某叫出来 / 再做一个伙伴」</div></div>
           <label class="switch"><input type="checkbox" data-k="agentMaySpawn" ${p.agentMaySpawn ? "checked" : ""}/><span></span></label></div>
-        <div class="d-card"><div class="c-main"><div class="c-title">自进化提议</div><div class="c-sub">模型观察聊天后提议改习惯/人设；你回「好」才变</div></div>
+        <div class="d-card"><div class="c-main"><div class="c-title">自进化提议</div><div class="c-sub">观察聊天后提议改习惯/人设；回「好」才变</div></div>
           <label class="switch"><input type="checkbox" data-k="selfEvolve" ${p.selfEvolve ? "checked" : ""}/><span></span></label></div>
         <div class="d-card"><div class="c-main"><div class="c-title">自动接受进化</div><div class="c-sub">需先开「自进化提议」；开了则提议自动生效</div></div>
           <label class="switch"><input type="checkbox" data-k="autoEvolve" ${p.autoEvolve ? "checked" : ""}/><span></span></label></div>
-        <div class="d-card"><div class="c-main"><div class="c-title">多宠互访</div><div class="c-sub">串门台词由模型按人设发挥；关则 pet.visit 不可用</div></div>
+        <div class="d-card"><div class="c-main"><div class="c-title">多宠互访</div><div class="c-sub">按亲密度选伴，台词带人设与共同记忆</div></div>
           <label class="switch"><input type="checkbox" data-k="petVisit" ${p.petVisit ? "checked" : ""}/><span></span></label></div>
+      </div>
+      <div class="d-sec"><h4>立即试跑</h4>
+        <div class="hint">跳过「空闲多久」等待，用当前已开开关立刻跑一轮，方便验证聪不聪明。</div>
+        <div class="actions" style="flex-wrap:wrap;gap:8px">
+          <button class="primary-btn" id="pp-trial">按已开开关试跑</button>
+          <button class="ghost-btn" id="pp-trial-visit" ${p.petVisit ? "" : "disabled"}>试互访</button>
+          <button class="ghost-btn" id="pp-trial-evolve" ${p.selfEvolve ? "" : "disabled"}>试进化提议</button>
+        </div>
+        <div class="hint" id="pp-trial-msg"></div>
       </div>
       <div class="d-sec mx-form"><h4>节奏</h4>
         <div class="mx-grid">
@@ -1148,12 +1177,32 @@ async function petSmartFlow() {
         </div>
         <div class="actions"><button class="primary-btn" id="pp-save">保存节奏</button></div>
       </div>
-      <div class="hint">气泡里可直接说：换成咕嘎 / 安静一点 / 半小时后提醒我喝水 / 生成一只橘猫</div>`;
+      <div class="d-sec"><h4>最近自主行动</h4>
+        ${actHtml}
+        <div class="actions" style="margin-top:8px"><button class="ghost-btn" id="pp-refresh-act">刷新</button></div>
+      </div>
+      <div class="hint">气泡里可说：换成咕嘎 / 安静一点 / 半小时后提醒我喝水 / 画个球</div>`;
     body.querySelectorAll("input[data-k]").forEach((el) => {
       el.onchange = async () => {
         await api.config.set("prefs", { pet: { [el.dataset.k]: el.checked } });
+        await render();
       };
     });
+    const runTrial = async (kind) => {
+      const msg = body.querySelector("#pp-trial-msg");
+      msg.textContent = "试跑中…";
+      try {
+        const r = await api.pet.trial(kind);
+        msg.textContent = r.ok ? `✓ ${r.message}` : `✗ ${r.message}`;
+        setTimeout(() => render(), 600);
+      } catch (e) {
+        msg.textContent = "✗ " + (e.message || e);
+      }
+    };
+    body.querySelector("#pp-trial").onclick = () => runTrial("auto");
+    body.querySelector("#pp-trial-visit").onclick = () => runTrial("visit");
+    body.querySelector("#pp-trial-evolve").onclick = () => runTrial("evolve");
+    body.querySelector("#pp-refresh-act").onclick = () => render();
     body.querySelector("#pp-save").onclick = async () => {
       await api.config.set("prefs", {
         pet: {
@@ -1186,4 +1235,5 @@ $("#sysaccess-btn").onclick = sysaccessFlow;
 $("#env-btn").onclick = () => envFlow();
 $("#mcp-btn").onclick = mcpFlow;
 $("#pet-smart-btn").onclick = petSmartFlow;
+$("#realm-btn").onclick = () => { $("#more-menu").classList.add("hidden"); realmListFlow(); };
 $("#send-btn").onclick = send;
