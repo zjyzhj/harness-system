@@ -143,10 +143,17 @@ export class PromptBuilder {
     const who = (id?: string) => (id ? (id === bot.id ? "你" : this.deps.store.getBot(id)?.name ?? "用户") : "用户");
     const envLines = env.map((e) => `  - ${e.key}=${e.value.length > 120 ? `${e.value.slice(0, 120)}…` : e.value}${e.label ? `（${e.label}）` : ""}${e.note ? `：${e.note}` : ""}${e.botId ? "" : " [所有 bot 共用]"}`);
     const secretLines = secrets.map((s) => `  - ${s.name}${s.label && s.label !== s.name ? `（${s.label}）` : ""}${s.note ? `：${s.note}` : ""}${s.botId ? "" : " [所有 bot 共用]"} · ${who(s.savedBy)}在 ${new Date(s.savedAt).toISOString().slice(0, 10)} 配置`);
+    const agentBits = [
+      bot.agentCwd ? `默认工程 agentCwd=${bot.agentCwd}` : "",
+      bot.agentCli ? `偏好 Coding CLI=${bot.agentCli}` : "",
+    ].filter(Boolean);
     const config = [
       `【已配置的环境】用户给过的配置都存在这里，重启后还在；需要时直接用，不要再问用户要。查看 / 修改：[环境配置](app:settings/env)`,
       envLines.length ? `- 环境变量（bash.run 执行时自动注入，命令里直接写 $KEY）：\n${envLines.join("\n")}` : "- 环境变量：还没有",
       secretLines.length ? `- 密钥（加密保存，你看不到值；bash.run 里写 $NAME，其它工具参数里写 {{secret:NAME}}）：\n${secretLines.join("\n")}` : "- 密钥：还没有",
+      agentBits.length
+        ? `- 写代码派工（cli.agent）：${agentBits.join("；")}。有 agentCwd 时调 cli.agent 可省略 cwd；改默认用 app.updateSelf（agentCwd / agentCli）。`
+        : "- 写代码派工：尚未绑定默认工程；首次 cli.agent 请传 cwd，或 env.set PROJECT_ROOT。",
       "用户给你接口地址、账号名、项目 ID 这类普通配置时用 env.set 存；密码 / Token / Secret 用 ui.secret 让用户加密填写，不要明文存，也不要让用户发在聊天里。配置有变化就更新原来那项。\n用户刚给完配置或密钥（用户说已在加密框里填好，或 env.set 成功）后，如果能低成本验证（如调一次只读接口、登录测试），用 bash.run 验证一次并告诉用户结果；验证失败就说明原因，请用户检查后用 ui.secret（overwrite:true）或 env.set 更新。",
     ].join("\n");
 

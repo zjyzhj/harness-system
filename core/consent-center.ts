@@ -1,4 +1,5 @@
-import { join } from "node:path";
+import { existsSync, realpathSync } from "node:fs";
+import { join, relative, resolve, sep } from "node:path";
 import { readJsonSafe, writeJsonAtomic } from "./atomic-fs";
 
 /**
@@ -37,6 +38,18 @@ export interface ConsentRequest {
   onceOnly?: boolean;
   /** 为什么要单独确认，显示在卡片上 */
   reasons?: string[];
+  /**
+   * G10：Coding CLI 派工目录。有值时卡片多「总是允许此目录」；
+   * 选 allow-command 时按此前缀记住，二次同前缀可免弹窗（仍可要求危险确认文案）。
+   */
+  rememberPath?: string;
+}
+
+export interface CliAgentPathGrant {
+  botId: string;
+  /** realpath 前缀 */
+  prefix: string;
+  createdAt: number;
 }
 
 export type ConsentDecision = "allow" | "allow-once" | "allow-command" | "deny";
@@ -83,6 +96,7 @@ export class ConsentCenter {
   private rulesFile: string;
   private rules: CommandRule[] = [];
   private trusted = new Set<string>();
+  private cliPaths: CliAgentPathGrant[] = [];
 
   constructor(private home: string) {
     this.file = join(home, "consent.json");
@@ -93,15 +107,16 @@ export class ConsentCenter {
   private load() {
     const grants = readJsonSafe<Grant[]>(this.file, []);
     if (Array.isArray(grants)) for (const g of grants) if (g?.botId && g.cap) this.grants.set(`${g.botId}:${g.cap}`, g);
-    const raw = readJsonSafe<{ rules?: CommandRule[]; trusted?: string[] }>(this.rulesFile, {});
+    const raw = readJsonSafe<{ rules?: CommandRule[]; trusted?: string[]; cliAgentPaths?: CliAgentPathGrant[] }>(this.rulesFile, {});
     this.rules = (Array.isArray(raw.rules) ? raw.rules : []).filter((r) => r?.command && r.botId && (r.decision === "allow" || r.decision === "deny"));
     this.trusted = new Set(Array.isArray(raw.trusted) ? raw.trusted : []);
+    this.cliPaths = (Array.isArray(raw.cliAgentPaths) ? raw.cliAgentPaths : []).filter((p) => p?.botId && p?.prefix);
   }
   private persist() {
     writeJsonAtomic(this.file, [...this.grants.values()]);
   }
   private persistRules() {
-    writeJsonAtomic(this.rulesFile, { rules: this.rules, trusted: [...this.trusted] });
+    writeJsonAtomic(this.rulesFile, { rules: this.rules, trusted: [...this.trusted], cliAgentPaths: this.cliPaths });
   }
 
   /** 主动授权 */
@@ -190,6 +205,89 @@ export class ConsentCenter {
 
   trustedBots(): string[] {
     return [...this.trusted];
+  }
+
+  // ---- G10：cli.agent 目录前缀信任 ----
+
+  private normalizePrefix(cwd: string): string {
+    const abs = resolve(cwd.trim());
+    try {
+      if (existsSync(abs)) return realpathSync(abs);
+      // 路径尚不存在时：对已有祖先做 realpath，避免 macOS /var → /private/var 与前缀对不上
+      let cur = abs;
+      while (true) {
+        const parent = resolve(cur, "..");
+        if (parent === cur) return abs;
+        if (existsSync(parent)) {
+          const realParent = realpathSync(parent);
+          const rel = relative(parent, abs);
+          return rel ? join(realParent, rel) : realParent;
+        }
+        cur = parent;
+      }
+    } catch {
+      return abs;
+    }
+  }
+
+  /** cwd 是否落在该 bot 已信任的前缀下 */
+  hasCliAgentPath(botId: string, cwd: string): boolean {
+    const real = this.normalizePrefix(cwd);
+    return this.cliPaths.some(
+      (p) => p.botId === botId && (real === p.prefix || real.startsWith(p.prefix + sep)),
+    );
+  }
+
+  grantCliAgentPath(botId: string, cwd: string): CliAgentPathGrant {
+    const prefix = this.normalizePrefix(cwd);
+    this.cliPaths = this.cliPaths.filter((p) => !(p.botId === botId && p.prefix === prefix));
+    const g: CliAgentPathGrant = { botId, prefix, createdAt: Date.now() };
+    this.cliPaths.push(g);
+    this.persistRules();
+    return g;
+  }
+
+  revokeCliAgentPath(botId: string, cwd?: string) {
+    if (!cwd) this.cliPaths = this.cliPaths.filter((p) => p.botId !== botId);
+    else {
+      const prefix = this.normalizePrefix(cwd);
+      this.cliPaths = this.cliPaths.filter((p) => !(p.botId === botId && (p.prefix === prefix || prefix.startsWith(p.prefix + sep) || p.prefix.startsWith(prefix + sep))));
+    }
+    this.persistRules();
+  }
+
+  listCliAgentPaths(botId?: string): CliAgentPathGrant[] {
+    return botId ? this.cliPaths.filter((p) => p.botId === botId) : [...this.cliPaths];
+  }
+
+  /**
+   * cli.agent 专用：已信任前缀则直接放行；否则弹窗，可选「总是允许此目录」。
+   * 不用整 cap 的长期 grant（避免一次批准任意路径）。
+   */
+  async requestCliAgent(
+    botId: string,
+    cwd: string,
+    description: string,
+    opts?: { reasons?: string[] },
+  ): Promise<{ granted: boolean; remembered?: boolean }> {
+    const prefix = this.normalizePrefix(cwd);
+    if (this.hasCliAgentPath(botId, prefix)) return { granted: true };
+    if (!this.decider) return { granted: false };
+    const decision = await this.decider({
+      botId,
+      cap: "cli:agent",
+      description,
+      requiresStrongConsent: true,
+      rememberPath: prefix,
+      reasons: opts?.reasons,
+    });
+    if (decision === "deny") return { granted: false };
+    // 仅「总是允许此目录」(allow-command) 写入前缀信任；批准一次不记
+    if (decision === "allow-command") {
+      this.grantCliAgentPath(botId, prefix);
+      return { granted: true, remembered: true };
+    }
+    return { granted: true };
   }
 
   /**

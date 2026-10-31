@@ -287,3 +287,57 @@ describe("命令快速授权", () => {
     expect(() => c2.setCommandRule("a", "cursor --help", "allow")).toThrow();
   });
 });
+
+describe("G10 cli.agent 目录前缀信任", () => {
+  test("allow-command 记住前缀；allow-once 不记；子路径命中", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "harness-cli-path-"));
+    const proj = mkdtempSync(join(tmpdir(), "proj-"));
+    const c = new ConsentCenter(dir);
+    let last: string | undefined;
+    c.decider = (req) => {
+      last = req.rememberPath;
+      return "allow-once";
+    };
+    const once = await c.requestCliAgent("bot-g10", proj, "派工一次");
+    expect(once.granted).toBe(true);
+    expect(once.remembered).toBeFalsy();
+    expect(last).toBeTruthy();
+    expect(c.hasCliAgentPath("bot-g10", proj)).toBe(false);
+
+    c.decider = () => "allow-command";
+    const rem = await c.requestCliAgent("bot-g10", proj, "记住目录");
+    expect(rem.granted).toBe(true);
+    expect(rem.remembered).toBe(true);
+    expect(c.hasCliAgentPath("bot-g10", proj)).toBe(true);
+    expect(c.hasCliAgentPath("bot-g10", join(proj, "src"))).toBe(true);
+
+    let asked = 0;
+    c.decider = () => {
+      asked++;
+      return "deny";
+    };
+    const again = await c.requestCliAgent("bot-g10", join(proj, "src"), "同前缀");
+    expect(again.granted).toBe(true);
+    expect(asked).toBe(0);
+
+    c.revokeCliAgentPath("bot-g10", proj);
+    expect(c.hasCliAgentPath("bot-g10", proj)).toBe(false);
+    const denied = await c.requestCliAgent("bot-g10", proj, "已撤销");
+    expect(denied.granted).toBe(false);
+    expect(asked).toBe(1);
+
+    const c2 = new ConsentCenter(dir);
+    expect(c2.listCliAgentPaths("bot-g10")).toEqual([]);
+  });
+
+  test("目录信任持久化", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "harness-cli-path-p-"));
+    const proj = mkdtempSync(join(tmpdir(), "proj-p-"));
+    const c = new ConsentCenter(dir);
+    c.decider = () => "allow-command";
+    await c.requestCliAgent("b", proj, "记住");
+    const c2 = new ConsentCenter(dir);
+    expect(c2.hasCliAgentPath("b", proj)).toBe(true);
+    expect(c2.listCliAgentPaths("b")[0]?.prefix).toBeTruthy();
+  });
+});

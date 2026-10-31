@@ -49,6 +49,10 @@ export interface Bot {
    * 开箱时对照本机 Vault diff；硬缺口齐了仍可保留作参考，或由宿主清掉。
    */
   shareOnboard?: BotNeeds;
+  /** G10：cli.agent 默认工程根（realpath）；派工时可省略 cwd */
+  agentCwd?: string;
+  /** G10：cli.agent 偏好 CLI（cursor / claude / codex） */
+  agentCli?: "cursor" | "claude" | "codex";
 }
 
 /** 分享 / 开箱依赖声明：只带名单与说明，不含密钥或 env 值 */

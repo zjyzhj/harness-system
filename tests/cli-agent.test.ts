@@ -32,10 +32,12 @@ describe("cli-agent 路径与提示", () => {
     expect(resolveAgentCwd(dir)).toBe(realpathSync(dir));
   });
 
-  test("cwd 回落 PROJECT_ROOT", () => {
+  test("cwd 回落 PROJECT_ROOT / agentCwd", () => {
     expect(resolveCwdInput({}, {})).toBe("");
     expect(resolveCwdInput({ cwd: " /tmp/x " }, {})).toBe("/tmp/x");
     expect(resolveCwdInput({}, { projectRoot: "/p" })).toBe("/p");
+    expect(resolveCwdInput({}, { agentCwd: "/agent" })).toBe("/agent");
+    expect(resolveCwdInput({}, { projectRoot: "/p", agentCwd: "/agent" })).toBe("/p");
   });
 
   test("agent 参数：cursor 可写且非 ask；codex workspace-write", () => {

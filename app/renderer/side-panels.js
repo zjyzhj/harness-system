@@ -504,7 +504,7 @@ async function renderGroupDetails(g) {
 
 async function renderDetails(b) {
   const panel = $("#details");
-  const [tasks, providers, mem, sessPage, botSkills, library, ws, grants, caps, cmd] = await Promise.all([
+  const [tasks, providers, mem, sessPage, botSkills, library, ws, grants, caps, cmd, cliPaths] = await Promise.all([
     api.tasks.list(b.id).catch(() => []),
     api.providers.list().catch(() => []),
     detailsTab === "memory" ? api.memory.list(b.id).catch(() => []) : Promise.resolve([]),
@@ -515,6 +515,7 @@ async function renderDetails(b) {
     detailsTab === "info" ? api.consent.list(b.id).catch(() => []) : Promise.resolve([]),
     detailsTab === "info" ? api.consent.caps().catch(() => []) : Promise.resolve([]),
     detailsTab === "info" ? api.consent.rules().catch(() => ({ rules: [], trusted: [] })) : Promise.resolve({ rules: [], trusted: [] }),
+    detailsTab === "info" ? api.consent.cliPaths(b.id).catch(() => []) : Promise.resolve([]),
   ]);
   const sessList = sessPage.sessions.filter((x) => !isB2b(x.id) || b2bAsker(x.id, b.id));
   const sessHtml = `
@@ -579,6 +580,13 @@ async function renderDetails(b) {
         <span>人设</span><span>${esc(b.persona || "—")}</span>
       </div>
     </div>
+    <div class="d-sec"><h4>写代码派工</h4>
+      <p class="hint">大仓库改代码走 <code>cli.agent</code>（本机 Cursor/Claude/Codex Agent）。上面的「模型」若选 CLI 只用于对话，不会写仓库。</p>
+      <div class="d-kv">
+        <span title="cli.agent 默认工程根">工程目录</span><span><input id="d-agent-cwd" class="skin-select" style="width:100%" placeholder="绝对路径，可空" value="${esc(b.agentCwd || "")}" /></span>
+        <span title="cli.agent 偏好">Coding CLI</span><span><select id="d-agent-cli" class="skin-select" style="width:100%"><option value="">本机已装优先</option>${[["cursor", "cursor"], ["claude", "claude"], ["codex", "codex"]].map(([v, l]) => `<option value="${v}" ${b.agentCli === v ? "selected" : ""}>${l}</option>`).join("")}</select></span>
+      </div>
+    </div>
     <div class="d-sec"><h4>技能 <button class="list-add" id="d-skill-add" title="新建技能">＋</button></h4>
       ${botSkills.length ? botSkills.map((k) => `
         <div class="d-card skill-card" data-skill="${esc(k.key)}">
@@ -586,7 +594,7 @@ async function renderDetails(b) {
           <label class="switch" title="启用"><input type="checkbox" data-skill-on="${esc(k.key)}" ${k.enabled ? "checked" : ""}/><span></span></label>
         </div>`).join("") : `<div class="d-empty">还没有技能。可以对它说「把这套规范记成技能」</div>`}
     </div>
-    ${botPermSection(b.id, grants, caps, !!cmd.trusted?.includes(b.id))}
+    ${botPermSection(b.id, grants, caps, !!cmd.trusted?.includes(b.id), { cliPaths })}
     <div class="d-sec d-actions">
       <button class="ghost-btn" id="d-more">更多设置</button>
       <button class="ghost-btn" id="d-newchat">新会话</button>
@@ -627,6 +635,17 @@ async function renderDetails(b) {
   if (provSel) provSel.onchange = async () => { await api.bots.update(b.id, { providerId: provSel.value }); await refreshBots(); };
   const reasonSel = panel.querySelector("#d-reasoning");
   if (reasonSel) reasonSel.onchange = async () => { await api.bots.update(b.id, { reasoning: reasonSel.value }); await refreshBots(); };
+  const agentCwd = panel.querySelector("#d-agent-cwd");
+  if (agentCwd) agentCwd.onchange = async () => {
+    const v = agentCwd.value.trim();
+    await api.bots.update(b.id, { agentCwd: v || null });
+    await refreshBots();
+  };
+  const agentCli = panel.querySelector("#d-agent-cli");
+  if (agentCli) agentCli.onchange = async () => {
+    await api.bots.update(b.id, { agentCli: agentCli.value || null });
+    await refreshBots();
+  };
   const more = panel.querySelector("#d-more");
   if (more) more.onclick = () => botDetailFlow(b);
   const persona = panel.querySelector("#d-persona");

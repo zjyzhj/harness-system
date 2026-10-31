@@ -13,7 +13,7 @@ const api = {
     previews: () => ipcRenderer.invoke("bots:previews"),
     create: (text: string, opts?: { name?: string; avatar?: { shape: string; color: string } }) => ipcRenderer.invoke("bots:create", text, opts),
     remove: (id: string) => ipcRenderer.invoke("bots:delete", id),
-    update: (id: string, patch: { name?: string; role?: string; persona?: string; providerId?: string; isMaster?: boolean; order?: number; avatar?: { shape: string; color: string }; reasoning?: string }) => ipcRenderer.invoke("bots:update", id, patch),
+    update: (id: string, patch: { name?: string; role?: string; persona?: string; providerId?: string; isMaster?: boolean; order?: number; avatar?: { shape: string; color: string }; reasoning?: string; agentCwd?: string | null; agentCli?: "cursor" | "claude" | "codex" | null }) => ipcRenderer.invoke("bots:update", id, patch),
     setPet: (id: string, enabled: boolean) => ipcRenderer.invoke("bots:setPet", id, enabled),
     setSkin: (id: string, skinId: string) => ipcRenderer.invoke("bots:setSkin", id, skinId),
     duplicate: (id: string) => ipcRenderer.invoke("bots:duplicate", id),
@@ -84,6 +84,8 @@ const api = {
     setRule: (botId: string, command: string, decision: string) => ipcRenderer.invoke("consent:setRule", botId, command, decision),
     removeRule: (botId: string, command: string) => ipcRenderer.invoke("consent:removeRule", botId, command),
     setTrusted: (botId: string, on: boolean) => ipcRenderer.invoke("consent:setTrusted", botId, on),
+    cliPaths: (botId?: string) => ipcRenderer.invoke("consent:cliPaths", botId),
+    revokeCliPath: (botId: string, cwd?: string) => ipcRenderer.invoke("consent:revokeCliPath", botId, cwd),
   },
   audit: {
     list: (opts?: any) => ipcRenderer.invoke("audit:list", opts),

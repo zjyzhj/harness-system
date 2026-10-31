@@ -12,8 +12,8 @@ function sheet({ icon, title, sub = "", body = "", wide = false }) {
 const botOptions = (selected) => bots.map((b) => `<option value="${esc(b.id)}" ${b.id === selected ? "selected" : ""}>${esc(b.name)}</option>`).join("");
 const errText = (e) => String(e?.message || e).replace(/^Error invoking remote method '[^']+': (Error: )?/, "");
 
-/** 单个 bot 的权限区（详情页 / 更多设置共用）：批准能力、撤销、信任模式 */
-function botPermSection(botId, grants, caps, trusted, { linkSys = true } = {}) {
+/** 单个 bot 的权限区（详情页 / 更多设置共用）：批准能力、撤销、信任模式、Coding CLI 目录 */
+function botPermSection(botId, grants, caps, trusted, { linkSys = true, cliPaths = [] } = {}) {
   const label = (id) => caps.find((c) => c.id === id)?.label || id;
   return `
     <div class="d-sec bot-perm" data-bot="${esc(botId)}">
@@ -23,6 +23,10 @@ function botPermSection(botId, grants, caps, trusted, { linkSys = true } = {}) {
         <div class="d-card"><div class="c-main"><div class="c-title">${esc(label(g.cap))}</div>
           <div class="c-sub">${g.once ? "仅一次" : g.expiresAt ? `到 ${esc(fmtTime(g.expiresAt))}` : "长期"}${g.grantedAt ? ` · ${esc(fmtTime(g.grantedAt))}` : ""}</div></div>
           <button class="ghost-btn danger-text" data-revoke="${esc(g.cap)}">撤销</button></div>`).join("") || `<div class="d-empty">尚未批准任何能力</div>`}
+      ${cliPaths.length ? `<div class="hint" style="margin-top:8px">Coding CLI 已信任目录（同前缀派工可免再问）</div>${cliPaths.map((p) => `
+        <div class="d-card"><div class="c-main"><div class="c-title" title="${esc(p.prefix)}">${esc(p.prefix)}</div>
+          <div class="c-sub">${p.createdAt ? esc(fmtTime(p.createdAt)) : ""}</div></div>
+          <button class="ghost-btn danger-text" data-revoke-clipath="${esc(p.prefix)}">撤销</button></div>`).join("")}` : ""}
       <div class="mx-inline sa-grant bot-perm-grant">
         <select class="skin-select bp-cap">${caps.map((c) => `<option value="${esc(c.id)}">${esc(c.label)}</option>`).join("")}</select>
         <select class="skin-select bp-ttl"><option value="0">长期</option><option value="3600000">1 小时</option><option value="86400000">1 天</option><option value="once">仅一次</option></select>
@@ -39,6 +43,10 @@ function bindBotPerm(root, botId, onChange) {
   const sec = root.querySelector?.(".bot-perm") || root;
   sec.querySelectorAll("[data-revoke]").forEach((btn) => (btn.onclick = async () => {
     await api.consent.revoke(botId, btn.dataset.revoke);
+    onChange?.();
+  }));
+  sec.querySelectorAll("[data-revoke-clipath]").forEach((btn) => (btn.onclick = async () => {
+    await api.consent.revokeCliPath(botId, btn.dataset.revokeClipath);
     onChange?.();
   }));
   const grantBtn = sec.querySelector(".bp-grant");
@@ -74,7 +82,7 @@ async function settingsFlow() {
     body.innerHTML = `
       <div class="d-sec"><h4>本机 CLI <button class="ghost-btn" id="cli-refresh" title="重新探测">刷新</button></h4>
         <div class="mx-chips">${["claude", "codex", "cursor"].map((c) => `<span class="mx-chip ${caps[c]?.installed ? "ok" : ""}">${caps[c]?.installed ? "✓" : "✕"} ${c}${caps[c]?.version ? ` · ${esc(caps[c].version.split(" ")[0])}` : ""}${caps[c]?.account ? ` · ${esc(caps[c].account)}` : ""}</span>`).join("")}</div>
-        <div class="hint">Cursor CLI 与 IDE 共用 macOS 钥匙串：<code>cursor-agent logout</code> 只清 CLI 配置，<code>status</code> 仍可能显示 IDE 老账号。彻底退出：logout 后删钥匙串 <code>cursor-access-token</code> / <code>Cursor Safe Storage</code>，或在 Cursor 设置里 Sign out，再 <code>cursor-agent login</code>。软件不缓存登录态。</div>
+        <div class="hint">探测结果供「对话用 CLI Provider」与「写代码派工 cli.agent」共用。对话 Provider 选 CLI 时是问答模式，不会改仓库；改工程请让 bot 调 <code>cli.agent</code>（bot 详情可设默认工程目录）。Cursor CLI 与 IDE 共用钥匙串：<code>cursor-agent logout</code> 只清 CLI 配置；彻底换号见钥匙串 <code>cursor-access-token</code>。</div>
       </div>
       <div class="d-sec"><h4>Provider <button class="list-add" id="pv-new" title="添加">＋</button></h4>
         ${providers.map((p) => `
@@ -375,7 +383,7 @@ async function botDetailFlow(b) {
     closeModal();
     botDetailFlow(bots.find((x) => x.id === b.id) || b);
   };
-  const [mem, stats, skills, tasks, stList, skins, grants, caps, cmd] = await Promise.all([
+  const [mem, stats, skills, tasks, stList, skins, grants, caps, cmd, cliPaths] = await Promise.all([
     api.memory.list(b.id),
     api.memory.stats(b.id),
     api.skills.list(),
@@ -385,6 +393,7 @@ async function botDetailFlow(b) {
     api.consent.list(b.id).catch(() => []),
     api.consent.caps().catch(() => []),
     api.consent.rules().catch(() => ({ rules: [], trusted: [] })),
+    api.consent.cliPaths(b.id).catch(() => []),
   ]);
   const st = stList.find((x) => x.botId === b.id) || { state: "idle" };
   const card = b.personaCard;
@@ -406,7 +415,7 @@ async function botDetailFlow(b) {
       <label>宠物皮肤</label>
       <span><select id="bd-skin" class="skin-select">${skins.map((s) => `<option value="${esc(s.id)}"${b.skinId === s.id ? " selected" : ""}>${esc(s.name)}${s.desc ? " — " + esc(s.desc) : ""}</option>`).join("")}</select></span>
     </div>
-    ${botPermSection(b.id, grants, caps, trusted)}
+    ${botPermSection(b.id, grants, caps, trusted, { cliPaths })}
     <div class="actions">
       <button class="ghost-btn" id="bd-persona">✨ 生成形象</button>
       <button class="primary-btn" id="bd-chat">去对话</button>

@@ -17,6 +17,11 @@ export function registerSecurityIpc(deps: { store: Store; consent: ConsentCenter
   ipcMain.handle("consent:setRule", (_e, botId: string, command: string, decision: "allow" | "deny") => consent.setCommandRule(botId, command, decision));
   ipcMain.handle("consent:removeRule", (_e, botId: string, command: string) => consent.removeCommandRule(botId, command));
   ipcMain.handle("consent:setTrusted", (_e, botId: string, on: boolean) => consent.setTrusted(botId, on));
+  ipcMain.handle("consent:cliPaths", (_e, botId?: string) => consent.listCliAgentPaths(botId));
+  ipcMain.handle("consent:revokeCliPath", (_e, botId: string, cwd?: string) => {
+    consent.revokeCliAgentPath(botId, cwd);
+    return consent.listCliAgentPaths(botId);
+  });
   ipcMain.handle("audit:list", (_e, opts?: any) => audit.query(opts));
   ipcMain.handle("audit:export", (_e, filePath: string) => {
     const events = audit.exportAll();

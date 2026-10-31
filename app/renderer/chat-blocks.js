@@ -735,15 +735,16 @@ function renderRelayBar() {
 function consentCard(req, floating) {
   const el = document.createElement("div");
   el.className = `cs-card ${req.danger ? "danger" : ""} ${floating ? "floating" : ""}`;
-  const always = !req.danger && !req.onceOnly && req.command ? `<button class="ghost-btn" data-d="allow-command">总是允许 ${esc(req.command)}</button>` : "";
-  const group = !req.danger && !req.command && req.cap !== "bash:other" ? `<button class="ghost-btn" data-d="allow" title="以后不再问">长期批准「${esc(req.capLabel)}」</button>` : "";
+  const alwaysPath = req.rememberPath ? `<button class="ghost-btn" data-d="allow-command" title="${esc(req.rememberPath)}">总是允许此目录</button>` : "";
+  const always = !alwaysPath && !req.danger && !req.onceOnly && req.command ? `<button class="ghost-btn" data-d="allow-command">总是允许 ${esc(req.command)}</button>` : "";
+  const group = !req.danger && !req.command && !req.rememberPath && req.cap !== "bash:other" ? `<button class="ghost-btn" data-d="allow" title="以后不再问">长期批准「${esc(req.capLabel)}」</button>` : "";
   const reasons = req.reasons?.length ? `<div class="cs-reasons">${req.reasons.map((r) => `<div>· ${esc(r)}</div>`).join("")}${req.onceOnly && !req.danger ? `<div class="hint">这种写法只能逐次批准</div>` : ""}</div>` : "";
   el.innerHTML = `
-    <div class="cs-head">🔐 <b>${esc(req.botName)}</b> ${req.command ? `想执行 <code>${esc(req.command)}</code>` : `请求使用「${esc(req.capLabel)}」`}</div>
+    <div class="cs-head">🔐 <b>${esc(req.botName)}</b> ${req.rememberPath ? `想派 Coding CLI 改工程` : req.command ? `想执行 <code>${esc(req.command)}</code>` : `请求使用「${esc(req.capLabel)}」`}</div>
     <pre class="cs-desc">${esc(req.description)}</pre>
     ${reasons}
     ${req.danger ? `<div class="cs-warn">⚠️ 危险操作：每次都要确认，输入 confirm 后才能批准 <input placeholder="confirm" /></div>` : ""}
-    <div class="cs-btns"><button class="primary-btn" data-d="allow-once">允许一次</button>${always}${group}<button class="ghost-btn" data-d="deny">拒绝</button>${floating && req.sessionId ? `<button class="ghost-btn" data-d="open">查看会话</button>` : ""}</div>`;
+    <div class="cs-btns"><button class="primary-btn" data-d="allow-once">允许一次</button>${alwaysPath}${always}${group}<button class="ghost-btn" data-d="deny">拒绝</button>${floating && req.sessionId ? `<button class="ghost-btn" data-d="open">查看会话</button>` : ""}</div>`;
   const gate = el.querySelector(".cs-warn input");
   const allowBtns = [...el.querySelectorAll('[data-d^="allow"]')];
   if (gate) { allowBtns.forEach((b) => (b.disabled = true)); gate.oninput = () => allowBtns.forEach((b) => (b.disabled = gate.value.trim().toLowerCase() !== "confirm")); }

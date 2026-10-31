@@ -183,8 +183,8 @@ cap: "cli:agent"
 | Phase | 交付 | 验收 |
 |-------|------|------|
 | **A 最小可用** ✅ | `cli.agent` + 三家 agent 参数 + 强确认 + 单 bot 一并发 + 测例 | [`core/cli-agent.ts`](../../core/cli-agent.ts)、[`tests/cli-agent.test.ts`](../../tests/cli-agent.test.ts) |
-| **B 三家对齐** | claude / codex agent 参数核验 + `agentCli` 偏好 | 设置里探测哪家可用，派工可选 |
-| **C 目录信任** | cwd 前缀长期授权 + Bot.agentCwd | 二次派工同前缀可少点一次（仍可要求 once） |
+| **B 三家对齐** ✅ | `Bot.agentCli` / `agentCwd`；详情可设；`app.updateSelf`；派工回落；提示词可见 | [`core/types.ts`](../../core/types.ts)、[`app/renderer/side-panels.js`](../../app/renderer/side-panels.js) |
+| **C 目录信任** ✅ | `requestCliAgent` +「总是允许此目录」前缀信任；权限区可撤销 | [`core/consent-center.ts`](../../core/consent-center.ts) |
 | **D 衔接** | 与 PROJECT_ROOT / 专 bot 记忆模板；文档 | 改包 bot 开箱话术 |
 
 ## 8. 风险

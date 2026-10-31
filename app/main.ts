@@ -2067,8 +2067,9 @@ app.whenReady().then(() => {
     const strong = !!req.requiresStrongConsent;
     if (!mainWin || mainWin.isDestroyed()) {
       const choices: [string, ConsentDecision][] = [["批准一次", "allow-once"]];
-      if (!strong && !req.onceOnly && req.command) choices.push([`总是允许 ${req.command}`, "allow-command"]);
-      if (!strong && !req.command && req.cap !== "bash:other") choices.push(["长期批准", "allow"]);
+      if (req.rememberPath) choices.push(["总是允许此目录", "allow-command"]);
+      else if (!strong && !req.onceOnly && req.command) choices.push([`总是允许 ${req.command}`, "allow-command"]);
+      if (!strong && !req.command && !req.rememberPath && req.cap !== "bash:other") choices.push(["长期批准", "allow"]);
       choices.push(["拒绝", "deny"]);
       const detail = `${req.description}${req.reasons?.length ? `\n\n需要注意：${req.reasons.join("；")}` : ""}`;
       const btn = dialog.showMessageBoxSync({ type: "question", title: `系统授权请求 — ${name}`, message: `${name} 请求使用「${capLabel}」`, detail, buttons: choices.map((c) => c[0]), defaultId: choices.length - 1, cancelId: choices.length - 1, noLink: true });
@@ -2083,11 +2084,13 @@ app.whenReady().then(() => {
       const onAbort = () => done("deny");
       signal?.addEventListener("abort", onAbort);
       pendingConsent.set(id, done);
-      sendUi("consent:request", { id, botId: req.botId, botName: name, cap: req.cap, capLabel, description: req.description, danger: strong, command: req.command, onceOnly: !!req.onceOnly, reasons: req.reasons ?? [], sessionId });
+      sendUi("consent:request", { id, botId: req.botId, botName: name, cap: req.cap, capLabel, description: req.description, danger: strong, command: req.command, onceOnly: !!req.onceOnly, rememberPath: req.rememberPath, reasons: req.reasons ?? [], sessionId });
     });
     if (sessionId) {
       const note = decision === "allow-command"
-        ? `🔐 你允许 ${name} 以后直接执行 ${req.command}`
+        ? (req.rememberPath
+          ? `🔐 你允许 ${name} 以后在目录「${req.rememberPath}」直接派 Coding CLI`
+          : `🔐 你允许 ${name} 以后直接执行 ${req.command}`)
         : `🔐 你${decision === "allow-once" ? "批准了一次" : decision === "allow" ? "长期批准了" : "拒绝了"} ${name} ${req.command ? `执行 ${req.command}` : `使用「${capLabel}」`}`;
       const held = consentNotes.get(sessionId);
       if (held) held.push(note);
@@ -2213,7 +2216,7 @@ ipcMain.handle("bots:create", async (_e, text: string, opts?: { name?: string; a
   if (bot.petEnabled && !EVAL_MODE) createPetWindow(bot.id);
   return bot;
 });
-ipcMain.handle("bots:update", (_e, id: string, patch: { name?: string; role?: string; persona?: string; providerId?: string; isMaster?: boolean; order?: number; avatar?: Bot["avatar"]; reasoning?: Bot["reasoning"] }) => {
+ipcMain.handle("bots:update", (_e, id: string, patch: { name?: string; role?: string; persona?: string; providerId?: string; isMaster?: boolean; order?: number; avatar?: Bot["avatar"]; reasoning?: Bot["reasoning"]; agentCwd?: string | null; agentCli?: Bot["agentCli"] | null }) => {
   const bot = store.getBot(id);
   if (!bot) throw new Error("bot 不存在");
   if (patch.isMaster) {
@@ -2234,6 +2237,14 @@ ipcMain.handle("bots:update", (_e, id: string, patch: { name?: string; role?: st
   if (patch.order !== undefined) next.order = patch.order;
   if (patch.reasoning && ["auto", "always", "off"].includes(patch.reasoning)) next.reasoning = patch.reasoning;
   if (patch.avatar) { next.avatar = patch.avatar; delete next.avatarPath; }
+  if (patch.agentCwd !== undefined) {
+    if (patch.agentCwd === null || !String(patch.agentCwd).trim()) delete next.agentCwd;
+    else next.agentCwd = String(patch.agentCwd).trim();
+  }
+  if (patch.agentCli !== undefined) {
+    if (!patch.agentCli) delete next.agentCli;
+    else if (["cursor", "claude", "codex"].includes(patch.agentCli)) next.agentCli = patch.agentCli;
+  }
   store.saveBot(next);
   return next;
 });

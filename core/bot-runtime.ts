@@ -21,6 +21,7 @@ import {
   isCliAgentBusy,
   parseCliName,
   pickInstalledCli,
+  resolveAgentCwd,
   resolveCwdInput,
   runCliAgent,
 } from "./cli-agent";
@@ -918,7 +919,11 @@ export class BotRuntime {
       case "app.updateSelf": {
         const patch: Partial<Bot> = {};
         for (const k of ["name", "role", "persona", "systemPrompt"] as const) if (str(k)) patch[k] = str(k)!;
-        if (!Object.keys(patch).length) return { output: "app.updateSelf 需要 name / role / persona / systemPrompt 之一" };
+        const cwd = str("agentCwd") ?? str("projectRoot");
+        if (cwd) patch.agentCwd = cwd;
+        const cli = parseCliName(str("agentCli") ?? str("cli"));
+        if (cli) patch.agentCli = cli;
+        if (!Object.keys(patch).length) return { output: "app.updateSelf 需要 name / role / persona / systemPrompt / agentCwd / agentCli 之一" };
         store.saveBot({ ...bot, ...patch });
         return changed("bots", `已更新：${Object.keys(patch).join("、")}`);
       }
@@ -1263,33 +1268,41 @@ export class BotRuntime {
     if (isCliAgentBusy(bot.id)) return { output: "❌ 该 bot 已有一个 cli.agent 在跑，等它结束再派" };
 
     const projectRoot = this.deps.env?.visibleTo(bot.id).find((e) => e.key === "PROJECT_ROOT")?.value;
-    let cwd: string;
+    let cwdRaw: string;
     try {
-      cwd = resolveCwdInput(args, { projectRoot });
-      if (!cwd) {
+      cwdRaw = resolveCwdInput(args, { projectRoot, agentCwd: bot.agentCwd });
+      if (!cwdRaw) {
         return {
           output:
-            "❌ 缺少工程目录。请在参数里传 cwd（绝对路径），或先 env.set PROJECT_ROOT=工程根目录后再调 cli.agent。",
+            "❌ 缺少工程目录。请传 cwd、或 env.set PROJECT_ROOT、或在 bot 上设置 agentCwd（详情里「写代码工程」）。",
         };
       }
     } catch (e) {
       return { output: `❌ ${e instanceof Error ? e.message : String(e)}` };
     }
 
-    const preferred = parseCliName(args.cli ?? args.cliName);
-    const cli = preferred ?? (await pickInstalledCli());
+    const preferred = parseCliName(args.cli ?? args.cliName) ?? bot.agentCli;
+    const cli = preferred ? await pickInstalledCli(preferred) : await pickInstalledCli();
     if (!cli) return { output: "❌ 本机未检测到 cursor / claude / codex CLI。请先安装并登录其一（设置 → 模型可看探测）。" };
+    if (preferred && preferred !== cli) {
+      /* 偏好未装，已回落 */
+    }
 
     const timeoutMin = Math.min(Math.max(Number(args.timeoutMin ?? 20) || 20, 1), 60);
     const harnessHome = this.deps.workspaceRoot ? join(this.deps.workspaceRoot, "..") : undefined;
+    let cwd: string;
+    try {
+      cwd = resolveAgentCwd(cwdRaw, { harnessHome });
+    } catch (e) {
+      return { output: `❌ ${e instanceof Error ? e.message : String(e)}` };
+    }
+
     const desc =
       `派本机 ${cli} CLI（可写 Agent）改工程\n目录：${cwd}\n任务：${task.slice(0, 500)}${task.length > 500 ? "…" : ""}`;
 
     if (this.deps.consent) {
-      const r = await this.deps.consent.request(bot.id, "cli:agent", desc, {
-        requiresStrongConsent: true,
-        onceOnly: true,
-        reasons: ["将启动外部 Coding CLI，可在该目录读写文件并执行命令", "请确认工程路径正确；密钥不会从 Vault 自动注入子进程"],
+      const r = await this.deps.consent.requestCliAgent(bot.id, cwd, desc, {
+        reasons: ["将启动外部 Coding CLI，可在该目录读写文件并执行命令", "可选「总是允许此目录」以免同工程反复确认；密钥不会从 Vault 自动注入"],
       });
       if (!r.granted) {
         this.deps.audit?.append({ botId: bot.id, cap: "cli:agent", action: "cli.agent", args: `${cli} ${cwd}`, granted: false });
@@ -1318,6 +1331,16 @@ export class BotRuntime {
         latencyMs: Date.now() - t0,
         detail: result.cancelled ? "cancelled" : result.timedOut ? "timeout" : `exit ${result.exitCode}`,
       });
+      // 成功后记住默认工程 / CLI（不覆盖用户已设的 agentCwd，除非为空）
+      if (result.ok) {
+        const patch: Partial<Bot> = {};
+        if (!bot.agentCwd) patch.agentCwd = cwd;
+        if (!bot.agentCli) patch.agentCli = cli;
+        if (Object.keys(patch).length) {
+          this.deps.store.saveBot({ ...bot, ...patch });
+          this.deps.onAppChanged?.("bots");
+        }
+      }
       return { output: result.output };
     } catch (e) {
       const msg = e instanceof CliAgentPathError ? e.message : e instanceof Error ? e.message : String(e);
