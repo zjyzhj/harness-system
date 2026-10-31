@@ -16,6 +16,14 @@ import { addSource, QUIET_TOOLS, CONTINUE_HINT, THINK_PROMPT, stripToolBlocks, t
 import { memoryLink, appendSkillRules, isDuplicateRule, type MemoryDraft, CLAIMS_SAVED, memoryFromText } from "./runtime/rules-text";
 import { runTaskTool, sendFiles, uiTool, ownHistoryText, isSensitivePath, parseRunAt } from "./runtime/tool-helpers";
 import { PromptBuilder, type PromptExtras } from "./runtime/prompt";
+import {
+  CliAgentPathError,
+  isCliAgentBusy,
+  parseCliName,
+  pickInstalledCli,
+  resolveCwdInput,
+  runCliAgent,
+} from "./cli-agent";
 export * from "./runtime/types";
 export * from "./runtime/turn-helpers";
 export * from "./runtime/rules-text";
@@ -565,6 +573,11 @@ export class BotRuntime {
     builtin("memory.add", "长期记住一件事（重启后还在）。规范常驻；事实按相关注入。系统会后台蒸馏 MEMORY.md，但不会每轮塞进对话。用户让你记住、定规范、纠正做法、说偏好或个人信息时调用。参数: content（写成以后能直接用的一句话）, kind（rule = 对你做事方式的要求；fact = 关于用户的信息或偏好）, bot?（写给哪个 bot，默认你自己）, scope?（all = 所有 bot 都遵守）。没调用它就不要说「记下了」");
     R.register("env.set", "保存一项普通配置 / 环境变量（接口地址、账号名、项目 ID、区域等，重启后还在，bash.run 自动注入）。密码 / Token 不要用它，用 ui.secret。参数: key（英文大写，如 FEISHU_APP_ID）, value, label?（中文名称）, note?（用途）, scope?（all = 所有 bot 共用，默认只给你）", (ctx) => this.envTool(ctx.bot, "env.set", ctx.args));
     R.register("env.delete", "删除一项配置。参数: key, scope?（all = 共用的那项）", (ctx) => this.envTool(ctx.bot, "env.delete", ctx.args));
+    R.register(
+      "cli.agent",
+      "派本机 Cursor / Claude / Codex CLI（Agent 可写模式）去改某个工程目录里的代码。大仓库、多文件重构、复杂实现用它；小文件仍用 fs.write。参数: task（任务说明）, cwd?（工程根绝对路径；可先 env.set PROJECT_ROOT）, cli?（cursor|claude|codex，默认本机已装的优先 cursor）, timeoutMin?（默认 20，最大 60）。会弹确认；不要绕过拒绝换 CLI 重试。",
+      (ctx) => this.cliAgentTool(ctx.bot, ctx.args, turn(ctx)),
+    );
     builtin("memory.list", "列出某个 bot 已存的规范/事实单条。用户问「你记得什么 / 关于我知道些什么」时用。参数: bot?（bot 名，默认你自己）, kind?（rule=规范 / fact=事实，默认全部）");
     builtin("memory.search", "按意思检索记忆和过往对话（如「上次聊的那个方案」）。参数: query");
     builtin("memory.update", "改一条已存的记忆 / 规范（用户纠正、规范要改时用，不要再 add 一条相反的）。参数: match（原文里的几个字，用来定位）, content（改成什么）, bot?（改哪个 bot 的，默认你自己）, scope?（all = 全局共享的）");
@@ -1241,6 +1254,85 @@ export class BotRuntime {
       };
     }
     return { output: `未知工具 ${t.tool}` };
+  }
+
+  /** G10：派本机 Coding CLI 改工程（与聊天 CLI-ask 分离） */
+  private async cliAgentTool(bot: Bot, args: Record<string, unknown>, turn: TurnCtx): Promise<ToolOutcome> {
+    const task = String(args.task ?? args.prompt ?? args.message ?? "").trim();
+    if (!task) return { output: "cli.agent 需要 task（要改什么、验收标准）" };
+    if (isCliAgentBusy(bot.id)) return { output: "❌ 该 bot 已有一个 cli.agent 在跑，等它结束再派" };
+
+    const projectRoot = this.deps.env?.visibleTo(bot.id).find((e) => e.key === "PROJECT_ROOT")?.value;
+    let cwd: string;
+    try {
+      cwd = resolveCwdInput(args, { projectRoot });
+      if (!cwd) {
+        return {
+          output:
+            "❌ 缺少工程目录。请在参数里传 cwd（绝对路径），或先 env.set PROJECT_ROOT=工程根目录后再调 cli.agent。",
+        };
+      }
+    } catch (e) {
+      return { output: `❌ ${e instanceof Error ? e.message : String(e)}` };
+    }
+
+    const preferred = parseCliName(args.cli ?? args.cliName);
+    const cli = preferred ?? (await pickInstalledCli());
+    if (!cli) return { output: "❌ 本机未检测到 cursor / claude / codex CLI。请先安装并登录其一（设置 → 模型可看探测）。" };
+
+    const timeoutMin = Math.min(Math.max(Number(args.timeoutMin ?? 20) || 20, 1), 60);
+    const harnessHome = this.deps.workspaceRoot ? join(this.deps.workspaceRoot, "..") : undefined;
+    const desc =
+      `派本机 ${cli} CLI（可写 Agent）改工程\n目录：${cwd}\n任务：${task.slice(0, 500)}${task.length > 500 ? "…" : ""}`;
+
+    if (this.deps.consent) {
+      const r = await this.deps.consent.request(bot.id, "cli:agent", desc, {
+        requiresStrongConsent: true,
+        onceOnly: true,
+        reasons: ["将启动外部 Coding CLI，可在该目录读写文件并执行命令", "请确认工程路径正确；密钥不会从 Vault 自动注入子进程"],
+      });
+      if (!r.granted) {
+        this.deps.audit?.append({ botId: bot.id, cap: "cli:agent", action: "cli.agent", args: `${cli} ${cwd}`, granted: false });
+        return { output: "❌ 用户没有批准派工 Coding CLI，不要换别的 CLI 重试绕过，直接告诉用户" };
+      }
+    }
+
+    const t0 = Date.now();
+    try {
+      const result = await runCliAgent(bot.id, {
+        task,
+        cwd,
+        cli,
+        botName: bot.name,
+        timeoutMs: timeoutMin * 60_000,
+        signal: turn.signal,
+        harnessHome,
+      });
+      this.deps.audit?.append({
+        botId: bot.id,
+        cap: "cli:agent",
+        action: "cli.agent",
+        args: `${cli} ${cwd} ${task.slice(0, 120)}`,
+        granted: true,
+        ok: result.ok,
+        latencyMs: Date.now() - t0,
+        detail: result.cancelled ? "cancelled" : result.timedOut ? "timeout" : `exit ${result.exitCode}`,
+      });
+      return { output: result.output };
+    } catch (e) {
+      const msg = e instanceof CliAgentPathError ? e.message : e instanceof Error ? e.message : String(e);
+      this.deps.audit?.append({
+        botId: bot.id,
+        cap: "cli:agent",
+        action: "cli.agent",
+        args: `${cli} ${cwd}`,
+        granted: true,
+        ok: false,
+        latencyMs: Date.now() - t0,
+        detail: msg.slice(0, 200),
+      });
+      return { output: `❌ 派工失败：${msg}` };
+    }
   }
 
   private async runSkill(bot: Bot, key: string, args: Record<string, unknown>, originalText: string): Promise<{ output: string }> {

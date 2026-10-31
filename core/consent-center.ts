@@ -14,6 +14,7 @@ export type Cap =
   | "notify" | "clipboard" | "fs" | "fs:send"
   | "bash:read" | "bash:dev" | "bash:net" | "bash:io" | "bash:other"
   | "gui" | "screen" | "apple" | "net:local" | "skill:shared"
+  | "cli:agent"
   | `mcp:${string}`;
 
 export interface Grant {
@@ -69,6 +70,7 @@ export const CAP_LABELS: Record<Cap, string> = {
   "fs:send": "发送工作区以外的文件",
   "net:local": "访问本机 / 局域网地址",
   "skill:shared": "修改共享技能",
+  "cli:agent": "派本机 Coding CLI 改工程",
 };
 
 export function capLabel(cap: string): string {

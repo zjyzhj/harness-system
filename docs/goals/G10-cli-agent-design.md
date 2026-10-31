@@ -1,6 +1,6 @@
 # G10 — CLI Agent 外包写代码（Bot 大脑 + 外部手脚）
 
-> Goal：G10 · 状态：设计定稿 · 日期：2026-10-31  
+> Goal：G10 · 状态：Phase A ✅ · 日期：2026-10-31  
 > 原则：聊天 Provider **不改** Agent 模式；写仓库能力以工具 `cli.agent` **外包**给本机 Cursor / Claude / Codex CLI。  
 > 对齐：Grok「Bot + Tools」切分；Harness 用本机 CLI 当 Tool，不复刻云电脑。
 
@@ -182,7 +182,7 @@ cap: "cli:agent"
 
 | Phase | 交付 | 验收 |
 |-------|------|------|
-| **A 最小可用** | `cli.agent` + cursor 优先 + 强确认 + 单 bot 一并发 + 测例 | 指定 cwd 能改文件；拒绝 harness home；停止能 kill |
+| **A 最小可用** ✅ | `cli.agent` + 三家 agent 参数 + 强确认 + 单 bot 一并发 + 测例 | [`core/cli-agent.ts`](../../core/cli-agent.ts)、[`tests/cli-agent.test.ts`](../../tests/cli-agent.test.ts) |
 | **B 三家对齐** | claude / codex agent 参数核验 + `agentCli` 偏好 | 设置里探测哪家可用，派工可选 |
 | **C 目录信任** | cwd 前缀长期授权 + Bot.agentCwd | 二次派工同前缀可少点一次（仍可要求 once） |
 | **D 衔接** | 与 PROJECT_ROOT / 专 bot 记忆模板；文档 | 改包 bot 开箱话术 |
