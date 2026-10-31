@@ -81,8 +81,8 @@ async function settingsFlow() {
     const usage = (p) => bots.filter((b) => effectiveProvider(b, providers)?.id === p.id).length;
     body.innerHTML = `
       <div class="d-sec"><h4>本机 CLI <button class="ghost-btn" id="cli-refresh" title="重新探测">刷新</button></h4>
-        <div class="mx-chips">${["claude", "codex", "cursor"].map((c) => `<span class="mx-chip ${caps[c]?.installed ? "ok" : ""}">${caps[c]?.installed ? "✓" : "✕"} ${c}${caps[c]?.version ? ` · ${esc(caps[c].version.split(" ")[0])}` : ""}${caps[c]?.account ? ` · ${esc(caps[c].account)}` : ""}</span>`).join("")}</div>
-        <div class="hint">探测结果供「对话用 CLI Provider」与「写代码派工 cli.agent」共用。对话 Provider 选 CLI 时是问答模式，不会改仓库；改工程请让 bot 调 <code>cli.agent</code>（bot 详情可设默认工程目录）。Cursor CLI 与 IDE 共用钥匙串：<code>cursor-agent logout</code> 只清 CLI 配置；彻底换号见钥匙串 <code>cursor-access-token</code>。</div>
+        <div class="mx-chips">${Object.keys(caps).length ? Object.entries(caps).map(([c, info]) => `<span class="mx-chip ${info?.installed ? "ok" : ""}" title="${esc(info?.bin || c)}">${info?.installed ? "✓" : "✕"} ${esc(c)}${info?.agent ? " · 可派工" : info?.installed ? " · 仅聊天" : ""}${info?.version ? ` · ${esc(String(info.version).split(" ")[0])}` : ""}${info?.account ? ` · ${esc(info.account)}` : ""}</span>`).join("") : ["claude", "codex", "cursor"].map((c) => `<span class="mx-chip">… ${c}</span>`).join("")}</div>
+        <div class="hint">名单来自 Coding Agent 注册表 + 本机实时探测（点刷新更新），提示词与 <code>cli.agent</code> 工具说明会跟着变，不必手写「能调哪些」。对话 Provider 选 CLI 只问答不改仓库；改工程走 <code>cli.agent</code>。Cursor 换号见钥匙串 / <code>cursor-agent login</code>。</div>
       </div>
       <div class="d-sec"><h4>Provider <button class="list-add" id="pv-new" title="添加">＋</button></h4>
         ${providers.map((p) => `

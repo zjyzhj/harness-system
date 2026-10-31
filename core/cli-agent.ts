@@ -1,22 +1,30 @@
 /**
- * G10：把写工程外包给本机 Cursor / Claude / Codex CLI（Agent 模式）。
+ * G10：把写工程外包给本机 Coding CLI（Agent 模式）。
  * 与 adapters/cli.ts 的「聊天 ask」分离——本模块只服务工具 cli.agent。
+ * 可用后端见 coding-agents 注册表（探测驱动，不手写死名单）。
  */
 import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { isAbsolute, join, resolve, sep } from "node:path";
-import { detectCli, type CliName } from "./adapters/cli";
+import { isAbsolute, resolve, sep } from "node:path";
+import {
+  agentBin,
+  buildCodingAgentArgs,
+  getCodingAgent,
+  parseCodingAgentId,
+  pickCodingAgent,
+  probeCodingAgents,
+  type CodingAgentId,
+} from "./coding-agents";
 
-export type { CliName };
-
-const CLI_BIN: Record<CliName, string> = { codex: "codex", cursor: "cursor-agent", claude: "claude" };
-const CLI_ORDER: CliName[] = ["cursor", "claude", "codex"];
+/** @deprecated 使用 CodingAgentId；保留别名以兼容旧测例 */
+export type CliName = CodingAgentId;
+export type { CodingAgentId };
 
 export interface CliAgentRequest {
   task: string;
   cwd: string;
-  cli: CliName;
+  cli: CodingAgentId;
   /** 派工 bot 名，写入给 CLI 的提示 */
   botName?: string;
   /** 可选短约束（记忆规则摘录等），限长由调用方裁 */
@@ -31,7 +39,7 @@ export interface CliAgentRequest {
 
 export interface CliAgentResult {
   ok: boolean;
-  cli: CliName;
+  cli: CodingAgentId;
   cwd: string;
   output: string;
   exitCode: number;
@@ -94,43 +102,13 @@ export function buildAgentPrompt(req: Pick<CliAgentRequest, "task" | "cwd" | "bo
   return parts.join("\n");
 }
 
-/** Agent 模式参数（与聊天 ask 分离） */
-export function agentCliArgs(cli: CliName, prompt: string, cwd: string): string[] {
-  switch (cli) {
-    case "cursor":
-      // 不传 --mode ask/plan → 默认可写；-p 文档写明含 write/shell
-      return [
-        "-p",
-        "--output-format",
-        "text",
-        "--trust",
-        "--force",
-        "--sandbox",
-        "disabled",
-        "--workspace",
-        cwd,
-        prompt,
-      ];
-    case "claude":
-      return ["-p", "--output-format", "text", "--dangerously-skip-permissions", prompt];
-    case "codex":
-      return ["exec", "--skip-git-repo-check", "-s", "workspace-write", "-C", cwd, prompt];
-    default:
-      return ["-p", prompt];
-  }
+/** Agent 模式参数（注册表驱动） */
+export function agentCliArgs(cli: CodingAgentId, prompt: string, cwd: string): string[] {
+  return buildCodingAgentArgs(cli, prompt, cwd);
 }
 
-export async function pickInstalledCli(preferred?: CliName): Promise<CliName | null> {
-  if (preferred) {
-    const d = await detectCli(preferred);
-    if (d.installed) return preferred;
-  }
-  for (const name of CLI_ORDER) {
-    if (preferred && name === preferred) continue;
-    const d = await detectCli(name);
-    if (d.installed) return name;
-  }
-  return null;
+export async function pickInstalledCli(preferred?: CodingAgentId | null): Promise<CodingAgentId | null> {
+  return pickCodingAgent(preferred);
 }
 
 const busyBots = new Set<string>();
@@ -150,15 +128,26 @@ export async function runCliAgent(botId: string, req: CliAgentRequest): Promise<
     };
   }
   const cwd = resolveAgentCwd(req.cwd, { home: req.home, harnessHome: req.harnessHome });
+  const bin = agentBin(req.cli);
+  if (!bin || !getCodingAgent(req.cli)?.agent) {
+    return {
+      ok: false,
+      cli: req.cli,
+      cwd,
+      output: `❌ 未知或不支持派工的 Coding Agent：${req.cli}。以设置 → 模型里的实时探测为准。`,
+      exitCode: -1,
+    };
+  }
   // 测试注入 spawnImpl 时跳过本机探测
   if (!req.spawnImpl) {
-    const cap = await detectCli(req.cli);
-    if (!cap.installed) {
+    const items = await probeCodingAgents();
+    const cap = items.find((x) => x.id === req.cli);
+    if (!cap?.installed || !cap.agent) {
       return {
         ok: false,
         cli: req.cli,
         cwd,
-        output: `❌ 本机未安装或不可用 ${req.cli} CLI（bin: ${CLI_BIN[req.cli]}）。到设置 → 模型里看探测结果，或换 cli 参数。`,
+        output: `❌ 本机未安装或不可派工 ${req.cli}（bin: ${bin}）。到设置 → 模型刷新探测，或省略 cli 让系统自动选已装项。`,
         exitCode: -1,
       };
     }
@@ -172,6 +161,7 @@ export async function runCliAgent(botId: string, req: CliAgentRequest): Promise<
   try {
     return await spawnAgent({
       cli: req.cli,
+      bin,
       cwd,
       args,
       timeoutMs,
@@ -189,21 +179,22 @@ export function resetCliAgentBusyForTests() {
 }
 
 function spawnAgent(opts: {
-  cli: CliName;
+  cli: CodingAgentId;
+  bin: string;
   cwd: string;
   args: string[];
   timeoutMs: number;
   signal?: AbortSignal;
   spawnFn: typeof spawn;
 }): Promise<CliAgentResult> {
-  const { cli, cwd, args, timeoutMs, signal, spawnFn } = opts;
+  const { cli, bin, cwd, args, timeoutMs, signal, spawnFn } = opts;
   return new Promise((resolvePromise) => {
     let proc: ChildProcess;
     try {
       const env = { ...process.env };
       // 避免被外层 Agent 劫持
       for (const k of ["CURSOR_AGENT", "CLAUDECODE", "CODEX_SANDBOX"]) delete env[k];
-      proc = spawnFn(CLI_BIN[cli], args, {
+      proc = spawnFn(bin, args, {
         stdio: ["ignore", "pipe", "pipe"],
         env,
         cwd,
@@ -296,8 +287,6 @@ export function resolveCwdInput(args: Record<string, unknown>, fallbacks: { proj
   return "";
 }
 
-export function parseCliName(raw: unknown): CliName | undefined {
-  const s = String(raw ?? "").trim().toLowerCase();
-  if (s === "cursor" || s === "claude" || s === "codex") return s;
-  return undefined;
+export function parseCliName(raw: unknown): CodingAgentId | undefined {
+  return parseCodingAgentId(raw);
 }

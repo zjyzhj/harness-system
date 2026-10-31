@@ -504,7 +504,7 @@ async function renderGroupDetails(g) {
 
 async function renderDetails(b) {
   const panel = $("#details");
-  const [tasks, providers, mem, sessPage, botSkills, library, ws, grants, caps, cmd, cliPaths] = await Promise.all([
+  const [tasks, providers, mem, sessPage, botSkills, library, ws, grants, caps, cmd, cliPaths, codingCaps] = await Promise.all([
     api.tasks.list(b.id).catch(() => []),
     api.providers.list().catch(() => []),
     detailsTab === "memory" ? api.memory.list(b.id).catch(() => []) : Promise.resolve([]),
@@ -516,6 +516,7 @@ async function renderDetails(b) {
     detailsTab === "info" ? api.consent.caps().catch(() => []) : Promise.resolve([]),
     detailsTab === "info" ? api.consent.rules().catch(() => ({ rules: [], trusted: [] })) : Promise.resolve({ rules: [], trusted: [] }),
     detailsTab === "info" ? api.consent.cliPaths(b.id).catch(() => []) : Promise.resolve([]),
+    detailsTab === "info" ? api.providers.capabilities().catch(() => ({})) : Promise.resolve({}),
   ]);
   const sessList = sessPage.sessions.filter((x) => !isB2b(x.id) || b2bAsker(x.id, b.id));
   const sessHtml = `
@@ -581,10 +582,11 @@ async function renderDetails(b) {
       </div>
     </div>
     <div class="d-sec"><h4>写代码派工</h4>
-      <p class="hint">大仓库改代码走 <code>cli.agent</code>（本机 Cursor/Claude/Codex Agent）。上面的「模型」若选 CLI 只用于对话，不会写仓库。</p>
+      <p class="hint">大仓库改代码走 <code>cli.agent</code>。列表来自本机实时探测（设置 → 模型可刷新）；「模型」若选 CLI 只用于对话，不会写仓库。偏好可空＝自动选已装可派工项。</p>
+      <div class="mx-chips" style="margin-bottom:8px">${Object.entries(codingCaps).map(([id, c]) => `<span class="mx-chip ${c?.agent ? "ok" : ""}" title="${esc(c?.bin || id)}">${c?.agent ? "✓" : c?.installed ? "○" : "✕"} ${esc(id)}${c?.agent ? " 可派工" : c?.installed ? " 仅聊天" : ""}</span>`).join("") || `<span class="hint">探测中…</span>`}</div>
       <div class="d-kv">
         <span title="cli.agent 默认工程根">工程目录</span><span><input id="d-agent-cwd" class="skin-select" style="width:100%" placeholder="绝对路径，可空" value="${esc(b.agentCwd || "")}" /></span>
-        <span title="cli.agent 偏好">Coding CLI</span><span><select id="d-agent-cli" class="skin-select" style="width:100%"><option value="">本机已装优先</option>${[["cursor", "cursor"], ["claude", "claude"], ["codex", "codex"]].map(([v, l]) => `<option value="${v}" ${b.agentCli === v ? "selected" : ""}>${l}</option>`).join("")}</select></span>
+        <span title="仅多台已装时需要；未装会自动换">偏好 CLI</span><span><select id="d-agent-cli" class="skin-select" style="width:100%"><option value="">自动（跟随探测）</option>${Object.entries(codingCaps).filter(([, c]) => c?.agent).map(([id, c]) => `<option value="${esc(id)}" ${b.agentCli === id ? "selected" : ""}>${esc(c.label || id)}</option>`).join("")}${b.agentCli && !codingCaps[b.agentCli]?.agent ? `<option value="${esc(b.agentCli)}" selected>${esc(b.agentCli)}（当前未装，将自动换）</option>` : ""}</select></span>
       </div>
     </div>
     <div class="d-sec"><h4>技能 <button class="list-add" id="d-skill-add" title="新建技能">＋</button></h4>

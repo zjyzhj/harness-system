@@ -118,10 +118,25 @@ export class ProviderCenter {
     }
   }
 
-  async capabilities(): Promise<Record<string, { installed: boolean; version?: string; chat: boolean }>> {
-    const out: Record<string, { installed: boolean; version?: string; chat: boolean }> = {};
+  async capabilities(): Promise<Record<string, { installed: boolean; version?: string; chat: boolean; agent?: boolean; bin?: string; label?: string; account?: string }>> {
+    const { probeCodingAgents, invalidateCodingAgentsCache } = await import("./coding-agents");
+    invalidateCodingAgentsCache();
+    const items = await probeCodingAgents({ force: true });
+    const out: Record<string, { installed: boolean; version?: string; chat: boolean; agent?: boolean; bin?: string; label?: string; account?: string }> = {};
+    for (const x of items) {
+      out[x.id] = {
+        installed: x.installed,
+        version: x.version,
+        chat: x.chat,
+        agent: x.agent,
+        bin: x.bin,
+        label: x.label,
+        account: x.account,
+      };
+    }
+    // 兼容旧 UI：保证三家键始终存在
     for (const name of ["codex", "cursor", "claude"] as CliName[]) {
-      out[name] = await detectCli(name);
+      if (!out[name]) out[name] = { installed: false, chat: false, agent: false };
     }
     return out;
   }

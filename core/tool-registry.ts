@@ -19,10 +19,16 @@ export interface ToolCtx {
 }
 
 export type ToolHandler = (ctx: ToolCtx) => ToolOutcome | Promise<ToolOutcome>;
+/** 静态说明，或每次列出工具时现算（跟随本机探测等） */
+export type ToolDescription = string | (() => string);
 
 interface Entry {
-  description: string;
+  description: ToolDescription;
   handle: ToolHandler;
+}
+
+function descText(d: ToolDescription): string {
+  return typeof d === "function" ? d() : d;
 }
 
 export class ToolRegistry {
@@ -30,13 +36,13 @@ export class ToolRegistry {
   private prefixes: { prefix: string; entry: Entry }[] = [];
 
   /** 精确名称，如 web.search */
-  register(name: string, description: string, handle: ToolHandler): this {
+  register(name: string, description: ToolDescription, handle: ToolHandler): this {
     this.exact.set(name, { description, handle });
     return this;
   }
 
   /** 前缀匹配，如 skill: / mcp: / ui. / app.；长前缀优先 */
-  registerPrefix(prefix: string, description: string, handle: ToolHandler): this {
+  registerPrefix(prefix: string, description: ToolDescription, handle: ToolHandler): this {
     this.prefixes.push({ prefix, entry: { description, handle } });
     this.prefixes.sort((a, b) => b.prefix.length - a.prefix.length);
     return this;
@@ -59,15 +65,15 @@ export class ToolRegistry {
     return entry.handle(ctx);
   }
 
-  /** 给模型看的工具清单（精确名 + 前缀族各一行说明） */
+  /** 给模型看的工具清单（精确名 + 前缀族各一行说明；描述函数每次现算） */
   prompt(): string {
     const lines: string[] = [];
-    for (const [name, e] of this.exact) lines.push(`- ${name}: ${e.description}`);
+    for (const [name, e] of this.exact) lines.push(`- ${name}: ${descText(e.description)}`);
     const seen = new Set<string>();
     for (const { prefix, entry } of this.prefixes) {
       if (seen.has(prefix)) continue;
       seen.add(prefix);
-      lines.push(`- ${prefix}*: ${entry.description}`);
+      lines.push(`- ${prefix}*: ${descText(entry.description)}`);
     }
     return lines.join("\n");
   }

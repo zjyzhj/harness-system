@@ -2243,7 +2243,11 @@ ipcMain.handle("bots:update", (_e, id: string, patch: { name?: string; role?: st
   }
   if (patch.agentCli !== undefined) {
     if (!patch.agentCli) delete next.agentCli;
-    else if (["cursor", "claude", "codex"].includes(patch.agentCli)) next.agentCli = patch.agentCli;
+    else {
+      const id = String(patch.agentCli).trim().toLowerCase();
+      if (id) next.agentCli = id;
+      else delete next.agentCli;
+    }
   }
   store.saveBot(next);
   return next;

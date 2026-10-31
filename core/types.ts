@@ -51,8 +51,8 @@ export interface Bot {
   shareOnboard?: BotNeeds;
   /** G10：cli.agent 默认工程根（realpath）；派工时可省略 cwd */
   agentCwd?: string;
-  /** G10：cli.agent 偏好 CLI（cursor / claude / codex） */
-  agentCli?: "cursor" | "claude" | "codex";
+  /** G10：cli.agent 偏好后端 id（注册表内；以本机探测为准，未装会自动换） */
+  agentCli?: string;
 }
 
 /** 分享 / 开箱依赖声明：只带名单与说明，不含密钥或 env 值 */

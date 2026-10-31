@@ -25,6 +25,7 @@ import {
   resolveCwdInput,
   runCliAgent,
 } from "./cli-agent";
+import { cliAgentToolDescription, probeCodingAgents } from "./coding-agents";
 export * from "./runtime/types";
 export * from "./runtime/turn-helpers";
 export * from "./runtime/rules-text";
@@ -576,9 +577,11 @@ export class BotRuntime {
     R.register("env.delete", "删除一项配置。参数: key, scope?（all = 共用的那项）", (ctx) => this.envTool(ctx.bot, "env.delete", ctx.args));
     R.register(
       "cli.agent",
-      "派本机 Cursor / Claude / Codex CLI（Agent 可写模式）去改某个工程目录里的代码。大仓库、多文件重构、复杂实现用它；小文件仍用 fs.write。参数: task（任务说明）, cwd?（工程根绝对路径；可先 env.set PROJECT_ROOT）, cli?（cursor|claude|codex，默认本机已装的优先 cursor）, timeoutMin?（默认 20，最大 60）。会弹确认；不要绕过拒绝换 CLI 重试。",
+      () => cliAgentToolDescription(),
       (ctx) => this.cliAgentTool(ctx.bot, ctx.args, turn(ctx)),
     );
+    // 后台暖探测缓存，让工具说明 / 提示词能跟上本机安装变化
+    void probeCodingAgents().catch(() => {});
     builtin("memory.list", "列出某个 bot 已存的规范/事实单条。用户问「你记得什么 / 关于我知道些什么」时用。参数: bot?（bot 名，默认你自己）, kind?（rule=规范 / fact=事实，默认全部）");
     builtin("memory.search", "按意思检索记忆和过往对话（如「上次聊的那个方案」）。参数: query");
     builtin("memory.update", "改一条已存的记忆 / 规范（用户纠正、规范要改时用，不要再 add 一条相反的）。参数: match（原文里的几个字，用来定位）, content（改成什么）, bot?（改哪个 bot 的，默认你自己）, scope?（all = 全局共享的）");

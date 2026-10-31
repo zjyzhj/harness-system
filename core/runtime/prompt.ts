@@ -7,6 +7,7 @@ import { formatNow } from "./turn-helpers";
 import { rulesWhereabouts } from "./rules-text";
 import { isDemoTopic } from "../demo-skill";
 import { diffNeeds, hasAnyGaps, onboardPromptSection } from "../bot-share-needs";
+import { formatCodingAgentsPromptLine } from "../coding-agents";
 
 /** 可选提示词附加（娱乐侧车等挂载；默认空 = Bot 完整设计不受干扰） */
 export type PromptExtras = {
@@ -101,7 +102,7 @@ export class PromptBuilder {
 - 对外或不可逆的操作（发消息/通知到飞书、钉钉、Slack、邮件等外部渠道、上传、发布、提交、删除、付费、改线上数据）执行前，必须先调用 ui.confirm 工具（不要用文字代替），说明要做什么并等用户点「确认」，用户确认后再执行。软件里的群聊（[群名](app:group/…)）是内部的：用户让你往群里发话，直接用 group.send 发，不用确认，也不要转托别的 bot 代发。
 - 只有工具结果里写明成功的事才能说「已发送 / 已完成」；没有对应工具就如实说做不到。
 - 需要密码 / Token / App Secret 等敏感信息时，用 ui.secret（name, label, note 写清用途）让用户在加密输入框里填写，不要让用户直接发在聊天里；保存后 bash.run 里写 $名字，其它工具参数里写 {{secret:名字}}，你看不到真值。已经配置过的看【已配置的环境】，不要重复要。
-- 改用户工程里的代码（大仓库、多文件、实现功能、修 bug）：用 cli.agent（task + cwd 或先 env.set PROJECT_ROOT）；会启动本机 Cursor/Claude/Codex 可写 Agent，须用户批准。白名单工作区里的小文件仍用 fs.write；不要把聊天用的 CLI Provider 当成会改仓库——派工只走 cli.agent。
+- 改用户工程里的代码（大仓库、多文件、实现功能、修 bug）：用 cli.agent（task + cwd 或先 env.set PROJECT_ROOT）；会启动本机已探测到的 Coding CLI（可写 Agent），须用户批准。白名单工作区里的小文件仍用 fs.write；不要把聊天用的 CLI Provider 当成会改仓库——派工只走 cli.agent。可调哪些以【已配置的环境】里实时探测为准，不要背死名单。
 - 问到新闻、价格、版本、政策等可能过时或你不确定的事实时，先用 web.search 联网查，必要时再用 web.fetch 打开具体网页；回答里用到网上的信息，就在那句话末尾标上来源序号，如 [1]、[2][3]（序号就是工具结果里给的编号），不要在末尾另列参考链接。
 - 用户要画图、生成海报/头像/插画时用 image.generate；要改一张已有的图时用 image.edit。
 - 用户给某类任务定规范、改要求、指出你做得不对时，规范要写到以后真正会用到的地方：
@@ -143,17 +144,16 @@ export class PromptBuilder {
     const who = (id?: string) => (id ? (id === bot.id ? "你" : this.deps.store.getBot(id)?.name ?? "用户") : "用户");
     const envLines = env.map((e) => `  - ${e.key}=${e.value.length > 120 ? `${e.value.slice(0, 120)}…` : e.value}${e.label ? `（${e.label}）` : ""}${e.note ? `：${e.note}` : ""}${e.botId ? "" : " [所有 bot 共用]"}`);
     const secretLines = secrets.map((s) => `  - ${s.name}${s.label && s.label !== s.name ? `（${s.label}）` : ""}${s.note ? `：${s.note}` : ""}${s.botId ? "" : " [所有 bot 共用]"} · ${who(s.savedBy)}在 ${new Date(s.savedAt).toISOString().slice(0, 10)} 配置`);
-    const agentBits = [
-      bot.agentCwd ? `默认工程 agentCwd=${bot.agentCwd}` : "",
-      bot.agentCli ? `偏好 Coding CLI=${bot.agentCli}` : "",
-    ].filter(Boolean);
+    const agentPref = [
+      bot.agentCwd ? `默认工程 agentCwd=${bot.agentCwd}` : "默认工程未绑（首次请传 cwd 或 env.set PROJECT_ROOT）",
+      bot.agentCli ? `偏好 cli=${bot.agentCli}（未装则自动换）` : "无偏好（按探测顺序）",
+    ].join("；");
     const config = [
       `【已配置的环境】用户给过的配置都存在这里，重启后还在；需要时直接用，不要再问用户要。查看 / 修改：[环境配置](app:settings/env)`,
       envLines.length ? `- 环境变量（bash.run 执行时自动注入，命令里直接写 $KEY）：\n${envLines.join("\n")}` : "- 环境变量：还没有",
       secretLines.length ? `- 密钥（加密保存，你看不到值；bash.run 里写 $NAME，其它工具参数里写 {{secret:NAME}}）：\n${secretLines.join("\n")}` : "- 密钥：还没有",
-      agentBits.length
-        ? `- 写代码派工（cli.agent）：${agentBits.join("；")}。有 agentCwd 时调 cli.agent 可省略 cwd；改默认用 app.updateSelf（agentCwd / agentCli）。`
-        : "- 写代码派工：尚未绑定默认工程；首次 cli.agent 请传 cwd，或 env.set PROJECT_ROOT。",
+      formatCodingAgentsPromptLine(),
+      `  bot 偏好：${agentPref}。改默认用 app.updateSelf（agentCwd / agentCli）。`,
       "用户给你接口地址、账号名、项目 ID 这类普通配置时用 env.set 存；密码 / Token / Secret 用 ui.secret 让用户加密填写，不要明文存，也不要让用户发在聊天里。配置有变化就更新原来那项。\n用户刚给完配置或密钥（用户说已在加密框里填好，或 env.set 成功）后，如果能低成本验证（如调一次只读接口、登录测试），用 bash.run 验证一次并告诉用户结果；验证失败就说明原因，请用户检查后用 ui.secret（overwrite:true）或 env.set 更新。",
     ].join("\n");
 
