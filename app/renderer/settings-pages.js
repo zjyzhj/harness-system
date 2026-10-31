@@ -72,7 +72,10 @@ async function settingsFlow() {
     const providers = await api.providers.list();
     const usage = (p) => bots.filter((b) => effectiveProvider(b, providers)?.id === p.id).length;
     body.innerHTML = `
-      <div class="d-sec"><h4>本机 CLI</h4><div class="mx-chips">${["claude", "codex", "cursor"].map((c) => `<span class="mx-chip ${caps[c]?.installed ? "ok" : ""}">${caps[c]?.installed ? "✓" : "✕"} ${c}${caps[c]?.version ? ` · ${esc(caps[c].version.split(" ")[0])}` : ""}</span>`).join("")}</div></div>
+      <div class="d-sec"><h4>本机 CLI <button class="ghost-btn" id="cli-refresh" title="重新探测">刷新</button></h4>
+        <div class="mx-chips">${["claude", "codex", "cursor"].map((c) => `<span class="mx-chip ${caps[c]?.installed ? "ok" : ""}">${caps[c]?.installed ? "✓" : "✕"} ${c}${caps[c]?.version ? ` · ${esc(caps[c].version.split(" ")[0])}` : ""}${caps[c]?.account ? ` · ${esc(caps[c].account)}` : ""}</span>`).join("")}</div>
+        <div class="hint">Cursor CLI 与 IDE 共用 macOS 钥匙串：<code>cursor-agent logout</code> 只清 CLI 配置，<code>status</code> 仍可能显示 IDE 老账号。彻底退出：logout 后删钥匙串 <code>cursor-access-token</code> / <code>Cursor Safe Storage</code>，或在 Cursor 设置里 Sign out，再 <code>cursor-agent login</code>。软件不缓存登录态。</div>
+      </div>
       <div class="d-sec"><h4>Provider <button class="list-add" id="pv-new" title="添加">＋</button></h4>
         ${providers.map((p) => `
           <div class="d-card" data-id="${esc(p.id)}">
@@ -94,6 +97,10 @@ async function settingsFlow() {
     renderImageGen(body.querySelector("#ig-sec"));
     renderEmbedding(body.querySelector("#em-sec"));
     renderUsage(body.querySelector("#us-sec"));
+    body.querySelector("#cli-refresh")?.addEventListener("click", async () => {
+      Object.assign(caps, await api.providers.capabilities().catch(() => caps));
+      render();
+    });
     body.querySelector("#pv-new").onclick = () => { editing = {}; render(); };
     body.querySelectorAll(".d-card[data-id]").forEach((card) => (card.onclick = async (e) => {
       const op = e.target.closest("button")?.dataset.op;
@@ -461,7 +468,7 @@ const MEMORY_KIND = { rule: "规范", fact: "事实/偏好", summary: "摘要", 
 const MEMORY_SOURCE = { user: "用户说的", bot: "bot 记下", manual: "手动添加", auto: "自动", "auto-summarize": "自动摘要", "bot-runtime": "bot 记下" };
 /** opts.ns 打开指定命名空间；opts.kind 只看某一类（rule / fact / event） */
 async function memoryFlow(opts = {}) {
-  const modal = sheet({ icon: "🧠", title: "记忆", sub: "规范是 bot 必须遵守的要求，每次对话都会带上；事实是关于你的信息；MEMORY.md 是给模型看的总结", wide: true });
+  const modal = sheet({ icon: "🧠", title: "记忆", sub: "规范常驻；事实按相关注入。MEMORY.md 由系统后台蒸馏，只在问到记忆或内容相关时带上（也可手动重写）", wide: true });
   const body = modal.querySelector(".mx-body");
   let filter = "";
   let kindFilter = opts.kind ?? "";
@@ -895,10 +902,16 @@ async function plansFlow() {
     } else if (st.status === "done" && st.result) {
       extra = `<details class="pl-out" data-key="${esc(st.id)}" ${opened.has(st.id) ? "open" : ""}><summary>这一步的产出</summary><div class="pl-md">${renderMarkdown(esc(st.result))}</div></details>`;
     }
+    const ownerId = st.ownerBotId || st.botId;
+    const owner = botById(ownerId);
+    const ownerTag = ownerId !== st.botId
+      ? `<span class="tag" title="已移交">负责人 ${esc(owner?.name || ownerId)}</span>`
+      : "";
+    const note = st.handOffNote ? `<div class="hint">移交：${esc(st.handOffNote)}</div>` : "";
     return `<div class="pl-step s-${esc(st.status)}">
       <div class="pl-step-row"><span class="pl-dot">${ICON[st.status] ?? "○"}</span>
-        <span class="pl-step-bot">${i + 1}. ${esc(bot?.name || "已删除的 bot")}${st.mode === "fan" ? '<span class="tag">并行</span>' : ""}</span>
-        <span class="pl-step-prompt" title="${esc(st.prompt || "")}">${esc(st.prompt || "")}</span>${time}</div>${extra}</div>`;
+        <span class="pl-step-bot">${i + 1}. ${esc(bot?.name || "已删除的 bot")}${st.mode === "fan" ? '<span class="tag">并行</span>' : ""}${ownerTag}</span>
+        <span class="pl-step-prompt" title="${esc(st.prompt || "")}">${esc(st.prompt || "")}</span>${time}</div>${note}${extra}</div>`;
   };
 
   const cardHtml = (p) => {
@@ -912,7 +925,13 @@ async function plansFlow() {
       : `<details class="pl-result" data-key="${esc(p.id)}" ${opened.has(p.id) ? "open" : ""}><summary>最终结果</summary><div class="pl-md">${renderMarkdown(esc(p.result))}</div><button class="ghost-btn" data-op="copy">复制结果</button></details>`;
     return `<div class="pl-card ${running ? "running" : ""}" data-id="${esc(p.id)}">
       <div class="pl-head"><b title="${esc(p.title)}">${esc(p.title)}</b>
-        <span class="pl-st st-${esc(p.status)}">${esc(label)}${running ? ` · ${doneN}/${p.stages.length}` : ""}</span>
+        <span class="pl-st st-${esc(p.status)}">${esc(label)}${running ? ` · ${doneN}/${p.stages.length}` : ""}${(() => {
+          const cur = p.stages.find((s) => s.status === "running") || p.stages.find((s) => s.status === "pending");
+          if (!cur) return "";
+          const oid = cur.ownerBotId || cur.botId;
+          const on = botById(oid)?.name || oid;
+          return ` · 当前负责人 ${esc(on)}`;
+        })()}</span>
         ${running && p.startedAt ? `<span class="pl-time" data-since="${p.startedAt}">${dur(Date.now() - p.startedAt)}</span>` : total ? `<span class="pl-time">${esc(total.slice(3))}</span>` : ""}
         <span class="mx-ops">${running ? `<button class="ghost-btn" data-op="cancel">停止</button>` : `<button class="ghost-btn" data-op="run">${p.status === "pending" ? "运行" : "重新运行"}</button><button class="icon-btn" data-op="del" title="删除">✕</button>`}</span></div>
       ${running ? `<div class="pl-bar"><i style="width:${Math.round((doneN / p.stages.length) * 100)}%"></i></div>` : ""}
@@ -1292,7 +1311,115 @@ $("#groups-btn").onclick = groupsFlow;
 $("#plans-btn").onclick = plansFlow;
 $("#sysaccess-btn").onclick = sysaccessFlow;
 $("#env-btn").onclick = () => envFlow();
+$("#vault-btn").onclick = () => vaultFlow();
 $("#mcp-btn").onclick = mcpFlow;
+
+/* ---- 保险库 / 连接（本机；无 OAuth / 支付 / 云邮箱） ---- */
+async function vaultFlow() {
+  const modal = sheet({ icon: "🛡", title: "保险库 / 连接", sub: "本机密钥 · 环境 · 通讯录 · MCP / Webhook / CLI（非应用市场）", wide: true });
+  const body = modal.querySelector(".mx-body");
+  let tab = "overview";
+  let catalog = await api.vault.catalog().catch(() => ({ secrets: 0, env: 0, contacts: 0, webhooks: 0, mcp: [], cli: [] }));
+  let contactList = await api.contacts.list().catch(() => []);
+  let hooks = await api.connectors.listWebhooks().catch(() => []);
+  let editingContact = null;
+  let editingHook = null;
+  const refresh = async () => {
+    catalog = await api.vault.catalog().catch(() => catalog);
+    contactList = await api.contacts.list().catch(() => contactList);
+    hooks = await api.connectors.listWebhooks().catch(() => hooks);
+    render();
+  };
+  const render = () => {
+    const tabs = [
+      ["overview", "总览"],
+      ["contacts", "通讯录"],
+      ["webhooks", "Webhook"],
+      ["mcp", "MCP / CLI"],
+    ].map(([id, label]) => `<button class="ghost-btn ${tab === id ? "on" : ""}" data-tab="${id}">${label}</button>`).join("");
+    let main = "";
+    if (tab === "overview") {
+      main = `
+        <div class="d-sec">
+          <div class="d-card"><div class="c-main"><div class="c-title">密钥</div><div class="c-sub">${catalog.secrets} 项 · 加密本机</div></div><button class="ghost-btn" id="v-env">打开环境配置</button></div>
+          <div class="d-card"><div class="c-main"><div class="c-title">环境变量</div><div class="c-sub">${catalog.env} 项 · 明文配置</div></div><button class="ghost-btn" id="v-env2">打开环境配置</button></div>
+          <div class="d-card"><div class="c-main"><div class="c-title">通讯录</div><div class="c-sub">${catalog.contacts} 人 · 无支付</div></div></div>
+          <div class="d-card"><div class="c-main"><div class="c-title">Webhook</div><div class="c-sub">${catalog.webhooks} 个端点</div></div></div>
+          <div class="hint">不做：OAuth 应用市场、Shop Pay、云邮箱身份 name+tag@。添加 MCP 走现有 MCP 页；密钥用 {{secret:名字}}。</div>
+        </div>`;
+    } else if (tab === "contacts") {
+      main = `<div class="d-sec"><h4>通讯录 <button class="list-add" id="ct-new" title="添加">＋</button></h4>
+        ${contactList.map((c) => `<div class="d-card" data-cid="${esc(c.id)}"><div class="c-main"><div class="c-title">${esc(c.name)}</div><div class="c-sub">${esc([c.email, c.note].filter(Boolean).join(" · ") || "无备注")}</div></div>
+          <button class="ghost-btn" data-op="edit">编辑</button><button class="ghost-btn danger-text" data-op="del">删除</button></div>`).join("") || `<div class="d-empty">还没有联系人</div>`}
+        ${editingContact ? `<div class="mx-form"><h4>${editingContact.id ? "编辑" : "添加"}联系人</h4>
+          <div class="mx-grid"><label>姓名</label><input id="ct-name" value="${esc(editingContact.name ?? "")}" />
+          <label>邮箱</label><input id="ct-email" value="${esc(editingContact.email ?? "")}" placeholder="可选" />
+          <label>备注</label><input id="ct-note" value="${esc(editingContact.note ?? "")}" placeholder="可选" /></div>
+          <div class="actions"><button class="ghost-btn" id="ct-cancel">取消</button><button class="primary-btn" id="ct-save">保存</button></div></div>` : ""}
+      </div>`;
+    } else if (tab === "webhooks") {
+      main = `<div class="d-sec"><h4>HTTP Webhook <button class="list-add" id="wh-new" title="添加">＋</button></h4>
+        ${hooks.map((w) => `<div class="d-card" data-wid="${esc(w.id)}"><div class="c-main"><div class="c-title">${esc(w.name)}</div><div class="c-sub">${esc(w.url)}${w.note ? ` · ${esc(w.note)}` : ""}</div></div>
+          <button class="ghost-btn" data-op="edit">编辑</button><button class="ghost-btn danger-text" data-op="del">删除</button></div>`).join("") || `<div class="d-empty">还没有 Webhook。Token 用 {{secret:名字}}，不要明文。</div>`}
+        ${editingHook ? `<div class="mx-form"><h4>${editingHook.id ? "编辑" : "添加"} Webhook</h4>
+          <div class="mx-grid"><label>名称</label><input id="wh-name" value="${esc(editingHook.name ?? "")}" />
+          <label>URL</label><input id="wh-url" value="${esc(editingHook.url ?? "")}" placeholder="https://…" />
+          <label>备注</label><input id="wh-note" value="${esc(editingHook.note ?? "")}" placeholder="可选；Header 里写 {{secret:…}}" /></div>
+          <div class="actions"><button class="ghost-btn" id="wh-cancel">取消</button><button class="primary-btn" id="wh-save">保存</button></div></div>` : ""}
+      </div>`;
+    } else {
+      const mcpRows = (catalog.mcp || []).map((m) => `<div class="d-card"><span class="ws-dot ${m.error ? "" : m.tools ? "on" : ""}"></span><div class="c-main"><div class="c-title">${esc(m.name)}</div><div class="c-sub">${m.error ? `✕ ${esc(m.error)}` : `${m.tools} 工具`} · ${esc(m.url ?? [m.command, ...(m.args || [])].filter(Boolean).join(" "))}</div></div></div>`).join("") || `<div class="d-empty">没有 MCP</div>`;
+      const cliRows = (catalog.cli || []).map((c) => `<div class="d-card"><span class="ws-dot ${c.ready ? "on" : ""}"></span><div class="c-main"><div class="c-title">${esc(c.name)}</div><div class="c-sub">${esc(c.detail || (c.ready ? "可用" : "未就绪"))}</div></div></div>`).join("");
+      main = `<div class="d-sec"><h4>MCP <button class="ghost-btn" id="v-mcp">管理 MCP</button></h4>${mcpRows}</div>
+        <div class="d-sec"><h4>CLI 适配器状态</h4>${cliRows}</div>
+        <div class="hint">添加连接走现有 mcp.add / 环境配置 / 密钥；不接 OAuth 应用市场。</div>`;
+    }
+    body.innerHTML = `<div class="actions" style="margin-bottom:12px">${tabs}</div>${main}`;
+    body.querySelectorAll("[data-tab]").forEach((b) => (b.onclick = () => { tab = b.dataset.tab; editingContact = null; editingHook = null; render(); }));
+    body.querySelector("#v-env")?.addEventListener("click", () => { closeModal(); envFlow(); });
+    body.querySelector("#v-env2")?.addEventListener("click", () => { closeModal(); envFlow(); });
+    body.querySelector("#v-mcp")?.addEventListener("click", () => { closeModal(); mcpFlow(); });
+    body.querySelector("#ct-new")?.addEventListener("click", () => { editingContact = { name: "" }; render(); });
+    body.querySelector("#ct-cancel")?.addEventListener("click", () => { editingContact = null; render(); });
+    body.querySelector("#ct-save")?.addEventListener("click", async () => {
+      try {
+        await api.contacts.upsert({
+          id: editingContact.id,
+          name: body.querySelector("#ct-name").value.trim(),
+          email: body.querySelector("#ct-email").value.trim() || undefined,
+          note: body.querySelector("#ct-note").value.trim() || undefined,
+        });
+        editingContact = null;
+        await refresh();
+      } catch (e) { alert(errText(e)); }
+    });
+    body.querySelectorAll("[data-cid]").forEach((card) => {
+      const id = card.dataset.cid;
+      card.querySelector('[data-op="edit"]').onclick = () => { editingContact = contactList.find((c) => c.id === id); render(); };
+      card.querySelector('[data-op="del"]').onclick = async () => { if (confirm("删除这个联系人？")) { await api.contacts.remove(id); await refresh(); } };
+    });
+    body.querySelector("#wh-new")?.addEventListener("click", () => { editingHook = { name: "", url: "" }; render(); });
+    body.querySelector("#wh-cancel")?.addEventListener("click", () => { editingHook = null; render(); });
+    body.querySelector("#wh-save")?.addEventListener("click", async () => {
+      try {
+        await api.connectors.upsertWebhook({
+          id: editingHook.id,
+          name: body.querySelector("#wh-name").value.trim(),
+          url: body.querySelector("#wh-url").value.trim(),
+          note: body.querySelector("#wh-note").value.trim() || undefined,
+        });
+        editingHook = null;
+        await refresh();
+      } catch (e) { alert(errText(e)); }
+    });
+    body.querySelectorAll("[data-wid]").forEach((card) => {
+      const id = card.dataset.wid;
+      card.querySelector('[data-op="edit"]').onclick = () => { editingHook = hooks.find((w) => w.id === id); render(); };
+      card.querySelector('[data-op="del"]').onclick = async () => { if (confirm("删除这个 Webhook？")) { await api.connectors.removeWebhook(id); await refresh(); } };
+    });
+  };
+  render();
+}
 $("#pet-smart-btn").onclick = petSmartFlow;
 $("#about-btn").onclick = aboutFlow;
 api.onOpenAbout?.(() => aboutFlow());

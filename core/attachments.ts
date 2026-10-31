@@ -112,14 +112,33 @@ export async function extractText(path: string): Promise<string | null> {
 
 export type FileBlock = Extract<ContentBlock, { type: "file" }>;
 
-/** 把本机文件收进附件目录，抽好文本；图片返回 image 块 */
+/** 超过此大小：只引用原路径，不复制进工作区、不抽正文进模型（约 100MB） */
+export const MAX_ATTACH_COPY_BYTES = 100 * 1024 * 1024;
+/** 视频等大媒体：一律只作路径引用 */
+const MEDIA_EXT = /\.(mp4|mov|m4v|webm|mkv|avi|mp3|wav|m4a|aac|flac)$/i;
+
+/** 把本机文件收进附件目录，抽好文本；图片返回 image 块。大文件 / 视频只挂路径。 */
 export async function ingestFiles(paths: string[], destDir: string): Promise<ContentBlock[]> {
   mkdirSync(join(destDir, ".text"), { recursive: true });
   const out: ContentBlock[] = [];
   for (const src of paths) {
     if (!existsSync(src) || !statSync(src).isFile()) continue;
     const name = basename(src);
+    const size = statSync(src).size;
     const stamp = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 5)}`;
+    // 大文件 / 视频：不进模型上下文，只作 file 块 + 原路径
+    if (size > MAX_ATTACH_COPY_BYTES || MEDIA_EXT.test(name)) {
+      out.push({
+        type: "file",
+        path: src,
+        name,
+        size,
+        error: size > MAX_ATTACH_COPY_BYTES
+          ? `文件约 ${(size / 1024 / 1024).toFixed(1)}MB，已按路径引用（不复制、不抽正文）；需要时用 fs 工具按路径处理`
+          : "音视频仅作路径附件，不送入模型上下文",
+      });
+      continue;
+    }
     const dest = join(destDir, `${stamp}-${name}`);
     copyFileSync(src, dest);
     if (IMAGE_EXT.test(name)) { out.push({ type: "image", path: dest, alt: name }); continue; }

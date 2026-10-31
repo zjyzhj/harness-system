@@ -1,8 +1,16 @@
 import { spawn } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { contentText, type ChatMessage, type Provider } from "../types";
+
+/** cursor-agent 工作目录：空沙箱，避免扫启动目录（harness 仓库）拖慢冷启动 */
+function cliWorkspaceDir(): string {
+  const dir = join(tmpdir(), "harness-cli-cwd");
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+  return dir;
+}
 
 export type CliName = "codex" | "cursor" | "claude";
 
@@ -12,14 +20,43 @@ export interface CliCapability {
   installed: boolean;
   version?: string;
   chat: boolean;
+  /** 当前 CLI 登录账号（cursor-agent status 等）；软件本身不存登录态 */
+  account?: string;
 }
 
 export async function detectCli(name: CliName): Promise<CliCapability> {
   const v = await runQuiet(CLI_BIN[name], ["--version"]);
   if (v.code === 0 && v.stdout.trim()) {
-    return { installed: true, version: v.stdout.trim().split("\n")[0], chat: true };
+    const account = await cliAccount(name);
+    return { installed: true, version: v.stdout.trim().split("\n")[0], chat: true, account };
   }
   return { installed: false, chat: false };
+}
+
+/** cursor-agent login 写入的 CLI 身份；与 IDE 钥匙串里的 cursor-access-token 不是同一套 */
+function readCursorCliAuthEmail(): string | undefined {
+  try {
+    const path = join(process.env.HOME ?? homedir(), ".cursor", "cli-config.json");
+    const d = JSON.parse(readFileSync(path, "utf8")) as { authInfo?: { email?: string } | null };
+    const email = d.authInfo?.email?.trim();
+    return email || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** 读本机 CLI 登录身份（每次现查；Electron 不缓存） */
+async function cliAccount(name: CliName): Promise<string | undefined> {
+  if (name !== "cursor") return undefined;
+  const r = await runQuiet(CLI_BIN.cursor, ["status"], { timeoutMs: 10_000 });
+  const text = `${r.stdout}\n${r.stderr}`.trim();
+  if (/not logged in|未登录/i.test(text)) return "未登录";
+  const m = text.match(/Logged in as\s+(\S+)/i) || text.match(/登录(?:为|成)\s*(\S+)/);
+  const statusEmail = m?.[1]?.replace(/[。.]$/, "");
+  const cliEmail = readCursorCliAuthEmail();
+  if (cliEmail) return cliEmail;
+  if (statusEmail) return `${statusEmail}（IDE 钥匙串，非 CLI login）`;
+  return undefined;
 }
 
 /**
@@ -36,10 +73,10 @@ export async function completeCli(p: Provider, user: string, system?: string, hi
   const outFile = outDir ? join(outDir, "last.txt") : undefined;
   try {
     const args = cliArgs(cli, prompt, system, p.model, outFile);
-    const env = cliEnv(cli, p);
+    const env = mergeCliEnv(cli, p);
     const r = await runQuiet(CLI_BIN[cli], args, { timeoutMs: 180_000, env });
     if (r.code !== 0) {
-      throw new Error(`${cli} CLI 调用失败(${r.code}): ${r.stderr.trim().slice(0, 300) || r.stdout.trim().slice(0, 300)}`);
+      throw new Error(formatCliError(cli, r.code, r.stderr.trim().slice(0, 300) || r.stdout.trim().slice(0, 300)));
     }
     const text = extractOutput(r.stdout, outFile);
     if (!text) throw new Error(`${cli} CLI 返回为空`);
@@ -56,7 +93,13 @@ export async function completeCli(p: Provider, user: string, system?: string, hi
  */
 export function streamCliArgs(cli: "claude" | "cursor", prompt: string, system?: string, model?: string): string[] {
   if (cli === "cursor") {
-    return ["-p", "--output-format", "stream-json", "--stream-partial-output", "--trust", ...(model ? ["--model", model] : []), prompt];
+    // ask：问答只读，不拉起写文件/shell 等重工具；workspace 指到空目录，避免索引 harness 仓库
+    return [
+      "-p", "--output-format", "stream-json", "--stream-partial-output",
+      "--trust", "--mode", "ask", "--workspace", cliWorkspaceDir(),
+      ...(model ? ["--model", model] : []),
+      prompt,
+    ];
   }
   return [
     "-p", prompt,
@@ -91,12 +134,16 @@ export function parseStreamLine(cli: "claude" | "cursor", line: string, acc: str
 
 function streamCli(cli: "claude" | "cursor", p: Provider, prompt: string, system: string | undefined, onDelta: (t: string) => void, signal?: AbortSignal): Promise<string> {
   const args = streamCliArgs(cli, prompt, system, p.model);
-  const extra: NodeJS.ProcessEnv = { ...(cliEnv(cli, p) ?? {}) };
-  if (cli === "claude") Object.assign(extra, { CLAUDE_CODE_EFFORT_LEVEL: "low", CLAUDE_EFFORT: "low" });
+  const env = mergeCliEnv(cli, p);
+  if (cli === "claude") Object.assign(env, { CLAUDE_CODE_EFFORT_LEVEL: "low", CLAUDE_EFFORT: "low" });
   return new Promise((resolve, reject) => {
     let proc: ReturnType<typeof spawn>;
     try {
-      proc = spawn(CLI_BIN[cli], args, { stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, ...extra } });
+      proc = spawn(CLI_BIN[cli], args, {
+        stdio: ["ignore", "pipe", "pipe"],
+        env,
+        cwd: cli === "cursor" ? cliWorkspaceDir() : undefined,
+      });
     } catch (e) {
       reject(new Error(`${cli} CLI 启动失败: ${e}`));
       return;
@@ -122,8 +169,8 @@ function streamCli(cli: "claude" | "cursor", p: Provider, prompt: string, system
       clearTimeout(to);
       handle(buf);
       const text = (acc || result || "").trim();
-      if (failure && !text) return reject(new Error(`${cli} CLI 调用失败: ${failure.slice(0, 300)}`));
-      if (code !== 0 && !text) return reject(new Error(`${cli} CLI 调用失败(${code}): ${err.trim().slice(0, 300)}`));
+      if (failure && !text) return reject(new Error(formatCliError(cli, undefined, failure.slice(0, 300))));
+      if (code !== 0 && !text) return reject(new Error(formatCliError(cli, code, err.trim().slice(0, 300))));
       if (!text) return reject(new Error(`${cli} CLI 返回为空`));
       if (!acc && result) onDelta(result);
       resolve(text);
@@ -134,12 +181,51 @@ function streamCli(cli: "claude" | "cursor", p: Provider, prompt: string, system
 /** CLI 是单轮调用：把最近历史折叠进 prompt；claude 有独立 system 参数，其余 CLI 把 system 也拼进去 */
 function buildPrompt(cli: CliName, user: string, system?: string, history?: ChatMessage[]): string {
   const parts: string[] = [];
-  if (system && cli !== "claude") parts.push(`[系统设定]\n${system}`);
-  const hist = (history ?? []).slice(-10).map((m) => `${m.role === "assistant" ? "助手" : "用户"}: ${contentText(m.content)}`);
+  // cursor 冷启动对超长 system 很敏感：截断到约 6k，保留人设与要点
+  const sys = system && cli === "cursor" && system.length > 6000
+    ? `${system.slice(0, 5500)}\n…（系统说明已截断以加快 CLI 响应）`
+    : system;
+  if (sys && cli !== "claude") parts.push(`[系统设定]\n${sys}`);
+  const histN = cli === "cursor" ? 6 : 10;
+  const hist = (history ?? []).slice(-histN).map((m) => `${m.role === "assistant" ? "助手" : "用户"}: ${contentText(m.content)}`);
   if (hist.length) parts.push(`[对话历史]\n${hist.join("\n")}`);
   if (!parts.length) return user;
   parts.push(`[用户最新消息]\n${user}`);
   return parts.join("\n\n");
+}
+
+/** 额度耗尽等：提示本机登录态与换号方式（软件不缓存 Cursor 账号） */
+export function formatCliError(cli: string, code: number | undefined, detail: string): string {
+  const head = code == null ? `${cli} CLI 调用失败` : `${cli} CLI 调用失败(${code})`;
+  const tip = /usage limit|ActionRequiredError|Spend Limit|月度|额度/i.test(detail)
+    ? "\n本软件不存 Cursor 登录，每次现调本机 cursor-agent。IDE 换号 ≠ CLI 换号：终端执行 `cursor-agent logout` → `cursor-agent login`，再用 `cursor-agent status` 确认邮箱；或把 bot 模型切到 API（如 DeepSeek）。"
+    : "";
+  return `${head}: ${detail}${tip}`;
+}
+
+/**
+ * 从 Cursor Agent / IDE 继承来的变量会劫持本机 CLI 登录（尤其 CURSOR_API_KEY），
+ * 导致 logout/换号无效、一直打到 Agent 会话那个 Ultra 账号。spawn 前必须剥掉。
+ */
+const STRIP_CLI_ENV = [
+  "CURSOR_API_KEY",
+  "CURSOR_API_ENDPOINT",
+  "CURSOR_AGENT",
+  "CURSOR_AGENT_STORE_FILES_DIR",
+  "CURSOR_AGENT_STORE_SHARED_PATHS",
+  "CURSOR_CONVERSATION_ID",
+  "CURSOR_REQUEST_ID",
+  "CURSOR_EXTENSION_HOST_ROLE",
+  "AGENT_TRANSCRIPTS",
+];
+
+/** 完整子进程 env：干净 process.env + 可选面板透传 */
+function mergeCliEnv(cli: CliName, p: Provider): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  for (const k of STRIP_CLI_ENV) delete env[k];
+  const extra = cliEnv(cli, p);
+  if (extra) Object.assign(env, extra);
+  return env;
 }
 
 /**
@@ -166,7 +252,12 @@ export function cliArgs(cli: CliName, prompt: string, system?: string, model?: s
     case "codex":
       return ["exec", "--skip-git-repo-check", "--sandbox", "read-only", ...(model ? ["-m", model] : []), ...(outFile ? ["-o", outFile] : []), prompt];
     case "cursor":
-      return ["-p", "--output-format", "text", "--trust", ...(model ? ["--model", model] : []), prompt];
+      return [
+        "-p", "--output-format", "text", "--trust", "--mode", "ask",
+        "--workspace", cliWorkspaceDir(),
+        ...(model ? ["--model", model] : []),
+        prompt,
+      ];
     case "claude":
     default:
       return ["-p", prompt, ...(system ? ["--system-prompt", system] : []), ...(model ? ["--model", model] : [])];
@@ -188,7 +279,20 @@ function runQuiet(cmd: string, args: string[], opts?: { timeoutMs?: number; env?
   return new Promise((resolve) => {
     let proc: ReturnType<typeof spawn>;
     try {
-      proc = spawn(cmd, args, { stdio: ["ignore", "pipe", "pipe"], env: opts?.env ? { ...process.env, ...opts.env } : undefined });
+      // opts.env 若已是完整 env（mergeCliEnv）直接用；否则在 process.env 上合并并剥掉 Agent 劫持变量
+      let env = opts?.env;
+      if (!env) {
+        env = { ...process.env };
+        for (const k of STRIP_CLI_ENV) delete env[k];
+      } else if (!("PATH" in env) || !env.PATH) {
+        env = { ...process.env, ...env };
+        for (const k of STRIP_CLI_ENV) delete env[k];
+      }
+      proc = spawn(cmd, args, {
+        stdio: ["ignore", "pipe", "pipe"],
+        env,
+        cwd: cmd === CLI_BIN.cursor ? cliWorkspaceDir() : undefined,
+      });
     } catch (e) {
       resolve({ code: -1, stdout: "", stderr: String(e) });
       return;

@@ -1,6 +1,6 @@
 /* 记忆、技能、定时任务、MCP 工具的管理接口（设置页用） */
 import { ipcMain } from "electron";
-import { memoryStats, type MemorySystem } from "../../core/memory-system";
+import { memoryStats, memoRewriteMessages, type MemorySystem } from "../../core/memory-system";
 import { draftSkillWithAI, type SkillRegistry } from "../../core/skill-registry";
 import { skillFromText } from "../../core/bot-runtime";
 import type { Store } from "../../core/store";
@@ -25,12 +25,10 @@ export function registerKnowledgeIpc(deps: { store: Store; memory: MemorySystem;
   ipcMain.handle("memory:rewriteMemo", async (_e, ns: string) => {
     const p = providers.getDefault();
     if (!p) throw new Error("无默认 provider，无法生成总结");
-    return memory.rewriteMemo(ns, async (_cur, recent) => {
-      const r = await providers.complete(p, {
-        system: "把以下记忆压缩为 3-8 条要点权威总结（中文，保留关键事实与偏好）。",
-        user: recent.map((e) => `- ${e.content}`).join("\n"),
-      });
-      return r.text;
+    return memory.rewriteMemo(ns, async (cur, recent) => {
+      const msg = memoRewriteMessages(cur, recent);
+      const r = await providers.complete(p, { system: msg.system, user: msg.user });
+      return r.text.trim() || cur;
     });
   });
   ipcMain.handle("memory:merge", (_e, ns: string) => memory.mergeDuplicate(ns));

@@ -5,9 +5,24 @@ import { join } from "node:path";
 import type { RuntimeDeps, RuntimeOptions } from "./types";
 import { formatNow } from "./turn-helpers";
 import { rulesWhereabouts } from "./rules-text";
+import { isDemoTopic } from "../demo-skill";
+import { diffNeeds, hasAnyGaps, onboardPromptSection } from "../bot-share-needs";
+
+/** 可选提示词附加（娱乐侧车等挂载；默认空 = Bot 完整设计不受干扰） */
+export type PromptExtras = {
+  /** 稳定 system 里追加的一行/一节事实；返回空则不加 */
+  stableFact?: (bot: Bot) => string | null | undefined;
+  /** 易变上下文：按本轮 query 决定是否注入；返回空则不加 */
+  volatile?: (bot: Bot, query: string) => string | null | undefined;
+};
 
 export class PromptBuilder {
+  private extras: PromptExtras = {};
   constructor(private deps: RuntimeDeps, private toolsPrompt: () => string) {}
+
+  setExtras(extras: PromptExtras): void {
+    this.extras = extras;
+  }
 
   /**
    * 组装系统提示：只放跨请求不变或很少变的内容，越稳定越靠前，
@@ -21,7 +36,7 @@ export class PromptBuilder {
     if (opts?.extraSystem?.trim()) parts.push(opts.extraSystem.trim());
     if (opts?.unattended) parts.push("【无人值守】这是自动执行的任务，没有用户在场：不要反问、不要让用户选择或确认，也不要说「等你确认」。信息不全时自己做合理假设，在开头用一句话写明假设，然后直接交付完整产出。");
     // 软件真实状态放在交互约定前面，优先于对话里说过的旧话
-    // 桌宠只放一行事实（稳定前缀利缓存）；操作手册按需进 volatileContext，避免每轮拖长
+    // 娱乐侧车事实（若有）经 PromptExtras.stableFact 注入，不进 Bot 核心
     parts.push(this.selfFacts(bot, opts));
     parts.push(...this.instructionSections(bot, opts));
     if (opts?.injectMemory !== false) {
@@ -40,15 +55,19 @@ export class PromptBuilder {
     return this.deps.groups?.list(bot.id).map((g) => g.id) ?? [];
   }
 
-  /** 每条消息都可能不同的上下文：当前时间、按这条消息检索到的记忆、按需桌宠操作手册 */
+  /** 每条消息都可能不同的上下文：当前时间、按这条消息检索到的记忆、侧车易变附加 */
   volatileContext(bot: Bot, query: string, opts?: RuntimeOptions): string {
     const parts = [`当前时间：${formatNow(new Date())}`];
     if (opts?.injectMemory !== false) {
       const mem = this.deps.memory.buildContext(bot.id, query, this.groupIdsOf(bot), { rules: false });
       if (mem) parts.push(mem);
     }
-    // 用户这轮在谈桌宠时才展开手册（不进稳定 system，免得打断前缀缓存）
-    if (isPetTopic(query)) parts.push(this.petPlaybook(bot));
+    const demo = this.deps.demo;
+    if (demo && (demo.isRecording(bot.id) || isDemoTopic(query))) {
+      parts.push(demo.playbook(bot.id));
+    }
+    const extra = this.extras.volatile?.(bot, query);
+    if (extra?.trim()) parts.push(extra.trim());
     return parts.join("\n\n");
   }
 
@@ -90,6 +109,10 @@ export class PromptBuilder {
   3) 关于用户本人、或不属于某个具体任务的通用要求（称呼、语言、回答风格、团队分工）→ 用 memory.add（kind: rule）；用户明说「所有 bot / 大家都」才加 scope: "all"。
   直接存，不要先问用户「存到哪里 / 哪一层」；存完把工具结果里的链接给用户，让他点开就能看到和改。
   写完在回复里用技能引用告诉用户写进了哪里；链接必须原样使用工具结果里的 app:skill/…，不要自己编 key。没调用 skill.save / skill.update / memory.add 就不要说「建好了 / 记下了 / 写进规范了」——否则侧栏看不到、点开会提示找不到。
+- 记忆（对齐「相关才带、不每轮塞满」）：
+  1) 日常用 memory.add / update / forget / list 管单条 fact/rule；用户说「记住 / 忘掉 / 你记得什么」走工具，不要空口说记得。
+  2) 系统会在后台把单条蒸馏成 MEMORY.md，但不会每轮塞进上下文——只有问到记忆或内容相关时才会附上。你不必改 MEMORY.md；改单条即可。用户要看全文可给 [记忆](app:settings/memory)。
+  问「你记得什么」时用 memory.list 按单条如实答；记错了用 update / forget，不要再 add 一条相反的。
 - 提到软件里的东西时写成可点击的引用，用户点一下就能打开：技能 [技能名](app:skill/<key>)、bot [名字](app:bot/<名字>)、群聊 [群名](app:group/<群名>)、文件 [文件名](app:file/<绝对路径>)、项目 [项目名](app:project/<项目名>)；要用户去设置时给入口：[模型设置](app:settings/models)、[图片生成设置](app:settings/image)、[语音设置](app:settings/voice)、[技能管理](app:settings/skills)、[定时任务](app:settings/tasks)、[记忆](app:settings/memory)、[MCP 工具](app:settings/mcp)、[自定义指令](app:settings/instructions)、[系统权限](app:settings/access)。工具结果里已经给出的引用原样保留。`);
     parts.push(`回复要求：除非用户要求，用中文回答；需要调用技能时先输出工具块，工具结果返回后再给最终回复。要给用户看的文件、图片、产出物，一律用 file.send 交付到对话里，不要只贴路径。`);
     return parts;
@@ -127,40 +150,35 @@ export class PromptBuilder {
     ].join("\n");
 
     const app = `【软件现状】\n${this.appSnapshot(bot).lines.join("\n")}`;
-    const pet = this.petSelfBrief(bot);
-    return `${team}\n\n${pet}\n\n${app}\n\n${config}\n\n以上是这个软件当前的真实状态。用户问到软件里的任何东西（bot、群聊、定时任务、编排、项目、技能、配置），以这里为准回答，并附上可点的引用；这里没写全或要细节时调用 app.state 查，不要说「看不到 / 没有这类信息」。如果你之前在对话里说过查不到或说错了，直接按这里纠正。`;
+    const demoBrief = this.deps.demo?.brief(bot.id)?.trim();
+    const side = this.extras.stableFact?.(bot)?.trim();
+    const onboard = this.shareOnboardSection(bot);
+    const blocks = [team, demoBrief, side, app, config, onboard].filter(Boolean);
+    return `${blocks.join("\n\n")}\n\n以上是这个软件当前的真实状态。用户问到软件里的任何东西（bot、群聊、定时任务、编排、项目、技能、配置），以这里为准回答，并附上可点的引用；这里没写全或要细节时调用 app.state 查，不要说「看不到 / 没有这类信息」。如果你之前在对话里说过查不到或说错了，直接按这里纠正。`;
   }
 
-  /** 稳定前缀里只留一行桌宠事实（省 token + 利缓存）。不必 @，工具清单里已有 pet.* */
-  petSelfBrief(bot: Bot): string {
-    const host = this.deps.petHost;
-    const skin = host?.skinLabel(bot.id) || bot.skinId || "默认";
-    const shown = host?.isShown?.(bot.id);
-    const stage = !bot.petEnabled ? "未上台" : shown === false ? "已上台但窗口藏着" : "在桌面";
-    return `【桌宠·娱乐】你当前${stage}；形象「${skin}」。桌宠不干扰工作任务。用户问外形/在不在桌面时按这里说；操作手册仅在谈桌宠时附上。`;
+  /** 分享导入开箱：对照本机 Vault 的实时缺口 */
+  private shareOnboardSection(bot: Bot): string {
+    if (!bot.shareOnboard) return "";
+    const diff = diffNeeds(bot.shareOnboard, {
+      secretNames: (this.deps.secrets?.list(bot.id) ?? []).map((s) => s.name),
+      envKeys: (this.deps.env?.visibleTo(bot.id) ?? []).map((e) => e.key),
+      mcpNames: (this.deps.mcpManage?.list() ?? this.deps.mcp?.status() ?? []).map((m: { name: string }) => m.name),
+      skills: this.deps.skills.list().flatMap((s) => [s.name, s.key]),
+    });
+    if (!hasAnyGaps(diff)) {
+      // 可校验缺口已齐：收尾提一下未自动检测的软依赖，然后清掉挂起标记
+      const soft = softOnboardTips(bot.shareOnboard);
+      if (bot.shareOnboard) {
+        const next = { ...bot };
+        delete next.shareOnboard;
+        this.deps.store.saveBot(next);
+      }
+      return soft;
+    }
+    // 命令不做 PATH 探测，单独口头提醒；MCP/共享技能已进 diff.missing
+    return onboardPromptSection(diff) + softOnboardTips(bot.shareOnboard);
   }
-
-  /** 仅在用户这轮像在谈桌宠时注入（进 volatile，不打断 system 前缀缓存） */
-  petPlaybook(bot: Bot): string {
-    const host = this.deps.petHost;
-    const maySpawn = host?.maySpawn() === true;
-    const mayVisit = host?.mayVisit?.() === true;
-    return [
-      "【桌宠操作 · 纯娱乐】桌宠表演/串门/换装不代替真正干活；用户要做事时用正常工具，不要用 pet.act/fx 糊弄。",
-      "查：pet.status / list / peers / prefs / visits / mind（心智只读）/ activity（自主行动日志）；进化 pet.evolve action=list|history|accept|reject。",
-      "形象：pet.skin / pet.search→install。pet.generate：有生图才画头像；没有则只改角色卡并换已有 Live2D/社区皮，绝不伪造占位图——做不到就照工具结果如实说。",
-      "动作：pet.act action=jump|walk|sleep|celebrate|think|work；pet.say text=… 冒泡。",
-      "特效：pet.fx phrase=…（有相近则复用并说明；否则现场发明配方并记住；规则仅兜底）。list / pin / forget / gc；不改皮肤。",
-      "上台：pet.show / hide（藏窗）/ disable（彻底下台）；pet.remind in=30m text=… 纯气泡闹钟。",
-      maySpawn
-        ? "允许召唤已开：可 pet.show/hide/disable 别人、pet.create、app.createBot+pet。"
-        : "未开「允许召唤」：只操作自己，不要 pet.create / 对别人 show。",
-      mayVisit
-        ? "互访已开：pet.peers → pet.visit(name)。"
-        : "未开「多宠互访」：不要 pet.visit。",
-    ].join("\n");
-  }
-
 
   /** 回复里声称问过 / 转述了某个 bot，却没调用 bot.ask：返回那个 bot 的名字 */
   fakedDelegation(bot: Bot, text: string, calls: ToolCall[], mentioned: string[] = []): string | null {
@@ -239,9 +257,9 @@ export class PromptBuilder {
   }
 }
 
-/** 用户这轮是否在谈桌宠（决定要不要附操作手册） */
-export function isPetTopic(text: string): boolean {
-  const t = (text || "").trim();
-  if (!t) return false;
-  return /宠物|桌宠|形象|换装|换皮|皮肤|串门|拜访|出台|下台|藏起来|Live2D|petdex|咕嘎|奶龙|进化提议|桌面宠物|龟派|气功|pet\.(show|hide|skin|list|status|visit|install|search|generate|evolve|remind|mind|activity|act|fx)/i.test(t);
+/** 命令不做本机 PATH 探测，开箱时口头提醒 */
+function softOnboardTips(needs: Bot["shareOnboard"]): string {
+  if (!needs?.commands?.length) return "";
+  const bits = needs.commands.map((c) => `命令 \`${c}\``);
+  return `\n另有分享时声明、需本机自行准备的项：${bits.join("；")}。有则用，没有就如实告诉用户怎么准备。`;
 }

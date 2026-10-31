@@ -305,6 +305,8 @@ const SETTINGS_PAGES = {
   voice: () => voiceConfigFlow(),
   env: () => envFlow(),
   secrets: () => envFlow(),
+  vault: () => vaultFlow(),
+  connectors: () => vaultFlow(),
   skills: () => skillsFlow(),
   tasks: () => tasksFlow(),
   memory: () => memoryFlow(),
@@ -404,18 +406,49 @@ async function duplicateBot(b) {
   selectBot(copy);
 }
 
+function needsSummaryHtml(needs, diff) {
+  if (!needs) return "";
+  const miss = diff?.missing ?? needs;
+  const have = diff?.present;
+  const row = (label, items, fmt) => items?.length
+    ? `<li><b>${label}</b>：${items.map(fmt).join("、")}</li>`
+    : "";
+  const missList = [
+    row("密钥", miss.secrets, (s) => `\`${esc(s.name)}\`${s.label ? `（${esc(s.label)}）` : ""}`),
+    row("配置", miss.env, (e) => `\`${esc(e.key)}\`${e.label ? `（${esc(e.label)}）` : ""}`),
+    row("命令", miss.commands, (c) => `\`${esc(c)}\``),
+    row("MCP", miss.mcp, (m) => esc(m)),
+    row("共享技能", miss.sharedSkills, (s) => esc(s.name)),
+  ].filter(Boolean).join("");
+  const haveList = have ? [
+    row("已有密钥", have.secrets, (s) => `\`${esc(s.name)}\``),
+    row("已有配置", have.env, (e) => `\`${esc(e.key)}\``),
+  ].filter(Boolean).join("") : "";
+  if (!missList && !haveList) return "";
+  return `<div class="bp-sec"><h4>需要本机准备</h4><ul class="sb-list">${missList || "<li>无额外依赖</li>"}${haveList}</ul>
+    <p class="hint">密钥与配置值不会随链接带走；导入后 bot 会引导补齐缺口。</p></div>`;
+}
+
 async function shareBotFlow(b) {
   const modal = sheet({ icon: "🔗", title: `分享「${b.name}」`, sub: "对方打开链接或导入文件，就能得到一个同样的 bot" });
   const body = modal.querySelector(".mx-body");
   body.innerHTML = `<p class="hint">正在打包…</p>`;
   try {
     const r = await api.bots.share(b.id);
+    const nc = r.needCounts || {};
+    const needBits = [
+      nc.secrets && `${nc.secrets} 个密钥名`,
+      nc.env && `${nc.env} 项配置名`,
+      nc.commands && `${nc.commands} 个命令`,
+      nc.mcp && `${nc.mcp} 个 MCP`,
+      nc.sharedSkills && `${nc.sharedSkills} 个共享技能提示`,
+    ].filter(Boolean);
     body.innerHTML = `
       <div class="sh-ok">✅ 链接已复制到剪贴板</div>
       <textarea class="sb-link" readonly rows="3">${esc(r.link)}</textarea>
       <ul class="sb-list">
-        <li>包含：名字、角色、人设和提示词${b.avatarPath ? "、头像" : ""}${r.skills ? `、${r.skills} 个私有技能` : ""}</li>
-        <li>不包含：模型和 API Key、记忆、会话记录</li>
+        <li>包含：名字、角色、人设和提示词${b.avatarPath ? "、头像" : ""}${r.skills ? `、${r.skills} 个私有技能` : ""}${needBits.length ? `、依赖清单（${needBits.join("、")}）` : ""}</li>
+        <li>不包含：模型与 API Key、密钥/配置的值、记忆、会话记录</li>
         <li>链接太长发不出去时，发这个文件：<a class="ref ref-file" data-ref="file" data-id="${esc(r.file)}">${esc(r.file.split("/").pop())}</a></li>
       </ul>
       <div class="actions">
@@ -450,14 +483,19 @@ function importBotFlow(prefill = "") {
       try { preview(await api.bots.parseTemplate(v)); } catch (e) { prefill = v; ask(errText(e)); }
     };
   };
-  const preview = (t) => {
+  const preview = async (t) => {
     const taken = bots.some((x) => x.name === t.name);
+    let diff = null;
+    if (t.needs) {
+      try { diff = await api.bots.diffNeeds(t.needs); } catch { /* 预览仍可继续 */ }
+    }
     body.innerHTML = `
       <div class="bp-hero"><div class="bp-avatar">${t.avatar ? `<img src="${esc(t.avatar)}" />` : "🤖"}</div>
         <div class="bp-main"><b>${esc(t.name)}</b><span class="hint">${esc(t.role)}</span></div></div>
       ${t.persona ? `<div class="bp-sec"><h4>人设</h4><p>${esc(t.persona)}</p></div>` : ""}
       ${t.skills.length ? `<div class="bp-sec"><h4>附带 ${t.skills.length} 个技能</h4>${t.skills.map((k) => `<div class="ib-skill"><b>🧩 ${esc(k.name)}</b><span class="hint">${esc(k.description)}</span></div>`).join("")}</div>` : ""}
-      <p class="hint">导入后用你自己的默认模型${taken ? `；你已经有叫「${esc(t.name)}」的 bot，新的会自动加编号` : ""}。</p>
+      ${needsSummaryHtml(t.needs, diff)}
+      <p class="hint">导入后用你自己的默认模型${taken ? `；你已经有叫「${esc(t.name)}」的 bot，新的会自动加编号` : ""}。${t.needs ? "缺的依赖会在会话里由 bot 引导补齐。" : ""}</p>
       <div class="actions">
         <button class="ghost-btn" id="ib-back">返回</button>
         <button class="primary-btn" id="ib-ok">导入</button>

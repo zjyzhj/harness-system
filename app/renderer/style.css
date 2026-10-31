@@ -504,6 +504,13 @@ pre.code-block:hover .code-copy { opacity: 1; }
 /* ---- 密钥卡片 ---- */
 .s-card { width: min(460px, 100%); margin-top: 6px; border: 1px solid var(--border); border-radius: 16px; padding: 12px 16px; background: var(--bg); display: flex; flex-direction: column; gap: 8px; }
 .s-card.saved { flex-direction: row; align-items: center; gap: 8px; padding: 10px 14px; font-size: 13px; }
+.f-card { width: min(460px, 100%); margin-top: 6px; border: 1px solid var(--border); border-radius: 16px; padding: 14px 16px; background: var(--bg); display: flex; flex-direction: column; gap: 10px; }
+.f-card .f-title { font-weight: 600; font-size: 14px; }
+.f-card .f-fields { display: flex; flex-direction: column; gap: 8px; }
+.f-card .f-field { display: flex; flex-direction: column; gap: 4px; font-size: 13px; }
+.f-card .f-field input, .f-card .f-field textarea { border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; font: inherit; background: var(--panel, #fff); }
+.f-card.answered { opacity: .92; }
+.queue-tip { opacity: .7; margin: 4px 12px; }
 .s-head { display: flex; align-items: center; gap: 8px; font-size: 14px; }
 .s-row { display: flex; gap: 8px; }
 .s-row input { flex: 1; border: 1px solid var(--border); border-radius: 10px; padding: 7px 10px; font-size: 13px; background: var(--panel); }
@@ -1039,6 +1046,7 @@ a.ref-settings:hover { background: rgba(37, 99, 235, .1); }
 .realm-side-item:hover { background: var(--hover); }
 .realm-side-item.on { background: var(--active); }
 .realm-dot { width: 8px; height: 8px; border-radius: 50%; background: #8b7355; flex: none; }
+#details .d-avatar.realm-av { display: grid; place-items: center; background: #2a241c; border-radius: 50%; width: 64px; height: 64px; }
 .realm-badge { display: inline-block; font-size: 11px; padding: 1px 7px; border-radius: 999px; background: #2a241c; color: #d4c4a8; margin-right: 6px; flex: none; }
 .realm-list { display: flex; flex-direction: column; gap: 6px; max-height: 320px; overflow-y: auto; margin: 8px 0; }
 .realm-item { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 12px; background: var(--panel); color: var(--text); cursor: pointer; text-align: left; }

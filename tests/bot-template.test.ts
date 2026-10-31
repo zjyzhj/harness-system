@@ -13,6 +13,7 @@ describe("bot 模板分享", () => {
     const link = templateLink(templateOf(bot, skills, "data:image/jpeg;base64,AAAA"));
     expect(link).toStartWith("harnessbot://bot/");
     const t = parseTemplate(link);
+    expect(t.v).toBe(2);
     expect(t).toMatchObject({ name: "商店图专家", role: "出商店截图", persona: "严谨、讲规范", systemPrompt: "你是商店图专家", skills, avatar: "data:image/jpeg;base64,AAAA" });
     expect(JSON.stringify(t)).not.toContain("p-secret");
     expect(JSON.stringify(t)).not.toContain("isMaster");

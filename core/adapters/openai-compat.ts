@@ -113,6 +113,7 @@ async function completeChat(p: Provider, req: CompletionRequest, stream: boolean
   if (stream && !NO_STREAM_USAGE.has(usageKey)) body.stream_options = { include_usage: true };
   if (req.temperature !== undefined) body.temperature = req.temperature;
 
+  const reqStart = Date.now();
   let res: Response;
   try {
     res = await postJSON(p, url, body, req.signal, req.retries);
@@ -127,7 +128,7 @@ async function completeChat(p: Provider, req: CompletionRequest, stream: boolean
     return completeChat(p, { ...req, tools: undefined, tail: req.tail ? flattenTail(req.tail) : undefined }, stream);
   }
   if (stream) {
-    return streamChat(res, req);
+    return streamChat(res, req, reqStart);
   }
   const data = (await res.json()) as any;
   const content: ContentBlock[] = [];
@@ -137,7 +138,7 @@ async function completeChat(p: Provider, req: CompletionRequest, stream: boolean
   const tagged = typeof text === "string" ? text.match(/^\s*<think>([\s\S]*?)<\/think>\s*/) : null;
   if (tagged) text = text.slice(tagged[0].length);
   const thought = (typeof reasoning === "string" && reasoning.trim()) || tagged?.[1].trim();
-  if (thought) content.push({ type: "thinking", text: thought });
+  if (thought) content.push({ type: "thinking", text: thought, ms: Date.now() - reqStart });
   if (typeof text === "string" && text) content.push({ type: "text", text });
   for (const tc of msg?.tool_calls ?? []) {
     content.push({ type: "tool_call", callId: tc.id, tool: tc.function?.name ?? "", args: safeParse(tc.function?.arguments) });
@@ -180,16 +181,18 @@ export function thinkSplitter(emit: (kind: "text" | "thinking", s: string) => vo
 }
 
 /** SSE 流式解析（data: {...} 行）→ 增量 text / thinking 块 + 工具增量 → done */
-async function streamChat(res: Response, req: CompletionRequest): Promise<CompletionResult> {
+async function streamChat(res: Response, req: CompletionRequest, reqStart = Date.now()): Promise<CompletionResult> {
   const usageAcc: NonNullable<CompletionResult["usage"]> = {};
   let text = "", thinking = "";
-  let thinkStart = 0, thinkMs = 0;
+  // 从发起请求计：很多端点会在服务端想完再一次性吐 reasoning，若从首 token 计会变成「不到 1 秒」
+  const streamStart = reqStart;
+  let sawThinking = false, thinkMs = 0;
   const emit = (kind: "text" | "thinking", s: string) => {
     if (kind === "thinking") {
-      if (!thinkStart) thinkStart = Date.now();
+      sawThinking = true;
       thinking += s;
     } else {
-      if (thinkStart && !thinkMs) thinkMs = Date.now() - thinkStart;
+      if (sawThinking && !thinkMs) thinkMs = Date.now() - streamStart;
       text += s;
     }
     onChunk(req, { type: kind, text: s });
@@ -213,7 +216,7 @@ async function streamChat(res: Response, req: CompletionRequest): Promise<Comple
   });
   split.end();
   if (!complete && !req.signal?.aborted) emit("text", "\n\n（⚠️ 和模型的连接中途断开，这条回复可能不完整）");
-  if (thinkStart && !thinkMs) thinkMs = Date.now() - thinkStart;
+  if (sawThinking && !thinkMs) thinkMs = Date.now() - streamStart;
   const content: ContentBlock[] = [];
   if (thinking.trim()) content.push({ type: "thinking", text: thinking.trim(), ms: thinkMs });
   content.push({ type: "text", text });

@@ -55,20 +55,53 @@ describe("G2 memory namespace + 级联 + memo", () => {
     expect(new Set(all.map((e) => e.id)).size).toBe(all.length);
   });
 
-  test("T2.3 MEMORY.md：重写 + 常驻注入", async () => {
-    await mem.rewriteMemo("botC", (_cur, recent) => `权威总结：${recent.length} 条记忆`);
+  test("T2.3 MEMORY.md：重写后按需注入（无关问题不塞）", async () => {
+    await mem.rewriteMemo("botC", (_cur, recent) => `权威总结：用户喜欢喝美式咖啡，共 ${recent.length} 条`);
     expect(mem.memoOf("botC")).toContain("权威总结");
-    const ctx = mem.buildContext("botC", "任何问题");
-    expect(ctx).toContain("权威总结");
+    // 普通闲聊：不带全文总结（防臃肿）
+    expect(mem.buildContext("botC", "今天天气怎么样")).not.toContain("权威总结");
+    // 问记忆 / 内容相关：才注入
+    expect(mem.buildContext("botC", "你记得什么")).toContain("权威总结");
+    expect(mem.buildContext("botC", "我对咖啡的偏好")).toContain("权威总结");
   });
 
-  test("T2.3 shouldRewriteMemo：5 条新 fact 触发", () => {
+  test("T2.3 shouldRewriteMemo：从未蒸馏时 ≥3 条触发；打戳后清零", () => {
     const m2 = new MemorySystem(mkdtempSync(join(tmpdir(), "harness-g2memo-")));
-    for (let i = 0; i < 5; i++) m2.add("botD", { kind: "fact", content: `事实${i}` });
+    m2.add("botD", { kind: "fact", content: "事实0" });
+    m2.add("botD", { kind: "fact", content: "事实1" });
+    expect(m2.shouldRewriteMemo("botD")).toBe(false);
+    m2.add("botD", { kind: "fact", content: "事实2" });
     expect(m2.shouldRewriteMemo("botD")).toBe(true);
     m2.add("botD", { kind: "summary", content: "s" });
-    // 有 summary 后新 fact 清零 → false
+    // 有 summary 后「未蒸馏」路径关闭，新 fact 不足 5 → false
     expect(m2.shouldRewriteMemo("botD")).toBe(false);
+  });
+
+  test("T2.3 空 MEMORY.md + 3 条 durable 触发", () => {
+    const m = new MemorySystem(mkdtempSync(join(tmpdir(), "harness-g2memo3-")));
+    m.add("b", { kind: "fact", content: "用户叫周" });
+    m.add("b", { kind: "fact", content: "喜欢简洁" });
+    expect(m.shouldRewriteMemo("b")).toBe(false);
+    m.add("b", { kind: "rule", content: "回答用中文" });
+    expect(m.shouldRewriteMemo("b")).toBe(true);
+  });
+
+  test("T2.3 rewriteMemo 打戳后不再触发；setMemoRewriter 可自动调度", async () => {
+    const m = new MemorySystem(mkdtempSync(join(tmpdir(), "harness-g2auto-")));
+    let calls = 0;
+    m.setMemoRewriter(async (_ns, _cur, recent) => {
+      calls += 1;
+      return `总结：${recent.map((e) => e.content).join("；")}`;
+    });
+    for (let i = 0; i < 3; i++) m.add("auto", { kind: "fact", content: `偏好${i}` });
+    expect(m.shouldRewriteMemo("auto")).toBe(true);
+    const out = await m.maybeRewriteMemoNow("auto");
+    expect(out).toContain("总结");
+    expect(m.memoOf("auto")).toContain("总结");
+    expect(m.shouldRewriteMemo("auto")).toBe(false);
+    expect(calls).toBe(1);
+    expect(m.buildContext("auto", "随便聊聊")).not.toContain("权威总结");
+    expect(m.buildContext("auto", "你还记得我的偏好吗")).toContain("权威总结");
   });
 
   test("T2.5 mergeDuplicate + evict", () => {

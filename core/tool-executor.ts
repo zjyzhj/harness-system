@@ -336,7 +336,7 @@ export const BUILTIN_TOOL_DESCRIPTIONS = `- fs.read: 读取白名单内文件内
 - pet.visit: 拜访（需「多宠互访」）。参数: name
 - pet.act: 让桌宠做动作。参数: action（idle/walk/jump/sleep/celebrate/work/think）, hold?
 - pet.say: 桌宠气泡说一句（不跑整轮对话）。参数: text, action?, hold?
-- pet.fx: 叠加特效（不改皮肤）。参数: action=play|list|pin|unpin|forget|gc, phrase?|name?
+- pet.fx: 叠加特效（不改皮肤）。play 时尽量带 phrase（如「龟派气功」）；没起名会即兴发明。action=play|list|pin|unpin|forget|gc
 - app.createGroup: 建群聊。参数: name, members（其他 bot 名数组，默认包含你自己）
 - app.updateGroup: 改群聊成员或名字。参数: group（群名）, add?（要加的 bot 名数组）, remove?（要移出的 bot 名数组）, rename?
 - plan.start: 发起编排，让几个 bot 按阶段接力完成一件事（后台运行，跑完结果自动发回这个会话）。参数: task（一句话：谁先做什么、再交给谁）或 stages（[{bot, prompt, mode?: "seq" | "fan" 并行}]）, title?

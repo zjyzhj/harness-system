@@ -116,19 +116,46 @@ export function fxInventUserPrompt(phrase: string): string {
   return `用户要的特效：${phrase.trim().slice(0, 80)}\n只输出 JSON。`;
 }
 
-/** 解析模型发明结果；不合格返回 null */
+/** 把模型乱写的 overlay 收成合法枚举 */
+function coerceOverlay(raw: string, hint = ""): FxOverlay | null {
+  const s = raw.toLowerCase().trim();
+  if (FX_OVERLAYS.includes(s as FxOverlay)) return s as FxOverlay;
+  const blob = `${s} ${hint}`;
+  if (/beam|laser|激光|气功|射线|波|龙息/.test(blob)) return "beam";
+  if (/aura|光环|气场|护盾/.test(blob)) return "aura";
+  if (/ring|波纹|震|冲击/.test(blob)) return "rings";
+  if (/spark|星|闪|亮/.test(blob)) return "spark";
+  if (/heart|心|爱/.test(blob)) return "hearts";
+  if (/zzz|睡|困/.test(blob)) return "zzz";
+  if (/sweat|汗|慌/.test(blob)) return "sweat";
+  if (/shake|抖|晃/.test(blob)) return "shake";
+  if (/burst|炸|爆|焰|火|漩涡|旋风|烟花/.test(blob)) return "burst";
+  if (s) return "burst"; // 有写但不认识 → 爆炸，别整段作废
+  return null;
+}
+
+/** 解析模型发明结果；不合格返回 null（尽量容忍 markdown / 别名 overlay） */
 export function parseInventedEffect(raw: string): { name: string; aliases: string[]; recipe: FxRecipe } | null {
-  const text = (raw || "").trim();
+  let text = (raw || "").trim();
+  if (!text) return null;
+  text = text.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim();
   const m = text.match(/\{[\s\S]*\}/);
   if (!m) return null;
   try {
-    const j = JSON.parse(m[0]) as Record<string, unknown>;
-    const overlay = String(j.overlay || "").toLowerCase() as FxOverlay;
-    if (!FX_OVERLAYS.includes(overlay)) return null;
+    // 容忍尾逗号
+    const json = m[0].replace(/,\s*([}\]])/g, "$1");
+    const j = JSON.parse(json) as Record<string, unknown>;
+    const nameHint = String(j.name || "").trim();
+    const overlay = coerceOverlay(String(j.overlay || ""), nameHint);
+    if (!overlay) return null;
     const motionRaw = String(j.motion || "celebrate").toLowerCase() as PetAction;
     const motion = FX_MOTIONS.includes(motionRaw) ? motionRaw : "celebrate";
-    const color = /^#[0-9a-fA-F]{6}$/.test(String(j.color || "")) ? String(j.color) : "#93c5fd";
-    const name = smartEffectName(String(j.name || "").trim() || "神秘特效");
+    let color = String(j.color || "").trim();
+    if (/^#[0-9a-fA-F]{3}$/.test(color)) {
+      color = `#${color[1]}${color[1]}${color[2]}${color[2]}${color[3]}${color[3]}`;
+    }
+    if (!/^#[0-9a-fA-F]{6}$/.test(color)) color = "#93c5fd";
+    const name = smartEffectName(nameHint || "神秘特效");
     const aliases = Array.isArray(j.aliases)
       ? j.aliases.map((a) => String(a).trim()).filter(Boolean).slice(0, 6)
       : [];

@@ -499,9 +499,10 @@ function listenTurn() {
       $("#input").value = text;
       send();
     } catch (e) {
-      setVoiceBar("listening");
-      alert(errText(e));
-      stopVoiceMode();
+      // 断线 / 转写失败：同一会话自动重连听一轮，而不是退出连续语音
+      setVoiceBar("listening", `<span class="vb-said">转写失败，重连中… ${esc(String(errText(e)).slice(0, 40))}</span>`);
+      if (!voiceMode) return;
+      setTimeout(() => { if (voiceMode) listenTurn(); }, 800);
     }
   };
   rec.start(250);

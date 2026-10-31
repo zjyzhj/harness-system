@@ -14,8 +14,8 @@ import { isAbsolute, join } from "node:path";
 import type { RuntimeDeps, ToolOutcome, RuntimeOptions, TurnCtx } from "./runtime/types";
 import { addSource, QUIET_TOOLS, CONTINUE_HINT, THINK_PROMPT, stripToolBlocks, toolBlockCutoff, BOT_ASK_CONCURRENCY, abortable, mapPool, untrusted, thinkingModelOf, needsReasoning, contextWindowOf, historyBudgetOf, turnBudgetOf, shrinkToolResults, looksLikeRule, claimsGroupSend, claimsSkillWrite, parseVerdict, CALL_TOOL, toolRoundEcho, parseToolBlocks } from "./runtime/turn-helpers";
 import { memoryLink, appendSkillRules, isDuplicateRule, type MemoryDraft, CLAIMS_SAVED, memoryFromText } from "./runtime/rules-text";
-import { runTaskTool, sendFiles, uiTool, ownHistoryText, isSensitivePath } from "./runtime/tool-helpers";
-import { PromptBuilder } from "./runtime/prompt";
+import { runTaskTool, sendFiles, uiTool, ownHistoryText, isSensitivePath, parseRunAt } from "./runtime/tool-helpers";
+import { PromptBuilder, type PromptExtras } from "./runtime/prompt";
 export * from "./runtime/types";
 export * from "./runtime/turn-helpers";
 export * from "./runtime/rules-text";
@@ -30,6 +30,8 @@ export * from "./runtime/tool-helpers";
  *
  * 工具调用用「文本块约定」而不是 model function-calling：
  * 对 OpenAI 兼容 API 和 CLI 适配器都通用，兼容性最好（成熟 CLI bot 常用方案）。
+ *
+ * 桌宠不在此：娱乐侧车见 core/pet/sidecar.ts（attachPetEntertainment）。
  */
 export class BotRuntime {
   private tools = new ToolRegistry();
@@ -37,6 +39,16 @@ export class BotRuntime {
   constructor(private deps: RuntimeDeps) {
     this.prompt = new PromptBuilder(deps, () => this.tools.prompt());
     this.installTools();
+  }
+
+  /** 供娱乐侧车等外挂注册工具（Bot 核心不内置 pet.*） */
+  toolRegistry(): ToolRegistry {
+    return this.tools;
+  }
+
+  /** 供娱乐侧车注入提示词附加；默认空 = 完整 Bot 设计无桌宠干扰 */
+  setPromptExtras(extras: PromptExtras): void {
+    this.prompt.setExtras(extras);
   }
 
   /**
@@ -481,7 +493,15 @@ export class BotRuntime {
       bot, tool: t.tool, args, originalText, depth, sessionId, turn,
     });
     if (used.length) this.deps.audit?.append({ botId: bot.id, cap: "secret", action: `use:${t.tool}`, args: used.join(","), granted: true, ok: !out.output.startsWith("❌") });
-    return used.length && this.deps.secrets ? { ...out, output: this.deps.secrets.redact(out.output, used) } : out;
+    const finalOut = used.length && this.deps.secrets ? { ...out, output: this.deps.secrets.redact(out.output, used) } : out;
+    // 演示录制：引擎内对参数/输出打码；demo.* 自身会被跳过
+    this.deps.demo?.record(bot.id, {
+      tool: t.tool,
+      args: raw,
+      output: finalOut.output,
+      ok: !finalOut.output.startsWith("❌"),
+    });
+    return finalOut;
   }
 
   /** 把内置 / 前缀工具挂进注册表（描述与执行同一处登记） */
@@ -502,9 +522,12 @@ export class BotRuntime {
     R.register("web.search", "联网搜索。参数: query, limit?", (ctx) => this.webTool(ctx.bot, "web.search", ctx.args, turn(ctx)));
     R.register("web.fetch", "打开网页读正文。参数: url", (ctx) => this.webTool(ctx.bot, "web.fetch", ctx.args, turn(ctx)));
 
-    R.registerPrefix("ui.", "交互卡片 ui.ask / ui.confirm / ui.secret", (ctx) => ctx.depth > 0
+    R.registerPrefix("ui.", "交互卡片 ui.ask / ui.confirm / ui.secret / ui.form（多字段预填表单）", (ctx) => ctx.depth > 0
       ? { output: "❌ 你是被别的 bot 转问的，对方不是用户，看不到也点不了卡片。直接做能做的；需要用户选择或确认的事写在回复里，由发起方去问用户。" }
       : uiTool(ctx.tool, ctx.args, this.deps.secrets, ctx.bot.id));
+    if (this.deps.vault) {
+      R.registerPrefix("vault.", "本机保险库只读：vault.list / vault.search / vault.contact（姓名邮箱备注，无支付）", (ctx) => this.vaultTool(ctx.bot, ctx.tool, ctx.args));
+    }
     if (this.deps.groupPost) {
       R.register("group.send", "以你的身份在软件里的群聊发言：消息出现在群聊界面里，群成员会看到并回应（@ 了谁就谁先回，没 @ 就大家都回），工具结果里带回他们的回复。软件内部的群聊不算外部，不需要 ui.confirm。参数: group（群名）, message", async (ctx) => {
         const group = String(ctx.args.group ?? ctx.args.name ?? "").trim();
@@ -520,8 +543,15 @@ export class BotRuntime {
       });
     }
     R.registerPrefix("app.", "查看软件现状 app.state（bot、群聊、定时任务、编排、项目、技能、模型的完整清单）；改自己资料、切模型、建 bot/群", (ctx) => this.appTool(ctx.bot, ctx.tool, ctx.args));
-    R.registerPrefix("pet.", "桌宠娱乐工具（status/list/mind/activity/skin/act/say/fx/search/install/generate/show/hide/disable/prefs/evolve/visits/remind/visit/create）。桌宠不代替干活；用户谈桌宠时附手册", (ctx) => this.petTool(ctx.bot, ctx.tool, ctx.args));
-    R.registerPrefix("plan.", "编排计划 plan.start（让几个 bot 按阶段接力）/ plan.list / plan.cancel", (ctx) => this.planTool(ctx.bot, ctx.tool, ctx.args, ctx.depth, ctx.sessionId, turn(ctx)));
+    // pet.* 不在此注册 — 见 core/pet/sidecar.ts attachPetEntertainment
+    if (this.deps.demo) {
+      R.registerPrefix(
+        "demo.",
+        "演示→技能：demo.start / status / finish（可带 cron|in 定时重跑）/ cancel。录制本机工具轨迹，不是云电脑跟看",
+        (ctx) => this.demoTool(ctx.bot, ctx.tool, ctx.args, ctx.sessionId),
+      );
+    }
+    R.registerPrefix("plan.", "编排计划 plan.start / plan.list / plan.cancel / plan.handOff（移交当前阶段负责人）", (ctx) => this.planTool(ctx.bot, ctx.tool, ctx.args, ctx.depth, ctx.sessionId, turn(ctx)));
     R.registerPrefix("skill.", "技能管理 skill.list / skill.get(key) / skill.save(name, description, instructions, key?) / skill.update(key, append?: 新规范数组, replace?: [{find, with}] 改掉冲突的旧规则) / skill.delete(key)", (ctx) => this.appTool(ctx.bot, ctx.tool, ctx.args));
 
     const builtin = (name: string, desc: string) =>
@@ -532,10 +562,10 @@ export class BotRuntime {
     builtin("fs.list", "列目录。参数: path");
     builtin("bash.run", "在用户电脑上执行 shell 命令；没被允许过的命令会先弹卡片请用户批准，被拒绝就别换写法重试。参数: command");
     builtin("notify", "系统通知。参数: title, body");
-    builtin("memory.add", "长期记住一件事（重启后还在，每次对话都会带上）。用户让你记住、给你定规范 / 规矩 / 分工、说「以后都…」「从现在起…」、纠正你的做法、告诉你他的偏好或个人信息时调用。参数: content（写成以后能直接用的一句话）, kind（rule = 对你做事方式的要求；fact = 关于用户的信息或偏好）, bot?（写给哪个 bot，默认你自己；用户说「给飞书机器人也设…」时填对方名字）, scope?（all = 用户要所有 bot 都遵守）。没调用它就不要说「记下了」");
+    builtin("memory.add", "长期记住一件事（重启后还在）。规范常驻；事实按相关注入。系统会后台蒸馏 MEMORY.md，但不会每轮塞进对话。用户让你记住、定规范、纠正做法、说偏好或个人信息时调用。参数: content（写成以后能直接用的一句话）, kind（rule = 对你做事方式的要求；fact = 关于用户的信息或偏好）, bot?（写给哪个 bot，默认你自己）, scope?（all = 所有 bot 都遵守）。没调用它就不要说「记下了」");
     R.register("env.set", "保存一项普通配置 / 环境变量（接口地址、账号名、项目 ID、区域等，重启后还在，bash.run 自动注入）。密码 / Token 不要用它，用 ui.secret。参数: key（英文大写，如 FEISHU_APP_ID）, value, label?（中文名称）, note?（用途）, scope?（all = 所有 bot 共用，默认只给你）", (ctx) => this.envTool(ctx.bot, "env.set", ctx.args));
     R.register("env.delete", "删除一项配置。参数: key, scope?（all = 共用的那项）", (ctx) => this.envTool(ctx.bot, "env.delete", ctx.args));
-    builtin("memory.list", "列出某个 bot 的规范/记忆。参数: bot?（bot 名，默认你自己）, kind?（rule=规范 / fact=事实，默认全部）");
+    builtin("memory.list", "列出某个 bot 已存的规范/事实单条。用户问「你记得什么 / 关于我知道些什么」时用。参数: bot?（bot 名，默认你自己）, kind?（rule=规范 / fact=事实，默认全部）");
     builtin("memory.search", "按意思检索记忆和过往对话（如「上次聊的那个方案」）。参数: query");
     builtin("memory.update", "改一条已存的记忆 / 规范（用户纠正、规范要改时用，不要再 add 一条相反的）。参数: match（原文里的几个字，用来定位）, content（改成什么）, bot?（改哪个 bot 的，默认你自己）, scope?（all = 全局共享的）");
     builtin("memory.forget", "删掉一条已存的记忆 / 规范（用户说不用再遵守、记错了时用）。参数: match（原文里的几个字）, bot?（删哪个 bot 的，默认你自己）, scope?（all = 全局共享的）");
@@ -706,18 +736,152 @@ export class BotRuntime {
     return (await this.deps.consent.request(bot.id, "skill:shared", desc)).granted;
   }
 
+  private async demoTool(bot: Bot, tool: string, args: Record<string, unknown>, sessionId?: string): Promise<ToolOutcome> {
+    const demo = this.deps.demo;
+    if (!demo) return { output: "❌ 演示→技能未启用" };
+    const str = (k: string) => (args[k] === undefined || args[k] === null ? undefined : String(args[k]).trim());
+    switch (tool) {
+      case "demo.start": {
+        const title = str("title") ?? str("name") ?? str("goal");
+        const s = demo.start(bot.id, { sessionId, title });
+        return {
+          output: [
+            `🎬 已开始录制演示「${s.title || "未命名"}」（id=${s.id}）。`,
+            "接下来按真实流程调用工具（fs / bash / mcp / web / bot.ask…），每一步会自动记入。",
+            "结束：demo.finish name=…；取消：demo.cancel。这是本机工具轨迹，不是云电脑跟看。",
+          ].join("\n"),
+        };
+      }
+      case "demo.status": {
+        const s = demo.status(bot.id);
+        if (!s) return { output: "当前没有进行中的演示。用户说「教你一遍」时用 demo.start 开始。" };
+        const lines = s.steps.slice(-12).map((x, i) => `${s.steps.length - Math.min(12, s.steps.length) + i + 1}. ${x.tool}${x.ok ? "" : "（失败）"}`);
+        return {
+          output: [
+            `录制中「${s.title || "未命名"}」id=${s.id}，已 ${s.steps.length} 步，始于 ${new Date(s.startedAt).toLocaleString()}。`,
+            lines.length ? lines.join("\n") : "（还没有步骤）",
+          ].join("\n"),
+        };
+      }
+      case "demo.cancel": {
+        const s = demo.cancel(bot.id);
+        return { output: s ? `已取消演示录制「${s.title || s.id}」（丢弃 ${s.steps.length} 步）` : "没有进行中的演示可取消。" };
+      }
+      case "demo.finish": {
+        const finished = demo.finish(bot.id, { name: str("name") ?? str("title"), description: str("description") ?? str("desc") });
+        if (!finished.ok) return { output: `❌ ${finished.error}` };
+        const { draft } = finished;
+        let skill;
+        try {
+          skill = this.deps.skills.save({
+            name: draft.name,
+            description: draft.description,
+            body: draft.body,
+            owner: bot.id,
+          });
+        } catch (e) {
+          return { output: `❌ 技能落盘失败：${e instanceof Error ? e.message : String(e)}` };
+        }
+        this.deps.onAppChanged?.("skills");
+        const link = `[${skill.name}](app:skill/${skill.key})`;
+        const bits = [`✅ 已将演示存成私有技能 ${link}（${draft.steps} 步）。`];
+
+        // 可选：挂定时重跑
+        const cron = str("cron");
+        const runAt = parseRunAt(args);
+        if ((cron || runAt) && this.deps.tasks) {
+          const taskName = str("taskName") || `重跑：${skill.name}`;
+          const prompt = str("prompt") || `请按技能 ${link} 的步骤执行一遍，按当前环境调整路径与参数，完成后汇报结果。`;
+          try {
+            if (runAt) {
+              const t = this.deps.tasks.create({
+                botId: bot.id,
+                name: taskName,
+                prompt,
+                cron: "* * * * *",
+                kind: "once",
+                alarmAt: runAt,
+                runPrompt: true,
+                notifyPet: false,
+                deleteAfterRun: args.keep !== true,
+                sessionId,
+              });
+              bits.push(`已挂一次性重跑「${t.name}」，约在 ${new Date(t.nextRunAt!).toLocaleString()} 执行。`);
+            } else if (cron) {
+              const t = this.deps.tasks.create({ botId: bot.id, name: taskName, prompt, cron, sessionId });
+              bits.push(`已挂周期重跑「${t.name}」（${cron}），下次 ${t.nextRunAt ? new Date(t.nextRunAt).toLocaleString() : "待定"}。`);
+            }
+            this.deps.onAppChanged?.("tasks");
+          } catch (e) {
+            bits.push(`定时任务创建失败：${e instanceof Error ? e.message : String(e)}`);
+          }
+        } else if (cron || runAt) {
+          bits.push("（未配置定时任务模块，技能已保存但没挂重跑）");
+        } else {
+          bits.push(`若要定时重跑：task.create name="重跑：${skill.name}" prompt="按技能 ${link} 执行" cron=… 或 in=30m。`);
+        }
+        bits.push("告诉用户技能链接；不要编造未写入的步骤。");
+        return { output: bits.join("\n") };
+      }
+      default:
+        return { output: `未知工具 ${tool}。可用：demo.start / status / finish / cancel` };
+    }
+  }
+
+  private vaultTool(bot: Bot, tool: string, args: Record<string, unknown>): ToolOutcome {
+    const vault = this.deps.vault;
+    if (!vault) return { output: "❌ 保险库未启用" };
+    const q = String(args.query ?? args.q ?? args.match ?? "").trim();
+    if (tool === "vault.list" || tool === "vault.search") {
+      const items = tool === "vault.search" || q ? vault.search(q || String(args.kind ?? ""), bot.id) : vault.list(bot.id);
+      const kind = String(args.kind ?? "").trim();
+      const filtered = kind ? items.filter((x) => x.kind === kind) : items;
+      if (!filtered.length) return { output: "保险库里没有匹配项。设置里可打开 [保险库 / 连接](app:settings/vault)。" };
+      const lines = filtered.slice(0, 40).map((x) => `- [${x.kind}] ${x.title}${x.detail ? ` — ${x.detail}` : ""}`);
+      return { output: `本机保险库（${filtered.length} 项，只读；密钥值不可见，工具参数用 {{secret:名字}}）：\n${lines.join("\n")}\n管理：[保险库 / 连接](app:settings/vault)` };
+    }
+    if (tool === "vault.contact") {
+      const key = String(args.name ?? args.id ?? args.contact ?? q).trim();
+      if (!key) {
+        const all = vault.contacts().slice(0, 30);
+        return { output: all.length ? all.map((c) => `- ${c.name}${c.email ? ` <${c.email}>` : ""}${c.note ? ` · ${c.note}` : ""}`).join("\n") : "通讯录为空。用户可在设置「保险库」里添加（无支付）。" };
+      }
+      const c = vault.contact(key);
+      if (!c) return { output: `找不到联系人「${key}」` };
+      return { output: `${c.name}${c.email ? `\n邮箱：${c.email}` : ""}${c.note ? `\n备注：${c.note}` : ""}\n（本机通讯录，无支付 / 无云邮箱身份）` };
+    }
+    return { output: `未知工具 ${tool}。可用：vault.list / vault.search / vault.contact` };
+  }
+
   private async planTool(bot: Bot, tool: string, args: Record<string, unknown>, depth: number, sessionId: string | undefined, turn: TurnCtx): Promise<ToolOutcome> {
     const plans = this.deps.plans;
     if (!plans) return { output: "编排未启用" };
     const link = "[编排](app:settings/plans)";
     if (tool === "plan.list") {
       const all = plans.list();
-      return { output: all.length ? all.slice(0, 15).map((p) => `- ${p.title}（${({ done: "已完成", error: "失败", running: "进行中", pending: "未开始" } as Record<string, string>)[p.status] ?? p.status}）${p.result ? `：${p.result.slice(0, 80)}` : ""}`).join("\n") + `\n完整记录：${link}` : `还没有编排计划。查看：${link}` };
+      return { output: all.length ? all.slice(0, 15).map((p) => `- ${p.title}（${({ done: "已完成", error: "失败", running: "进行中", pending: "未开始" } as Record<string, string>)[p.status] ?? p.status}）${p.currentOwner ? ` · 负责人 ${p.currentOwner}` : ""}${p.result ? `：${p.result.slice(0, 80)}` : ""}`).join("\n") + `\n完整记录：${link}` : `还没有编排计划。查看：${link}` };
     }
     if (tool === "plan.cancel") {
       const hit = plans.cancel(String(args.plan ?? args.title ?? args.id ?? "").trim());
       this.deps.onAppChanged?.("plans");
       return { output: hit ? `已停止编排「${hit}」` : "❌ 没有找到正在运行的这个编排" };
+    }
+    if (tool === "plan.handOff") {
+      if (!plans.handOff) return { output: "❌ 当前版本不支持阶段移交" };
+      const to = String(args.to ?? args.bot ?? args.owner ?? "").trim();
+      if (!to) return { output: "plan.handOff 需要 to（目标 bot 名或 id）" };
+      try {
+        const r = plans.handOff({
+          plan: String(args.plan ?? args.title ?? args.id ?? "").trim() || undefined,
+          to,
+          note: args.note != null ? String(args.note) : undefined,
+          stageId: args.stageId != null ? String(args.stageId) : undefined,
+        });
+        this.deps.onAppChanged?.("plans");
+        return { output: `已把编排「${r.plan}」阶段「${r.stage}」移交给 ${r.owner}${r.note ? `（备注：${r.note}）` : ""}。进度在 ${link}。` };
+      } catch (e) {
+        return { output: `❌ 移交失败：${e instanceof Error ? e.message : String(e)}` };
+      }
     }
     if (tool !== "plan.start") return { output: `未知工具 ${tool}` };
     if (depth > 0 || turn.unattended) return { output: "❌ 自动执行或被其他 bot 调用时不能再发起编排，直接完成你这一步。" };
@@ -730,432 +894,6 @@ export class BotRuntime {
       return { output: `已开始编排「${r.title}」，在后台运行：\n${r.steps.map((x, i) => `${i + 1}. ${x}`).join("\n")}\n跑完会把结果发回这个会话；进度在 ${link} 里实时可见。告诉用户已经开始了，不要等结果，也不要编造结果。` };
     } catch (e) {
       return { output: `❌ 发起编排失败：${e instanceof Error ? e.message : String(e)}` };
-    }
-  }
-
-  private async petTool(bot: Bot, tool: string, args: Record<string, unknown>): Promise<ToolOutcome> {
-    const host = this.deps.petHost;
-    if (!host) return { output: "❌ 桌宠宿主未就绪" };
-    const store = this.deps.store;
-    const str = (k: string) => (args[k] === undefined || args[k] === null ? undefined : String(args[k]).trim());
-    const find = (q: string) => {
-      const all = store.listBots();
-      return all.find((b) => b.name === q) ?? all.find((b) => b.id === q) ?? all.find((b) => b.name.includes(q) || q.includes(b.name));
-    };
-    const isSelfQuery = (q?: string) => !q || q === "me" || q === "自己" || q === bot.name || q === bot.id;
-    const describe = (b: Bot) => {
-      const skin = host.skinLabel(b.id);
-      const shown = host.isShown?.(b.id);
-      const xp = host.xp?.(b.id) ?? 0;
-      const level = Math.floor(Math.sqrt(xp / 100)) + 1;
-      const stage = !b.petEnabled ? "未上台" : shown === false ? "已上台但藏着" : shown === true ? "桌面可见" : (b.petEnabled ? "已上台" : "未上台");
-      return `${b.name}：${stage}；形象「${skin}」；Lv.${level}（${xp} XP）`;
-    };
-    switch (tool) {
-      case "pet.list": {
-        // 全员桌宠一览（含未上台）；all=true 时列出全部 bot，否则默认只列已上台 + 自己
-        const all = args.all === true || args.all === 1 || String(args.all ?? "") === "true";
-        const bots = store.listBots();
-        const rows = all
-          ? bots
-          : bots.filter((b) => b.petEnabled || b.id === bot.id);
-        if (!rows.length) return { output: "还没有桌宠。用户可在 bot 详情打开「桌面宠物」，或对我说「出来」。" };
-        const on = rows.filter((b) => b.petEnabled).length;
-        return {
-          output: [
-            `【桌宠 ${on}/${bots.length} 上台】` + (all ? "（含未上台）" : "（仅上台+自己；要全员加 all:true）"),
-            ...rows.map((b) => `- ${describe(b)}${b.id === bot.id ? "（你）" : ""}`),
-          ].join("\n"),
-        };
-      }
-      case "pet.status": {
-        const q = str("name") ?? str("bot");
-        if (q && !isSelfQuery(q)) {
-          const target = find(q);
-          if (!target) return { output: `找不到「${q}」` };
-          return { output: describe(target) };
-        }
-        const peers = store.listBots().filter((b) => b.id !== bot.id && b.petEnabled);
-        const lines = [describe(store.getBot(bot.id) || bot)];
-        if (peers.length) lines.push(`其他上台：${peers.map((p) => p.name).join("、")}`);
-        else lines.push("其他上台：无");
-        const prefs = host.prefs?.(bot.id);
-        if (prefs) {
-          const on = (k: string, label: string) => prefs[k] ? label : null;
-          const flags = [
-            on("companionChat", "空闲搭话"), on("proactiveFollowup", "主动跟进"),
-            on("idleWork", "空闲做事"), on("autoAppearance", "自动换装"),
-            on("agentMaySpawn", "可召唤伙伴"), on("selfEvolve", "自进化"),
-            on("petVisit", "互访"),
-          ].filter(Boolean);
-          lines.push(`智能开关：${flags.length ? flags.join("、") : "全关（仅基础桌宠）"}`);
-        }
-        const pending = host.evolveList?.(bot.id, "pending") ?? [];
-        if (pending.length) lines.push(`待确认进化 ${pending.length} 条（pet.evolve action=list）`);
-        lines.push("完整名单用 pet.list；只要上台伙伴用 pet.peers。");
-        return { output: lines.join("\n") };
-      }
-      case "pet.peers": {
-        const peers = store.listBots().filter((b) => b.id !== bot.id && b.petEnabled);
-        if (!peers.length) return { output: "还没有其他上台的桌宠。" };
-        return { output: peers.map((p) => describe(p)).join("\n") };
-      }
-      case "pet.skin": {
-        const want = str("skin") ?? str("name") ?? str("id");
-        const skins = host.listSkins?.() ?? [];
-        if (want === "prev" || want === "revert" || want === "换回去" || want === "上一套" || args.revert === true) {
-          if (!host.revertSkin) return { output: "❌ 换回未就绪" };
-          const r = host.revertSkin(bot.id);
-          if (!r.ok) return { output: `❌ ${r.error}` };
-          this.deps.onAppChanged?.("bots");
-          return { output: `已换回「${r.label}」` };
-        }
-        if (!want || want === "list" || want === "列表") {
-          if (!skins.length) return { output: "本地还没有形象。用 pet.search 搜社区库，再 pet.install 下载。" };
-          const cur = host.skinLabel(bot.id);
-          return { output: `当前「${cur}」。本地已装：\n${skins.map((s) => `- ${s.name}（${s.id}）`).join("\n")}\n没有想要的可用 pet.search / pet.install 从 petdex 下载；换回去用 skin=prev。` };
-        }
-        if (!host.setSkin) return { output: "❌ 换装未就绪" };
-        const hit = skins.find((s) => s.id === want || s.name === want)
-          ?? skins.find((s) => s.name.includes(want) || want.includes(s.name));
-        if (!hit) {
-          // 本地没有 → 引导搜库 / 直接尝试安装
-          if (host.installCatalog) {
-            const inst = await host.installCatalog(want, { wearBotId: bot.id });
-            if (inst.ok) {
-              this.deps.onAppChanged?.("bots");
-              return { output: `本地没有「${want}」，已从 petdex 下载「${inst.label}」并换上（已加入形象列表）。` };
-            }
-            return { output: `本地没有「${want}」。${inst.error} 可先 pet.search query="${want}" 看看有没有近似的。` };
-          }
-          return { output: `找不到形象「${want}」。先 pet.skin 看本地列表，或 pet.search / pet.install 从社区下载。` };
-        }
-        // 默认只给自己换；给别人换装等同「操作他人桌宠」，需召唤开关
-        const whoQ = str("bot") ?? str("to");
-        let target = bot;
-        if (whoQ && !isSelfQuery(whoQ)) {
-          if (!host.maySpawn()) return { output: "❌ 给其他桌宠换装需要打开「允许召唤/创建桌宠」" };
-          const t = find(whoQ);
-          if (!t) return { output: `找不到「${whoQ}」` };
-          target = t;
-        }
-        const r = host.setSkin(target.id, hit.id);
-        if (!r.ok) return { output: `❌ ${r.error}` };
-        this.deps.onAppChanged?.("bots");
-        return { output: `已为 ${target.name} 换上「${r.label}」` };
-      }
-      case "pet.search": {
-        if (!host.searchCatalog) return { output: "❌ 形象库搜索未就绪" };
-        const q = str("query") ?? str("q") ?? str("name") ?? str("skin") ?? "";
-        const rows = await host.searchCatalog(q);
-        if (!rows.length) return { output: q ? `没搜到「${q}」。换个关键词，或去 petdex.dev 看看。` : "推荐列表为空。" };
-        const head = q ? `搜「${q}」：` : "推荐形象：";
-        return {
-          output: [
-            head,
-            ...rows.map((r) => `- ${r.name}（slug: ${r.slug}${r.installed ? "，已安装" : ""}）`),
-            "下载并加入列表：pet.install slug=…（默认换到自己身上；只要入库设 wear:false）",
-          ].join("\n"),
-        };
-      }
-      case "pet.install": {
-        if (!host.installCatalog) return { output: "❌ 形象下载未就绪" };
-        const slug = str("slug") ?? str("skin") ?? str("name") ?? str("query") ?? "";
-        if (!slug) return { output: "pet.install 需要 slug 或 name（可先 pet.search）" };
-        const wearRaw = args.wear;
-        const wear = wearRaw === false || wearRaw === "false" || wearRaw === 0 ? false : true;
-        const r = await host.installCatalog(slug, { name: str("label") ?? str("displayName"), wearBotId: wear ? bot.id : undefined });
-        if (!r.ok) return { output: `❌ ${r.error}` };
-        this.deps.onAppChanged?.("bots");
-        return {
-          output: r.worn
-            ? `已下载「${r.label}」加入形象列表，并换到自己身上。`
-            : `已下载「${r.label}」加入形象列表（未换装；要穿上用 pet.skin skin="${r.label}"）。`,
-        };
-      }
-      case "pet.show": {
-        const q = str("name") ?? str("bot");
-        // 自己出台 = 基础能力，不需要「允许召唤」
-        if (isSelfQuery(q)) {
-          const me = store.getBot(bot.id) || bot;
-          store.saveBot({ ...me, petEnabled: true });
-          host.show(me.id);
-          this.deps.onAppChanged?.("bots");
-          return { output: "我已出台到桌面。" };
-        }
-        if (!host.maySpawn()) return { output: "❌ 用户已关闭「允许召唤/创建桌宠」；我只能操作自己的桌宠。" };
-        const target = find(q!);
-        if (!target) return { output: `找不到「${q}」。现有：${store.listBots().map((b) => b.name).join("、")}` };
-        store.saveBot({ ...target, petEnabled: true });
-        host.show(target.id);
-        this.deps.onAppChanged?.("bots");
-        return { output: `已让 [${target.name}](app:bot/${encodeURIComponent(target.name)}) 出台桌宠` };
-      }
-      case "pet.hide": {
-        const q = str("name") ?? str("bot");
-        if (isSelfQuery(q)) {
-          host.hide(bot.id);
-          return { output: "已暂时藏起自己（没有关掉桌宠，托盘「全部显示」可回来）" };
-        }
-        if (!host.maySpawn()) return { output: "❌ 藏起其他桌宠需要打开「允许召唤/创建桌宠」" };
-        const target = find(q!);
-        if (!target) return { output: `找不到「${q}」` };
-        host.hide(target.id);
-        return { output: `已暂时藏起 ${target.name}` };
-      }
-      case "pet.disable": {
-        if (!host.disable) return { output: "❌ 下台未就绪" };
-        const q = str("name") ?? str("bot");
-        if (!isSelfQuery(q)) {
-          if (!host.maySpawn()) return { output: "❌ 关掉其他桌宠需要打开「允许召唤/创建桌宠」" };
-          const target = find(q!);
-          if (!target) return { output: `找不到「${q}」` };
-          host.disable(target.id);
-          this.deps.onAppChanged?.("bots");
-          return { output: `已关闭 ${target.name} 的桌宠（彻底下台，不是藏起来）` };
-        }
-        host.disable(bot.id);
-        this.deps.onAppChanged?.("bots");
-        return { output: "已关闭自己的桌宠（彻底下台）。要再出台用 pet.show。" };
-      }
-      case "pet.generate": {
-        if (!host.generatePersona) return { output: "❌ 形象生成未就绪" };
-        const desc = str("desc") ?? str("prompt") ?? str("text") ?? "";
-        if (!desc) return { output: "pet.generate 需要 desc（一句话描述，如「戴耳机的橘猫」）" };
-        const r = await host.generatePersona(bot.id, desc, str("style") ?? undefined);
-        if (!r.ok) return { output: `❌ ${r.error}` };
-        this.deps.onAppChanged?.("bots");
-        // 诚实回报：有图 / 换了皮 / 只改了卡；绝不假装「画出来了」
-        const extra = r.suggestions?.length
-          ? `\n其它可选项：${r.suggestions.map((s) => `${s.name}(${s.kind})`).join("、")}`
-          : "";
-        return { output: `${r.message}${extra}` };
-      }
-      case "pet.prefs": {
-        const action = (str("action") ?? str("op") ?? "get").toLowerCase();
-        if (action === "get" || action === "list" || action === "read") {
-          const p = host.prefs?.(bot.id);
-          if (!p) return { output: "❌ 偏好未就绪" };
-          const line = (k: string, label: string) => `- ${label}：${p[k] ? "开" : "关"}`;
-          return {
-            output: [
-              "【对本宠生效的智能偏好】（全局默认 ⊕ 单宠覆盖）",
-              line("companionChat", "空闲搭话"),
-              line("proactiveFollowup", "主动跟进"),
-              line("idleWork", "空闲做事"),
-              line("autoAppearance", "自动换装"),
-              line("agentMaySpawn", "允许召唤伙伴"),
-              line("selfEvolve", "自进化提议"),
-              line("autoEvolve", "自动接受进化"),
-              line("petVisit", "多宠互访"),
-              `节奏：空闲 ${p.idleMinutes} 分钟才开口；每天最多搭话 ${p.maxChatPerDay} / 做事 ${p.maxWorkPerDay}；每周自动换装 ${p.maxAppearPerWeek}`,
-              "改自己节奏：pet.prefs action=set companionChat=false（只影响你）；进阶总开关请用户去设置页开。",
-            ].join("\n"),
-          };
-        }
-        if (action === "set" || action === "patch") {
-          if (!host.setPrefs) return { output: "❌ 偏好写入未就绪" };
-          const patch: Record<string, unknown> = {};
-          const boolKeys = ["companionChat", "proactiveFollowup", "idleWork", "autoAppearance", "agentMaySpawn", "selfEvolve", "autoEvolve", "petVisit"] as const;
-          for (const k of boolKeys) {
-            if (args[k] === undefined) continue;
-            patch[k] = args[k] === true || args[k] === "true" || args[k] === 1;
-          }
-          for (const k of ["idleMinutes", "maxChatPerDay", "maxWorkPerDay", "maxAppearPerWeek"] as const) {
-            if (args[k] === undefined) continue;
-            const n = Number(args[k]);
-            if (Number.isFinite(n)) patch[k] = n;
-          }
-          if (!Object.keys(patch).length) return { output: "没有可写的字段。例：companionChat=false 或 idleMinutes=60" };
-          // 进阶总闸门：bot 只允许改节奏类；开关类里 companion/idle/appear 可以，spawn/visit/evolve 建议用户去设置
-          const locked = ["agentMaySpawn", "selfEvolve", "autoEvolve", "petVisit"].filter((k) => k in patch);
-          for (const k of locked) delete patch[k];
-          if (!Object.keys(patch).length) {
-            return { output: "召唤/互访/自进化请用户在「桌面宠物智能」里开；我只能改自己的搭话/做事/换装节奏。" };
-          }
-          host.setPrefs(bot.id, patch);
-          return { output: `已更新本宠偏好：${Object.entries(patch).map(([k, v]) => `${k}=${v}`).join("、")}` };
-        }
-        return { output: "pet.prefs action 用 get 或 set" };
-      }
-      case "pet.evolve": {
-        if (!host.evolveList || !host.evolveDecide) return { output: "❌ 进化未就绪" };
-        const action = (str("action") ?? str("op") ?? "list").toLowerCase();
-        if (action === "list" || action === "pending") {
-          const rows = host.evolveList(bot.id, "pending");
-          if (!rows.length) return { output: "没有待确认的进化提议。" };
-          return {
-            output: [
-              "【待确认进化】",
-              ...rows.map((r) => `- ${r.title}（${r.kind}，id=${r.id.slice(0, 8)}）\n  ${r.detail.slice(0, 100)}`),
-              "接受：pet.evolve action=accept；拒绝：action=reject（可带 id）",
-            ].join("\n"),
-          };
-        }
-        if (action === "history" || action === "log") {
-          const rows = host.evolveList(bot.id, "history");
-          if (!rows.length) return { output: "还没有进化记录。" };
-          const label: Record<string, string> = { pending: "待确认", accepted: "已接受", rejected: "已拒绝" };
-          return {
-            output: [
-              "【进化历史】",
-              ...rows.slice(0, 15).map((r) => `- [${label[r.status] || r.status}] ${r.title}`),
-            ].join("\n"),
-          };
-        }
-        if (action === "accept" || action === "reject") {
-          const r = host.evolveDecide(bot.id, action, str("id") ?? undefined);
-          if (!r.ok) return { output: `❌ ${r.error}` };
-          this.deps.onAppChanged?.("bots");
-          return { output: action === "accept" ? `已接受：${r.title}` : `已拒绝：${r.title}` };
-        }
-        return { output: "pet.evolve action 用 list / history / accept / reject" };
-      }
-      case "pet.visits": {
-        if (!host.visitHistory) return { output: "❌ 拜访记录未就绪" };
-        const rows = host.visitHistory(bot.id, 15);
-        if (!rows.length) return { output: "还没有拜访记录。" };
-        return {
-          output: rows.map((r) => {
-            const mine = r.fromId === bot.id;
-            const when = new Date(r.at).toLocaleString();
-            return `- ${mine ? "去找" : "来访"} ${mine ? r.toName : r.fromName}（${when}）：${mine ? r.lineFrom : r.lineTo}`;
-          }).join("\n"),
-        };
-      }
-      case "pet.remind": {
-        if (!host.remind) return { output: "❌ 提醒未就绪" };
-        const text = str("text") ?? str("message") ?? str("prompt") ?? "提醒";
-        let delayMs = Number(args.delayMs ?? args.ms ?? 0);
-        if (!delayMs) {
-          const inn = str("in");
-          if (inn) {
-            const m = inn.match(/^(\d+)\s*(m|min|分钟|h|小时|s|秒)?$/i);
-            if (m) {
-              const n = Number(m[1]);
-              const u = (m[2] || "m").toLowerCase();
-              delayMs = /h|小时/.test(u) ? n * 3600_000 : /s|秒/.test(u) ? n * 1000 : n * 60_000;
-            }
-          }
-        }
-        if (!delayMs && args.minutes != null) delayMs = Number(args.minutes) * 60_000;
-        if (!delayMs || delayMs < 5000) return { output: "pet.remind 需要 in（如 30m）或 minutes / delayMs，且至少 5 秒" };
-        const r = host.remind(bot.id, delayMs, text);
-        if (!r.ok) return { output: `❌ ${r.error}` };
-        const mins = Math.round(delayMs / 60_000);
-        return { output: `好，大约 ${mins < 1 ? "不到 1 分钟" : mins + " 分钟"}后我会在桌面提醒你：${text}` };
-      }
-      case "pet.create": {
-        if (!host.maySpawn()) return { output: "❌ 用户已关闭「允许召唤/创建桌宠」" };
-        const name = str("name");
-        if (!name) return { output: "pet.create 需要 name" };
-        if (store.listBots().some((b) => b.name === name)) {
-          const existing = store.listBots().find((b) => b.name === name)!;
-          store.saveBot({ ...existing, petEnabled: true });
-          host.show(existing.id);
-          this.deps.onAppChanged?.("bots");
-          return { output: `已有叫「${name}」的 bot，已帮它出台` };
-        }
-        const id = `bot-${Date.now().toString(36)}`;
-        const nb: Bot = {
-          id, name,
-          role: str("role") ?? "桌宠伙伴",
-          persona: str("persona") ?? "友好、会陪伴用户",
-          providerId: bot.providerId || "",
-          petEnabled: true,
-          avatar: defaultAvatar(id),
-          createdAt: Date.now(),
-        };
-        store.saveBot(nb);
-        host.show(id);
-        this.deps.onAppChanged?.("bots");
-        return { output: `已创建桌宠 [${name}](app:bot/${encodeURIComponent(name)}) 并出台` };
-      }
-      case "pet.visit": {
-        if (host.mayVisit && !host.mayVisit()) return { output: "❌ 用户已关闭「多宠互访」" };
-        if (!host.visit) return { output: "❌ 互访未就绪" };
-        const q = str("name") ?? str("to") ?? str("bot") ?? "";
-        if (!q) return { output: "pet.visit 需要 name（要去拜访的伙伴）" };
-        const target = find(q);
-        if (!target) return { output: `找不到「${q}」` };
-        if (!target.petEnabled) {
-          if (!host.maySpawn()) return { output: `「${target.name}」还没上台，且不允许自动召唤` };
-          store.saveBot({ ...target, petEnabled: true });
-          host.show(target.id);
-        }
-        // 自己也要上台才能串门
-        const me = store.getBot(bot.id) || bot;
-        if (!me.petEnabled) {
-          store.saveBot({ ...me, petEnabled: true });
-          host.show(me.id);
-          this.deps.onAppChanged?.("bots");
-        }
-        const r = await host.visit(bot.id, target.id);
-        return { output: r.ok ? r.line : `❌ ${r.error}` };
-      }
-      case "pet.mind": {
-        if (!host.mind) return { output: "❌ 心智投影未就绪" };
-        const q = str("name") ?? str("bot");
-        const target = q && !isSelfQuery(q) ? find(q) : bot;
-        if (!target) return { output: `找不到「${q}」` };
-        const r = host.mind(target.id);
-        if (!r.ok) return { output: `❌ ${r.error}` };
-        return { output: `【桌宠心智 · 娱乐只读】\n${r.prompt}` };
-      }
-      case "pet.activity": {
-        if (!host.activity) return { output: "❌ 活动日志未就绪" };
-        const q = str("name") ?? str("bot");
-        const targetId = q && !isSelfQuery(q) ? find(q)?.id : bot.id;
-        const rows = host.activity(targetId, args.limit != null ? Number(args.limit) : 12);
-        if (!rows.length) return { output: "还没有桌宠自主行动记录（娱乐向；开智能开关后才会有）。" };
-        return {
-          output: [
-            "【桌宠活动 · 娱乐】",
-            ...rows.map((a) => `- ${new Date(a.at).toLocaleString()} · ${a.via} · ${a.kind}${a.blocked ? "（未执行）" : ""}：${a.note}`),
-          ].join("\n"),
-        };
-      }
-      case "pet.act": {
-        if (!host.act) return { output: "❌ 动作未就绪" };
-        const action = (str("action") ?? str("act") ?? str("motion") ?? "").toLowerCase();
-        if (!action) return { output: "pet.act 需要 action（idle/walk/jump/sleep/celebrate/work/think）；这是娱乐表演，不代替真正干活" };
-        const hold = args.hold != null ? Number(args.hold) : args.seconds != null ? Number(args.seconds) : undefined;
-        const r = host.act(bot.id, action, Number.isFinite(hold) ? hold : undefined);
-        return { output: r.ok ? `已做娱乐动作：${r.action}` : `❌ ${r.error}` };
-      }
-      case "pet.say": {
-        if (!host.say) return { output: "❌ 气泡说话未就绪" };
-        const text = str("text") ?? str("message") ?? str("line") ?? "";
-        if (!text) return { output: "pet.say 需要 text" };
-        const r = host.say(bot.id, text, {
-          title: str("title"),
-          action: str("action") ?? undefined,
-          holdSec: args.hold != null ? Number(args.hold) : undefined,
-        });
-        return { output: r.ok ? `已冒泡：${text.slice(0, 40)}` : `❌ ${r.error}` };
-      }
-      case "pet.fx": {
-        if (!host.fx) return { output: "❌ 特效未就绪" };
-        const action = (str("action") ?? str("op") ?? "play").toLowerCase();
-        const r = await host.fx(bot.id, {
-          action,
-          phrase: str("phrase") ?? str("text") ?? str("fx") ?? undefined,
-          name: str("name") ?? undefined,
-          sticky: args.sticky === true || args.sticky === "true",
-        });
-        if (!r.ok) return { output: `❌ ${r.error}` };
-        if (r.list?.length) {
-          return {
-            output: [
-              r.message,
-              ...r.list.slice(0, 20).map((e) => `- ${e.name}（${e.kind}${e.sticky ? ",钉住" : ""} · 用过${e.useCount}次）`),
-            ].join("\n"),
-          };
-        }
-        return { output: r.message };
-      }
-      default:
-        return { output: `未知工具 ${tool}` };
     }
   }
 
@@ -1199,23 +937,23 @@ export class BotRuntime {
         const name = str("name");
         if (!name) return { output: "app.createBot 需要 name" };
         if (store.listBots().some((b) => b.name === name)) return { output: `已经有叫「${name}」的 bot 了` };
-        const wantPet = args.pet === true || args.asPet === true || /^(1|true|yes|上台|桌宠)$/i.test(String(args.pet ?? ""));
-        if (wantPet && this.deps.petHost && !this.deps.petHost.maySpawn()) {
-          return { output: "❌ 用户已关闭「允许召唤/创建桌宠」。可先建 bot（不要带 pet），让用户自己在详情里打开桌宠。" };
-        }
+        // 桌宠是娱乐侧车：建 bot 不自动上台；用户要桌宠请在详情打开，或对话 pet.show
+        const askedPet = args.pet === true || args.asPet === true || /^(1|true|yes|上台|桌宠)$/i.test(String(args.pet ?? ""));
         const id = `bot-${Date.now().toString(36)}`;
         const nb: Bot = {
           id, name,
           role: str("role") ?? "通用助手",
           persona: str("persona") ?? "",
           providerId: "",
-          petEnabled: wantPet,
+          petEnabled: false,
           avatar: defaultAvatar(id),
           createdAt: Date.now(),
         };
         store.saveBot(nb);
-        if (wantPet) this.deps.petHost?.show(id);
-        return changed("bots", `已创建 bot [${name}](app:bot/${encodeURIComponent(name)})${wantPet ? "，并已出台为桌宠" : ""}`);
+        const tip = askedPet
+          ? "。桌宠是独立娱乐层，建 bot 不会自动上台；请在 bot 详情打开「桌面宠物」，或对它说「出来」"
+          : "";
+        return changed("bots", `已创建 bot [${name}](app:bot/${encodeURIComponent(name)})${tip}`);
       }
       case "app.createGroup": {
         if (!this.deps.groups) return { output: "群聊未启用" };

@@ -6,6 +6,7 @@ import { Store } from "../core/store";
 import { MemorySystem } from "../core/memory-system";
 import { SkillRegistry } from "../core/skill-registry";
 import { BotRuntime } from "../core/bot-runtime";
+import { attachPetEntertainment, type PetHost } from "../core/pet";
 import { ProviderCenter } from "../core/provider-center";
 import type { Bot, ContentBlock } from "../core/types";
 
@@ -52,12 +53,7 @@ function setup(script: string[], opts?: { maySpawn?: boolean; mayVisit?: boolean
   ];
   const prefState: Record<string, unknown> = { companionChat: false, proactiveFollowup: false, idleWork: false, autoAppearance: false, agentMaySpawn: false, selfEvolve: false, autoEvolve: false, petVisit: false, idleMinutes: 45, maxChatPerDay: 4, maxWorkPerDay: 2, maxAppearPerWeek: 1 };
 
-  const rt = new BotRuntime({
-    store,
-    providers,
-    memory: new MemorySystem(home),
-    skills: new SkillRegistry(join(home, "skills")),
-    petHost: {
+  const host: PetHost = {
       show: (id) => { shown.add(id); },
       hide: (id) => { shown.delete(id); },
       skinLabel: () => skins.find((s) => s.id === currentSkin)?.name || currentSkin,
@@ -134,14 +130,22 @@ function setup(script: string[], opts?: { maySpawn?: boolean; mayVisit?: boolean
         if ((args.action || "play") === "list") {
           return { ok: true as const, message: "特效列表", list: [{ id: "fx-kamehameha", name: "龟派气功", kind: "builtin", useCount: 1 }] };
         }
+        const given = (args.phrase || args.name || "").trim();
+        const phrase = given || "星屑雨";
         return {
           ok: true as const,
-          message: `已放出「${args.phrase || args.name || "特效"}」`,
-          effect: { id: "fx-x", name: String(args.phrase || "特效"), kind: "custom", created: true },
+          message: `已放出「${phrase}」${given ? "" : "（你没起名，我用了「星屑雨」）"}`,
+          effect: { id: "fx-x", name: phrase, kind: "custom", created: true },
         };
       },
-    },
+    };
+  const rt = new BotRuntime({
+    store,
+    providers,
+    memory: new MemorySystem(home),
+    skills: new SkillRegistry(join(home, "skills")),
   });
+  attachPetEntertainment(rt, { store, host });
 
   const result = (r: { content?: ContentBlock[] }, name: string) =>
     (r.content?.find((x) => x.type === "tool_call" && (x as any).tool === name) as any)?.result as string;
@@ -304,6 +308,13 @@ describe("Bot 操作桌宠", () => {
     const list = setup([tool("pet.fx", { action: "list" }), "好"]);
     const rl = await list.rt.handleStream({ bot: list.a, from: "user", text: "特效", sessionId: "s42" }, { onBlock: () => {} });
     expect(list.result(rl, "pet.fx")).toContain("龟派气功");
+
+    // 空 phrase：即兴起名，不再报「需要 phrase」
+    const improv = setup([tool("pet.fx", {}), "好"]);
+    const ri = await improv.rt.handleStream({ bot: improv.a, from: "user", text: "现场发明特效配方", sessionId: "s43" }, { onBlock: () => {} });
+    const out = improv.result(ri, "pet.fx");
+    expect(out).not.toContain("需要 phrase");
+    expect(out).toMatch(/已放出|星屑雨|即兴/);
   });
 
   test("换装后再换回去", async () => {

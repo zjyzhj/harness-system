@@ -44,6 +44,38 @@ export interface Bot {
   reasoning?: "auto" | "always" | "off";
   /** 左栏手动排序（越小越靠前） */
   order?: number;
+  /**
+   * 从分享模板导入后的依赖清单（无密钥值）。
+   * 开箱时对照本机 Vault diff；硬缺口齐了仍可保留作参考，或由宿主清掉。
+   */
+  shareOnboard?: BotNeeds;
+}
+
+/** 分享 / 开箱依赖声明：只带名单与说明，不含密钥或 env 值 */
+export interface NeedSecret {
+  name: string;
+  label?: string;
+  note?: string;
+}
+
+export interface NeedEnv {
+  key: string;
+  label?: string;
+  note?: string;
+  hint?: string;
+}
+
+export interface NeedSharedSkill {
+  name: string;
+  description: string;
+}
+
+export interface BotNeeds {
+  secrets: NeedSecret[];
+  env: NeedEnv[];
+  commands?: string[];
+  mcp?: string[];
+  sharedSkills?: NeedSharedSkill[];
 }
 
 export interface PersonaCard {
@@ -75,8 +107,19 @@ export type ContentBlock =
   | { type: "choice"; id: string; question: string; options: string[]; mode?: "choice" | "confirm"; detail?: string; answer?: string }
   /** 让用户在加密输入框里填写的密钥，值只存本机，不进对话 */
   | { type: "secret"; name: string; label: string; note?: string; scope?: "all"; saved?: boolean }
+  /** 多字段预填表单卡：用户填完后以一条消息交回 */
+  | { type: "form"; id: string; title: string; fields: FormField[]; submitLabel?: string; answer?: Record<string, string> }
   /** 群聊主持人的结论卡片：决定了什么、谁负责什么、还有什么没定 */
   | { type: "conclusion"; summary: string; decisions: string[]; tasks: ConclusionTask[]; open?: string[] };
+
+export interface FormField {
+  key: string;
+  label: string;
+  type?: "text" | "textarea" | "email";
+  placeholder?: string;
+  required?: boolean;
+  value?: string;
+}
 
 export interface SourceItem { title: string; url: string; snippet?: string }
 
@@ -137,6 +180,12 @@ export function contentText(c: string | ContentBlock[]): string {
         return `[${b.mode === "confirm" ? "请用户确认" : "请用户选择"}] ${b.question}${b.detail ? `（${b.detail}）` : ""}${b.mode === "confirm" ? "" : ` 选项：${opts}`}${b.answer ? ` → 用户已选：${b.answer}` : ""}`;
       }
       if (b.type === "secret") return `[请用户填写密钥「${b.label}」(${b.name})${b.saved ? "，已保存" : ""}]`;
+      if (b.type === "form") {
+        const filled = b.answer
+          ? Object.entries(b.answer).map(([k, v]) => `${k}=${v}`).join("；")
+          : b.fields.map((f) => f.label).join("、");
+        return `[请用户填写表单「${b.title}」] ${b.answer ? `→ 已填：${filled}` : `字段：${filled}`}`;
+      }
       if (b.type === "conclusion") {
         return [`【讨论结论】${b.summary}`, ...b.decisions.map((d) => `- 决定：${d}`), ...b.tasks.map((t) => `- ${t.owner} 负责：${t.task}${t.done ? "（已完成）" : t.dispatched ? "（已分派）" : ""}`), ...(b.open ?? []).map((o) => `- 待定：${o}`)].join("\n");
       }
@@ -390,6 +439,8 @@ export type OrchestrationStageMode = "seq" | "fan";
 export interface OrchestrationStage {
   id: string;
   botId: string;
+  /** 阶段实际负责人；缺省 = botId。handOff 后可变 */
+  ownerBotId?: string;
   prompt: string;
   mode: OrchestrationStageMode;
   status: "pending" | "running" | "done" | "error";
@@ -398,6 +449,8 @@ export interface OrchestrationStage {
   startedAt?: number;
   finishedAt?: number;
   retries: number;
+  /** 移交备注（最近一次） */
+  handOffNote?: string;
   /** 运行中的实时产出 / 当前动作，不持久化 */
   live?: string;
   activity?: string;

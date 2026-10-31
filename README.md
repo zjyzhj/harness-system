@@ -30,7 +30,7 @@ bun run dist  # 打 macOS arm64 包（dmg）
 
 | 方向 | 内容 |
 |------|------|
-| 运行时 | 工具循环、MCP、记忆、技能（SKILL.md）、定时任务、上下文预算 |
+| 运行时 | 工具循环、MCP、记忆、技能（SKILL.md）、演示→技能、定时任务、上下文预算 |
 | 宠物 | Live2D 样本模型、换装、XP/进化、主动搭话、互访、一句话导演 |
 | 协作 | 群组、编排器、HTTP Gateway、富内容互通 |
 | 安全 | 同意中心、审计日志、密钥安全存储、命令白名单 |
@@ -40,12 +40,15 @@ bun run dist  # 打 macOS arm64 包（dmg）
 
 ```
 Electron 壳 (app/) ──IPC──▶ core/（纯 TypeScript）
-                              ├─ BotRuntime / Orchestrator
+                              ├─ BotRuntime / Orchestrator   ← Bot 完整设计（不含桌宠）
                               ├─ Memory / Skills / Scheduler / MCP
-                              ├─ Pet*（mind / director / evolve / visit…）
                               ├─ Realm（灵境 Presence + TTS）
-                              └─ Store / Migration / SecretStore
+                              ├─ Store / Migration / SecretStore
+                              └─ pet/sidecar（可选娱乐侧车：pet.* 工具 + 桌宠提示）
+                                   ↑ app 启动时 attachPetEntertainment 挂载
 ```
+
+桌宠是**娱乐侧车**，不进入 Bot 完整设计：未挂载时 Runtime 无 `pet.*`、无桌宠提示词；`app.createBot` 也不自动上台。
 
 ## 文档
 

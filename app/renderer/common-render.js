@@ -29,7 +29,10 @@ function renderBlock(b) {
       const args = b.args ? `<div class="tool-args">${esc(JSON.stringify(b.args))}</div>` : "";
       const status = b.status ? `<span class="tool-status ${esc(b.status)}">${esc(b.status)}</span>` : "";
       const result = b.result ? `<div class="tool-result">${esc(b.result)}</div>` : "";
-      return `<div class="tool-card"><div class="tool-head">🛠 ${esc(b.tool)} ${status}</div>${args}${result}</div>`;
+      const demo = typeof b.tool === "string" && b.tool.startsWith("demo.");
+      const icon = demo ? "🎬" : "🛠";
+      const klass = demo ? "tool-card demo-tool" : "tool-card";
+      return `<div class="${klass}"><div class="tool-head">${icon} ${esc(b.tool)} ${status}</div>${args}${result}</div>`;
     }
     case "file": return `<div class="file-card">📎 ${esc(b.name || b.path)}${b.size ? ` <span class="hint">${formatBytes(b.size)}</span>` : ""}</div>`;
     case "thinking": return thinkHtml(b);
@@ -41,11 +44,25 @@ function renderBlock(b) {
 function thinkSecs(ms) {
   const n = Number(ms);
   if (!Number.isFinite(n) || n < 0) return "不到 1 秒";
-  return n < 1000 ? "不到 1 秒" : `${Math.round(n / 1000)} 秒`;
+  if (n < 1000) return "不到 1 秒";
+  // 用向下取整，避免 1.4s 被四舍五入成「2 秒」
+  const s = Math.floor(n / 1000);
+  return s < 10 ? `${(n / 1000).toFixed(1)} 秒` : `${s} 秒`;
+}
+
+/** 整轮耗时（含工具），不要跟「深度思考」混淆 */
+function fmtLatency(ms) {
+  const n = Number(ms);
+  if (!Number.isFinite(n) || n < 0) return "";
+  if (n < 1000) return `整轮 ${Math.round(n)}ms`;
+  if (n < 10_000) return `整轮 ${(n / 1000).toFixed(1)}s`;
+  return `整轮 ${Math.round(n / 1000)}s`;
 }
 
 function thinkHtml(b, live) {
-  const ms = Number(b?.ms);
+  let ms = Number(b?.ms);
+  // 正文很长但 ms<1s：多半是旧数据/一次性吐出的错误计时，宁可只显示「已深度思考」也不误导
+  if (Number.isFinite(ms) && ms > 0 && ms < 1000 && (b?.text?.length ?? 0) > 80) ms = NaN;
   const hasMs = Number.isFinite(ms) && ms > 0;
   const label = live ? "正在思考" : `已深度思考${hasMs ? ` ${thinkSecs(ms)}` : ""}`;
   return `<details class="think-box${live ? " live" : ""}"${live ? " open" : ""}><summary><span class="tb-ico">💭</span><span class="tb-label">${label}</span>${live ? `<span class="dots"></span>` : ""}<span class="tb-arrow">›</span></summary><div class="tb-body">${esc(b.text ?? "")}</div></details>`;

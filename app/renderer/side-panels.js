@@ -198,7 +198,8 @@ function toggleDetails(show) {
   document.body.classList.toggle("details-open", on);
   // 右栏始终占 flex 位挤窄会话，不再叠层遮罩
   $("#details-mask")?.classList.add("hidden");
-  if (on && currentGroup) renderGroupDetails(currentGroup);
+  if (on && typeof realmPresence !== "undefined" && realmPresence && typeof renderRealmDetails === "function") renderRealmDetails();
+  else if (on && currentGroup) renderGroupDetails(currentGroup);
   else if (on && currentBot) renderDetails(currentBot);
 }
 

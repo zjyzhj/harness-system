@@ -158,7 +158,7 @@ async function realmVoiceBindFlow(p) {
       try {
         realmPresence = await api.realm.setPresetVoice(p.id, name);
         closeModal();
-        renderRealmHeader();
+        refreshRealmChrome();
         toast("音色已绑定");
       } catch (e) { alert(errText(e)); }
     };
@@ -184,7 +184,7 @@ async function realmVoiceBindFlow(p) {
       if (!next) return;
       closeModal();
       realmPresence = next;
-      renderRealmHeader();
+      refreshRealmChrome();
       toast("音色已绑定");
     } catch (e) { alert(errText(e)); }
   };
@@ -219,7 +219,7 @@ async function recordRealmRef(presenceId, refText) {
       const buf = await new Blob(chunks, { type: mime }).arrayBuffer();
       const next = await api.realm.cloneVoiceBuf(presenceId, buf, mime.split(";")[0], refText);
       realmPresence = next;
-      renderRealmHeader();
+      refreshRealmChrome();
       toast("音色已绑定");
     } catch (e) {
       alert(errText(e));
@@ -238,6 +238,14 @@ function toast(msg) {
   setTimeout(() => el.remove(), 2200);
 }
 
+function refreshRealmChrome() {
+  renderRealmHeader();
+  renderRealmSide();
+  if (!$("#details")?.classList.contains("hidden")) renderRealmDetails();
+}
+
+let realmDetailsTab = "info";
+
 async function openRealm(id) {
   if (typeof voiceMode !== "undefined" && voiceMode && typeof stopVoiceMode === "function") stopVoiceMode();
   const p = await api.realm.get(id);
@@ -245,15 +253,111 @@ async function openRealm(id) {
   realmPresence = p;
   currentBot = null;
   currentGroup = null;
+  currentSession = null;
   realmSessionId = (await api.realm.sessions(id))[0]?.id || null;
   $("#empty-state")?.classList.add("hidden");
+  $("#empty-state") && ($("#empty-state").style.display = "none");
   $("#chat-bar")?.classList.remove("hidden");
   renderRealmHeader();
   renderBotList();
+  renderRealmSide();
+  if (typeof renderHero === "function") renderHero();
   if (typeof renderComposerTools === "function") renderComposerTools();
+  // 右栏切到当前 Presence，避免残留上一个 bot 的详情/记忆
+  if (typeof detailsPinned !== "undefined" && detailsPinned && window.innerWidth >= 1100) {
+    const panel = $("#details");
+    panel?.classList.remove("hidden");
+    document.body.classList.add("details-open");
+  }
+  if (!$("#details")?.classList.contains("hidden")) await renderRealmDetails();
   await loadRealmMessages();
   $("#input").placeholder = `对 ${p.name} 说…（灵境 · AI 再现）· 🎙 可语音`;
   $("#input").focus();
+}
+
+/** 右栏：灵境 Presence 详情（与 bot 详情互斥） */
+async function renderRealmDetails() {
+  const p = realmPresence;
+  const panel = $("#details");
+  if (!p || !panel) return;
+  const [providers, sessions] = await Promise.all([
+    api.providers.list().catch(() => []),
+    realmDetailsTab === "sessions" ? api.realm.sessions(p.id).catch(() => []) : Promise.resolve([]),
+  ]);
+  if (realmPresence?.id !== p.id) return;
+  const prov = providers.find((x) => x.id === p.providerId);
+  const voiceLabel = p.voice?.status === "ready"
+    ? (p.voice.remoteVoiceId ? `已绑定 · ${p.voice.remoteVoiceId}` : "音色已就绪")
+    : p.voice?.status === "error" ? `失败：${p.voice.error || "未知"}` : "尚未绑定";
+  const roleLabel = { self: "本人授权", "with-consent": "经同意", kin: "亲属/至亲" }[p.consent?.role] || p.consent?.role || "—";
+  const sessHtml = sessions.length ? sessions.map((s) => `
+    <div class="d-card sess-card ${s.id === realmSessionId ? "on" : ""}" data-sid="${esc(s.id)}">
+      <div class="c-main"><div class="c-title">${esc(s.title || "对话")}</div>
+        <div class="c-sub">${esc(fmtTime(s.updatedAt || s.createdAt))} · ${s.messageCount ?? 0} 条</div></div>
+    </div>`).join("") : `<div class="d-empty">还没有对话</div>`;
+  panel.innerHTML = `
+    <button class="icon-btn d-close" title="关闭">✕</button>
+    <div class="d-hero">
+      <div class="d-avatar realm-av" title="灵境 Presence"><span class="realm-dot" style="width:28px;height:28px"></span></div>
+      <div class="d-name">${esc(p.name)}</div>
+      <div class="d-role">${esc(p.relation || "私密 Presence")} · 灵境</div>
+      <div class="d-actions d-hero-actions">
+        <button class="ghost-btn" id="rd-voice">音色</button>
+        <button class="ghost-btn" id="rd-edit">痕迹</button>
+      </div>
+    </div>
+    <div class="d-tabs">
+      <button data-tab="info" class="${realmDetailsTab === "info" ? "on" : ""}">详情</button>
+      <button data-tab="sessions" class="${realmDetailsTab === "sessions" ? "on" : ""}">会话</button>
+    </div>
+    ${realmDetailsTab === "info" ? `
+    <div class="d-sec"><h4>音色</h4>
+      <div class="d-card"><div class="c-main"><div class="c-title">${esc(voiceLabel)}</div>
+        <div class="c-sub">AI 再现用的声音 · 非真人在场</div></div></div>
+    </div>
+    <div class="d-sec"><h4>其人痕迹</h4>
+      <div class="d-kv">
+        <span>关系</span><span>${esc(p.relation || "—")}</span>
+        <span>其人</span><span>${esc(p.bio || "—")}</span>
+        <span>说话方式</span><span>${esc(p.styleNotes || "—")}</span>
+        <span>语料</span><span>${esc((p.corpus || "—").slice(0, 120))}${(p.corpus || "").length > 120 ? "…" : ""}</span>
+      </div>
+    </div>
+    <div class="d-sec"><h4>配置</h4>
+      <div class="d-kv">
+        <span>对话模型</span><span>${esc(prov ? `${prov.name}${prov.model ? ` · ${prov.model}` : ""}` : "跟随默认")}</span>
+        <span>授权</span><span>${esc(roleLabel)}${p.consent?.affirmedAt ? ` · ${esc(fmtTime(p.consent.affirmedAt))}` : ""}</span>
+      </div>
+    </div>
+    <div class="d-sec d-actions">
+      <button class="ghost-btn" id="rd-tts">音色合成接口</button>
+      <button class="ghost-btn" id="rd-preview" ${p.voice?.status === "ready" ? "" : "disabled"}>试听</button>
+      <button class="ghost-btn danger-text" id="rd-leave">退出灵境</button>
+    </div>` : `<div class="d-sec">${sessHtml}</div>`}`;
+  panel.querySelector(".d-close").onclick = () => toggleDetails(false);
+  panel.querySelectorAll(".d-tabs button").forEach((btn) => (btn.onclick = () => { realmDetailsTab = btn.dataset.tab; renderRealmDetails(); }));
+  const voice = panel.querySelector("#rd-voice");
+  if (voice) voice.onclick = async () => { await realmVoiceBindFlow(p); if (realmPresence) renderRealmDetails(); };
+  const edit = panel.querySelector("#rd-edit");
+  if (edit) edit.onclick = () => realmEditFlow(p);
+  const tts = panel.querySelector("#rd-tts");
+  if (tts) tts.onclick = () => realmTtsFlow();
+  const preview = panel.querySelector("#rd-preview");
+  if (preview) preview.onclick = async () => {
+    try {
+      const path = await api.realm.previewVoice(p.id);
+      await playRealmAudio(path);
+    } catch (e) { alert(errText(e)); }
+  };
+  const leave = panel.querySelector("#rd-leave");
+  if (leave) leave.onclick = () => leaveRealm();
+  panel.querySelectorAll(".sess-card").forEach((card) => {
+    card.onclick = async () => {
+      realmSessionId = card.dataset.sid;
+      await loadRealmMessages();
+      renderRealmDetails();
+    };
+  });
 }
 
 function renderRealmHeader() {
@@ -265,6 +369,7 @@ function renderRealmHeader() {
   title.innerHTML = `
     <div class="realm-title"><span class="realm-badge">灵境</span><b>${esc(p.name)}</b><span class="hint">${esc(p.relation || "私密 Presence")} · ${esc(voice)}</span></div>
     <div class="realm-sub">AI 再现 · 非真人在场 · 仅供私密联结</div>`;
+  title.onclick = () => toggleDetails(true);
   const actions = $("#chat-actions");
   let ops = actions.querySelector(".realm-ops");
   if (!ops) {
@@ -320,8 +425,8 @@ async function realmEditFlow(p) {
       corpus: modal.querySelector("#re-corpus").value.trim() || undefined,
     });
     closeModal();
-    renderRealmHeader();
     renderBotList();
+    refreshRealmChrome();
   };
   modal.querySelector("#re-arch").onclick = async () => {
     if (!confirm(`封存「${p.name}」？可之后在列表里不再显示。`)) return;
@@ -350,11 +455,19 @@ function leaveRealm(opts) {
     $("#chat-bar")?.classList.add("hidden");
     $("#messages").innerHTML = "";
     $("#empty-state")?.classList.remove("hidden");
+    $("#empty-state") && ($("#empty-state").style.display = "");
     $("#input").placeholder = "给 bot 发消息，@bot名 可让 bot 互相通信…";
+    // 没有选中 bot 时清空右栏，避免继续显示 Presence 或旧 bot
+    const panel = $("#details");
+    if (panel && !panel.classList.contains("hidden") && !currentBot && !currentGroup) {
+      panel.innerHTML = `<button class="icon-btn d-close" title="关闭">✕</button><div class="d-empty" style="padding:24px">选一个 bot 或灵境 Presence 查看详情</div>`;
+      panel.querySelector(".d-close").onclick = () => toggleDetails(false);
+    }
   } else {
     $("#input").placeholder = "给 bot 发消息，@bot名 可让 bot 互相通信…";
   }
   renderBotList();
+  renderRealmSide();
   if (typeof renderComposerTools === "function") renderComposerTools();
 }
 

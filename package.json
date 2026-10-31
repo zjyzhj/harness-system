@@ -6,13 +6,15 @@
   "type": "module",
   "private": true,
   "scripts": {
-    "dev": "bun run scripts/build-shell.ts && electron . ",
+    "postinstall": "bun run scripts/sign-electron-dev.ts",
+    "sign:electron": "bun run scripts/sign-electron-dev.ts",
+    "dev": "bun run scripts/sign-electron-dev.ts && bun run scripts/build-shell.ts && electron .",
     "dev:core": "bun run --watch tests/demo.ts",
     "test": "bun test",
     "typecheck": "bunx tsc --noEmit",
     "build": "bun run scripts/gen-icon.ts && bun run scripts/build-shell.ts",
-    "start": "bun run build && electron .",
-    "eval": "bun run scripts/build-shell.ts && electron . --run-evals",
+    "start": "bun run sign:electron && bun run build && electron .",
+    "eval": "bun run sign:electron && bun run scripts/build-shell.ts && electron . --run-evals",
     "dist": "bun run build && electron-builder --mac --arm64"
   },
   "devDependencies": {

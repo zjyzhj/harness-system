@@ -60,9 +60,12 @@ describe("pet-effects", () => {
     expect(again.mode).toBe("reuse");
   });
 
-  test("parseInventedEffect 校验 overlay", () => {
+  test("parseInventedEffect 校验 / 容忍 overlay 与 markdown", () => {
     expect(parseInventedEffect('{"name":"火球","overlay":"burst","color":"#f97316","motion":"jump"}')?.recipe.overlay).toBe("burst");
-    expect(parseInventedEffect('{"name":"x","overlay":"laser"}')).toBeNull();
+    // 未知 overlay 按语义收成合法枚举，不再整段作废
+    expect(parseInventedEffect('{"name":"激光炮","overlay":"laser"}')?.recipe.overlay).toBe("beam");
+    expect(parseInventedEffect('```json\n{"name":"星尘漩涡","overlay":"vortex","color":"#a78bfa"}\n```')?.name).toContain("星尘漩涡");
+    expect(parseInventedEffect('{"name":"x","overlay":"vortex"}')?.recipe.overlay).toBe("burst");
   });
 
   test("自定义智能命名 + 钉住不回收 + forget", () => {

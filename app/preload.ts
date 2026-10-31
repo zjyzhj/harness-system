@@ -19,6 +19,7 @@ const api = {
     duplicate: (id: string) => ipcRenderer.invoke("bots:duplicate", id),
     share: (id: string) => ipcRenderer.invoke("bots:share", id),
     parseTemplate: (input: string) => ipcRenderer.invoke("bots:parseTemplate", input),
+    diffNeeds: (needs: unknown) => ipcRenderer.invoke("bots:diffNeeds", needs),
     pickTemplate: () => ipcRenderer.invoke("bots:pickTemplate"),
     importTemplate: (tpl: unknown) => ipcRenderer.invoke("bots:importTemplate", tpl),
   },
@@ -70,6 +71,8 @@ const api = {
     run: (planId: string) => ipcRenderer.invoke("plans:run", planId),
     cancel: (planId: string) => ipcRenderer.invoke("plans:cancel", planId),
     remove: (planId: string) => ipcRenderer.invoke("plans:delete", planId),
+    handOff: (input: { planId?: string; match?: string; toBotId: string; note?: string; stageId?: string }) =>
+      ipcRenderer.invoke("plans:handOff", input),
   },
   consent: {
     list: (botId?: string) => ipcRenderer.invoke("consent:list", botId),
@@ -148,6 +151,8 @@ const api = {
     search: (opts?: any) => ipcRenderer.invoke("messages:search", opts),
     remove: (sessionId: string, ids: number[]) => ipcRenderer.invoke("messages:delete", sessionId, ids),
     answer: (sessionId: string, id: number, choiceId: string, answer: string) => ipcRenderer.invoke("messages:answer", sessionId, id, choiceId, answer),
+    formAnswer: (sessionId: string, id: number, formId: string, answer: Record<string, string>) =>
+      ipcRenderer.invoke("messages:formAnswer", sessionId, id, formId, answer),
   },
   secrets: {
     save: (sessionId: string, id: number, name: string, value: string, label?: string) => ipcRenderer.invoke("secrets:save", sessionId, id, name, value, label),
@@ -159,6 +164,21 @@ const api = {
     list: () => ipcRenderer.invoke("env:list"),
     set: (input: { key: string; value: string; label?: string; note?: string; botId?: string }) => ipcRenderer.invoke("env:set", input),
     remove: (key: string, botId?: string) => ipcRenderer.invoke("env:remove", key, botId),
+  },
+  vault: {
+    list: (query?: string) => ipcRenderer.invoke("vault:list", query),
+    catalog: () => ipcRenderer.invoke("vault:catalog"),
+  },
+  contacts: {
+    list: () => ipcRenderer.invoke("contacts:list"),
+    upsert: (input: { id?: string; name: string; email?: string; note?: string }) => ipcRenderer.invoke("contacts:upsert", input),
+    remove: (id: string) => ipcRenderer.invoke("contacts:remove", id),
+  },
+  connectors: {
+    listWebhooks: () => ipcRenderer.invoke("connectors:listWebhooks"),
+    upsertWebhook: (input: { id?: string; name: string; url: string; note?: string; headers?: Record<string, string> }) =>
+      ipcRenderer.invoke("connectors:upsertWebhook", input),
+    removeWebhook: (id: string) => ipcRenderer.invoke("connectors:removeWebhook", id),
   },
   voice: {
     config: (cfg?: { baseUrl: string; apiKey: string; model: string }) => ipcRenderer.invoke("voice:config", cfg),

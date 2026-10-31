@@ -180,6 +180,31 @@ export function uiTool(tool: string, args: Record<string, unknown>, secrets?: Se
     const shared = args.scope === "all" || args.scope === "global";
     return { output: "已向用户展示加密输入框，等待用户填写（本轮结束）", blocks: [{ type: "secret", name, label: String(args.label ?? name), ...(note ? { note } : {}), ...(shared ? { scope: "all" as const } : {}) }], halt: true };
   }
+  if (tool === "ui.form") {
+    const title = String(args.title ?? args.question ?? "请填写").trim();
+    const raw = Array.isArray(args.fields) ? args.fields : [];
+    const fields = raw.map((f, i) => {
+      const o = (f && typeof f === "object" ? f : { label: String(f ?? "") }) as Record<string, unknown>;
+      const label = String(o.label ?? o.name ?? o.key ?? `字段${i + 1}`).trim();
+      const key = String(o.key ?? o.name ?? label).trim().replace(/[^\w.\-\u4e00-\u9fa5]/g, "_") || `f${i + 1}`;
+      const type = o.type === "textarea" || o.type === "email" ? o.type : "text";
+      return {
+        key,
+        label,
+        type: type as "text" | "textarea" | "email",
+        placeholder: o.placeholder != null ? String(o.placeholder).slice(0, 120) : undefined,
+        required: o.required === true || o.required === "true",
+        value: o.value != null ? String(o.value).slice(0, 2000) : undefined,
+      };
+    }).filter((f) => f.label).slice(0, 12);
+    if (!title || fields.length < 1) return { output: "ui.form 需要 title 和至少一个 fields 项（[{key, label, type?, value?}]）" };
+    const submitLabel = args.submitLabel != null ? String(args.submitLabel).slice(0, 20) : undefined;
+    return {
+      output: "已向用户展示表单，等待填写（本轮结束）",
+      blocks: [{ type: "form", id, title, fields, ...(submitLabel ? { submitLabel } : {}) }],
+      halt: true,
+    };
+  }
   return { output: `未知工具 ${tool}` };
 }
 
@@ -194,6 +219,11 @@ export function ownHistoryText(blocks: ContentBlock[]): string {
       return "```tool\n" + JSON.stringify(call) + "\n```" + (b.answer ? `\n（用户选择了：${b.answer}）` : "\n（等待用户选择）");
     }
     if (b.type === "secret") return "```tool\n" + JSON.stringify({ tool: "ui.secret", args: { name: b.name, label: b.label } }) + "\n```" + (b.saved ? `\n（用户已保存，可用 {{secret:${b.name}}} 引用）` : "");
+    if (b.type === "form") {
+      const call = { tool: "ui.form", args: { title: b.title, fields: b.fields.map(({ key, label, type, value }) => ({ key, label, type, value })) } };
+      const ans = b.answer ? `\n（用户已填：${Object.entries(b.answer).map(([k, v]) => `${k}=${v}`).join("；")}）` : "\n（等待用户填写）";
+      return "```tool\n" + JSON.stringify(call) + "\n```" + ans;
+    }
     return "";
   }).filter(Boolean).join("\n");
 }

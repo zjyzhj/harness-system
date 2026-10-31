@@ -6,14 +6,19 @@ import { join, basename } from "node:path";
 import { HashVectorEmbedder, cosine, keywordScore, type Embedder } from "./embedders";
 
 /**
- * G2 持久记忆系统（对齐 CowAgent + OpenClaw memory 模型）
+ * G2 持久记忆系统（对齐 CowAgent / Grok Build memory 模型）
  * - namespace：bot:<id> | group:<name> | global（级联检索 bot → group → global）
  * - 检索：哈希向量 + 关键词 BM25-lite 双通道（可注入 OpenAI 嵌入升级）
- * - MEMORY.md：每 namespace 权威总结，常驻注入，LLM 增量重写
- * - 维护：mergeDuplicate（内容相似合并）+ evict（容量淘汰）
+ * - MEMORY.md：每 namespace 权威总结，后台增量重写；仅在问记忆/内容相关时注入（避免每轮臃肿）
+ * - 维护：mergeDuplicate + evict
  * 旧路径 memory/<botId>.json 自动兼容映射到 bot:<botId>。
  */
 const nsFile = (ns: string) => ns.replace(/[^a-zA-Z0-9:_-]/g, "_");
+const MEMO_REWRITE_SOURCE = "memo-rewrite";
+const MEMO_REWRITE_DEBOUNCE_MS = 2_000;
+
+/** 宿主注入：用 LLM 把当前 MEMORY.md + 最近 durable 记忆压成权威总结 */
+export type MemoRewriter = (ns: string, current: string, recent: MemoryEntry[]) => Promise<string> | string;
 
 /** 两段文字共有的相邻两字（去空白、标点）个数 */
 function bigramHits(text: string, query: string): number {
@@ -33,12 +38,20 @@ export class MemorySystem {
   private memoNames: Record<string, string> = {};
   private dir: string;
   private embedder: Embedder = new HashVectorEmbedder();
+  private memoRewriter: MemoRewriter | null = null;
+  private rewriteTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private rewriteInFlight = new Set<string>();
 
   constructor(private home: string) {
     this.dir = join(home, "memory");
     if (!existsSync(this.dir)) mkdirSync(this.dir, { recursive: true });
     this.loadAll();
     this.migrateLegacy();
+  }
+
+  /** 挂上后：新增 fact/rule 满足条件时后台重写 MEMORY.md（不挡对话） */
+  setMemoRewriter(fn: MemoRewriter | null) {
+    this.memoRewriter = fn;
   }
 
   // ---- 存储 ----
@@ -120,6 +133,7 @@ export class MemorySystem {
       old.updatedAt = now;
       arr.push(old);
       this.persist(ns);
+      if (isDurableKind(old.kind)) this.scheduleMemoRewrite(ns);
       return old;
     }
     const e: MemoryEntry = {
@@ -141,6 +155,7 @@ export class MemorySystem {
     arr.push(e);
     this.mem[ns] = dedupe(arr);
     this.persist(ns);
+    if (isDurableKind(e.kind) && e.source !== MEMO_REWRITE_SOURCE) this.scheduleMemoRewrite(ns);
     return e;
   }
 
@@ -153,13 +168,16 @@ export class MemorySystem {
     e.updatedAt = Date.now();
     if (this.embedder instanceof HashVectorEmbedder) e.vector = this.embedder.embed(content);
     this.persist(ns);
+    if (isDurableKind(e.kind)) this.scheduleMemoRewrite(ns);
     return e;
   }
 
   delete(botId: string, id: string) {
     const ns = this.normNs(botId);
+    const hit = (this.mem[ns] ?? []).find((x) => x.id === id);
     this.mem[ns] = (this.mem[ns] ?? []).filter((x) => x.id !== id);
     this.persist(ns);
+    if (hit && isDurableKind(hit.kind)) this.scheduleMemoRewrite(ns);
   }
 
   setEmbedder(e: Embedder) { this.embedder = e; }
@@ -229,12 +247,20 @@ export class MemorySystem {
     return this.memoNames[ns] ?? "";
   }
 
+  /** 参与权威总结的条目：事实 + 规范（不含 event/note/重写戳） */
+  durableEntries(nsOrBotId: string, namespace?: string): MemoryEntry[] {
+    const ns = this.normNs(nsOrBotId, namespace);
+    return (this.mem[ns] ?? []).filter((e) => isDurableKind(e.kind) && e.source !== MEMO_REWRITE_SOURCE);
+  }
+
   async rewriteMemo(nsOrBotId: string, summarize: (current: string, recent: MemoryEntry[]) => Promise<string> | string, namespace?: string): Promise<string> {
     const ns = this.normNs(nsOrBotId, namespace);
-    const recent = (this.mem[ns] ?? []).slice(-30);
-    const text = await summarize(this.memoNames[ns] ?? "", recent);
+    const recent = this.durableEntries(ns).slice(-40);
+    const text = (await summarize(this.memoNames[ns] ?? "", recent)).trim();
+    if (!text) return this.memoNames[ns] ?? "";
     this.memoNames[ns] = text;
     writeFileAtomic(this.memoFile(ns), text);
+    this.stampMemoRewrite(ns, text);
     return text;
   }
 
@@ -242,44 +268,138 @@ export class MemorySystem {
     const ns = this.normNs(nsOrBotId, namespace);
     this.memoNames[ns] = text;
     writeFileAtomic(this.memoFile(ns), text);
+    // 人手改也算一次「已对齐」，避免立刻又被自动重写冲掉
+    if (text.trim()) this.stampMemoRewrite(ns, text);
   }
 
-  /** 触发条件：新 fact 数 ≥ 5 或距上次 ≥24h 且有变更 */
+  /**
+   * 触发条件（对齐 G2 / Grok Build「攒够再蒸馏」）：
+   * - MEMORY.md 仍空且 durable ≥ 3；或
+   * - 自上次重写起新增/更新的 durable ≥ 5；或
+   * - 有变更且距上次 ≥ 24h
+   */
   shouldRewriteMemo(nsOrBotId: string, namespace?: string): boolean {
     const ns = this.normNs(nsOrBotId, namespace);
-    const arr = this.mem[ns] ?? [];
-    const facts = arr.filter((e) => e.kind === "fact");
-    const lastSummaryAt = arr.filter((e) => e.kind === "summary").sort((a, b) => b.createdAt - a.createdAt)[0]?.createdAt ?? 0;
-    const recent = facts.filter((e) => e.createdAt > lastSummaryAt);
-    return recent.length >= 5 || (recent.length > 0 && Date.now() - lastSummaryAt > 24 * 3600 * 1000);
+    const durable = this.durableEntries(ns);
+    if (!durable.length) return false;
+    const lastAt = this.lastMemoRewriteAt(ns);
+    // 从未蒸馏过：攒够 3 条再写，避免一条事实就打 API
+    if (lastAt === 0) return durable.length >= 3;
+    const recent = durable.filter((e) => Math.max(e.createdAt, e.updatedAt) > lastAt);
+    if (recent.length >= 5) return true;
+    if (recent.length > 0 && Date.now() - lastAt > 24 * 3600 * 1000) return true;
+    return false;
   }
 
-  // ---- 构建注入上下文（含 memo + 级联） ----
+  /** 条件满足时用已挂的 rewriter 后台重写；无 rewriter / 不该写则跳过 */
+  scheduleMemoRewrite(nsOrBotId: string, namespace?: string) {
+    if (!this.memoRewriter) return;
+    const ns = this.normNs(nsOrBotId, namespace);
+    const prev = this.rewriteTimers.get(ns);
+    if (prev) clearTimeout(prev);
+    this.rewriteTimers.set(ns, setTimeout(() => {
+      this.rewriteTimers.delete(ns);
+      void this.runScheduledRewrite(ns);
+    }, MEMO_REWRITE_DEBOUNCE_MS));
+  }
+
+  /** 测试 / 手动：立刻按 should 跑一次（仍要有 rewriter） */
+  async maybeRewriteMemoNow(nsOrBotId: string, namespace?: string): Promise<string | null> {
+    const ns = this.normNs(nsOrBotId, namespace);
+    if (!this.memoRewriter || !this.shouldRewriteMemo(ns)) return null;
+    return this.runScheduledRewrite(ns);
+  }
+
+  private async runScheduledRewrite(ns: string): Promise<string | null> {
+    if (!this.memoRewriter || this.rewriteInFlight.has(ns) || !this.shouldRewriteMemo(ns)) return null;
+    this.rewriteInFlight.add(ns);
+    try {
+      const rewriter = this.memoRewriter;
+      return await this.rewriteMemo(ns, (cur, recent) => rewriter(ns, cur, recent));
+    } catch {
+      return null;
+    } finally {
+      this.rewriteInFlight.delete(ns);
+    }
+  }
+
+  private lastMemoRewriteAt(ns: string): number {
+    const stamps = (this.mem[ns] ?? []).filter((e) => e.kind === "summary" && e.source === MEMO_REWRITE_SOURCE);
+    if (stamps.length) return Math.max(...stamps.map((e) => e.updatedAt || e.createdAt));
+    // 兼容旧测试：任意 summary 也算「已蒸馏过」
+    const any = (this.mem[ns] ?? []).filter((e) => e.kind === "summary");
+    return any.length ? Math.max(...any.map((e) => e.updatedAt || e.createdAt)) : 0;
+  }
+
+  /** 重写成功后打戳，重置 shouldRewrite 计数；不触发再次调度 */
+  private stampMemoRewrite(ns: string, memoText: string) {
+    const arr = this.mem[ns] || (this.mem[ns] = []);
+    const kept = arr.filter((e) => !(e.kind === "summary" && e.source === MEMO_REWRITE_SOURCE));
+    const now = Date.now();
+    const day = new Date(now).toISOString().slice(0, 10);
+    const preview = memoText.replace(/\s+/g, " ").trim().slice(0, 80);
+    kept.push({
+      id: randomUUID(),
+      botId: ns.startsWith("bot:") ? ns.slice(4) : ns,
+      kind: "summary",
+      content: `MEMORY.md 已更新（${day}）${preview ? `：${preview}` : ""}`,
+      source: MEMO_REWRITE_SOURCE,
+      namespace: ns,
+      createdAt: now,
+      updatedAt: now,
+    });
+    this.mem[ns] = kept;
+    this.persist(ns);
+  }
+
+  // ---- 构建注入上下文（按需，对齐 Grok Bot：相关才带，不每轮塞满） ----
 
   buildContext(botId: string, query?: string, groups: string[] = [], opts?: { rules?: boolean }): string {
     const parts: string[] = [];
+    const q = (query ?? "").trim();
     const own = this.list(`bot:${botId}`);
     const shared = [...groups.flatMap((g) => this.list(`group:${g}`)), ...this.list("global")];
-    // 1) 规范：用户定的做事要求，全部常驻（不靠检索命中，不会因为条数多被挤掉）
+    const memoryAsk = isMemoryAsk(q);
+    // 1) 规范：做事要求仍常驻（条数少、必须遵守）；rules:false 时由 system 的 rulesWhereabouts 负责
     const rules = opts?.rules === false ? [] : [...shared, ...own].filter((e) => e.kind === "rule").sort((a, b) => a.updatedAt - b.updatedAt).slice(-40);
     if (rules.length) parts.push("【必须遵守的规范（用户定下的，长期有效，与人设冲突时以这里为准；按时间从旧到新排列，互相矛盾时以靠后的为准）】\n" + rules.map((r) => `- ${r.content}`).join("\n"));
-    // 2) MEMORY.md 权威总结常驻
-    const memo = this.memoOf(botId);
-    if (memo.trim()) parts.push(`【长期记忆·权威总结】\n${memo.trim().slice(0, 1500)}`);
-    // 3) 关于用户的事实 / 偏好（自己的 + 所有 bot 共享的）
-    const facts = [...shared, ...own].filter((e) => e.kind === "fact").slice(-20);
+    // 2) MEMORY.md：只在用户问记忆，或本轮问题与总结正文相关时注入
+    const ownMemo = this.memoOf(botId).trim();
+    const globalMemo = this.memoOf("global").trim();
+    if (ownMemo && shouldInjectMemo(q, ownMemo)) {
+      parts.push(`【长期记忆·权威总结】（与本轮相关才附上；与单条事实冲突时以更新的单条为准）\n${ownMemo.slice(0, 1200)}`);
+    }
+    if (globalMemo && globalMemo !== ownMemo && shouldInjectMemo(q, globalMemo)) {
+      parts.push(`【全局权威总结】\n${globalMemo.slice(0, 600)}`);
+    }
+    // 3) 事实：问记忆时多给一些；平常只给与问题相关的，再加极薄的近期档案（防完全失忆）
+    const allFacts = [...shared, ...own].filter((e) => e.kind === "fact");
+    let facts: MemoryEntry[];
+    if (memoryAsk) {
+      facts = allFacts.slice(-12);
+    } else if (q) {
+      const hit = allFacts
+        .map((e) => ({ e, s: bigramHits(e.content, q) }))
+        .filter((x) => x.s >= 2)
+        .sort((a, b) => b.s - a.s || b.e.updatedAt - a.e.updatedAt)
+        .slice(0, 6)
+        .map((x) => x.e);
+      const thin = allFacts.slice(-3);
+      const seen = new Set(hit.map((e) => e.id));
+      facts = [...hit, ...thin.filter((e) => !seen.has(e.id))].slice(0, 8);
+    } else {
+      facts = allFacts.slice(-3);
+    }
     if (facts.length) parts.push("【长期记忆·事实】\n" + facts.map((f) => `- ${f.content}`).join("\n"));
-    const summaries = own.filter((e) => e.kind === "summary").slice(-3);
-    if (summaries.length) parts.push("【长期记忆·过往摘要】\n" + summaries.map((s) => `- ${s.content}`).join("\n"));
-    // 4) 其他记忆只放和这次问题相关的
-    if (query && query.trim()) {
-      const hits = own
-        .filter((e) => e.kind === "note" || e.kind === "event")
-        .map((e) => ({ e, s: bigramHits(e.content, query) }))
+    // 4) 摘要 / 笔记 / 事件：只放和本轮相关的
+    if (q) {
+      const extras = own
+        .filter((e) => e.kind === "note" || e.kind === "event" || (e.kind === "summary" && e.source !== MEMO_REWRITE_SOURCE))
+        .map((e) => ({ e, s: bigramHits(e.content, q) }))
         .filter((x) => x.s >= 2)
         .sort((a, b) => b.s - a.s)
         .slice(0, 4);
-      if (hits.length) parts.push("【相关记忆】\n" + hits.map((h) => `- ${h.e.content}`).join("\n"));
+      if (extras.length) parts.push("【相关记忆】\n" + extras.map((h) => `- ${h.e.content}`).join("\n"));
     }
     return parts.join("\n\n");
   }
@@ -346,6 +466,24 @@ export class MemorySystem {
   }
 }
 
+function isDurableKind(kind: string): boolean {
+  return kind === "fact" || kind === "rule";
+}
+
+/** 用户这轮是否在查/改记忆（才值得带上权威总结全文） */
+function isMemoryAsk(query: string): boolean {
+  if (!query) return false;
+  return /记得|记忆|偏好|关于我|我是谁|叫我|称呼|忘掉|忘了|你知道我|MEMORY|规范有哪些|有哪些规范|习惯|喜欢什么|不喜欢/i.test(query);
+}
+
+/** MEMORY.md 按需注入：问记忆，或问题与总结正文有足够重合 */
+function shouldInjectMemo(query: string, memo: string): boolean {
+  if (!memo.trim()) return false;
+  if (isMemoryAsk(query)) return true;
+  if (!query.trim()) return false;
+  return bigramHits(memo, query) >= 3;
+}
+
 function normText(s: string): string {
   return s.replace(/^\s*(用户定下的规范|用户要求|规范)\s*[:：]/, "").replace(/[\s\p{P}\p{S}]/gu, "").toLowerCase();
 }
@@ -373,4 +511,14 @@ export function memoryStats(mem: MemoryEntry[]): Record<string, number> {
   const out: Record<string, number> = {};
   for (const e of mem) out[e.kind] = (out[e.kind] ?? 0) + 1;
   return out;
+}
+
+/** 给宿主 LLM 用的 MEMORY.md 重写提示（手动按钮与自动调度共用） */
+export function memoRewriteMessages(current: string, recent: MemoryEntry[]): { system: string; user: string } {
+  const cur = current.trim();
+  const lines = recent.map((e) => `- [${e.kind}] ${e.content}`).join("\n");
+  return {
+    system: "你在维护一份 evergreen 权威总结（MEMORY.md）。把旧总结与最近记忆压成 3–10 条中文要点：去重、保留关键事实与偏好与规范；不要写过程话、不要编号列表以外的寒暄；只输出总结正文。",
+    user: `${cur ? `【当前总结】\n${cur.slice(0, 2000)}\n\n` : ""}【最近记忆】\n${lines || "（无）"}`,
+  };
 }

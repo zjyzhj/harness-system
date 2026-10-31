@@ -179,7 +179,9 @@ export class Orchestrator {
     };
     const runOnce = async (): Promise<string> => {
       if (!this.stageRunner) throw new Error("stageRunner 未绑定");
-      return this.stageRunner!({ ...stage, prompt }, prevResult, ctx);
+      // 移交后用 ownerBotId 执行；仍保留原 botId 作阶段归属
+      const effective = { ...stage, botId: stage.ownerBotId ?? stage.botId, prompt };
+      return this.stageRunner!(effective, prevResult, ctx);
     };
     try {
       // 超时：可清理 timer，避免遗留挂起进程
@@ -227,6 +229,52 @@ export class Orchestrator {
       for (const s of plan.stages) if (s.status === "running") { s.status = "error"; s.error = "已取消"; s.finishedAt = Date.now(); s.activity = undefined; }
       this.persist(plan);
     }
+  }
+
+  /**
+   * 阶段所有权移交：把当前运行中（或指定）阶段的负责人换成另一个 bot。
+   * 已在跑的阶段不中断；下一轮 / 重试会用新的 ownerBotId。
+   */
+  handOff(input: { planId?: string; match?: string; stageId?: string; toBotId: string; note?: string }): { plan: OrchestrationPlan; stage: OrchestrationStage } {
+    const toBotId = input.toBotId.trim();
+    if (!toBotId) throw new Error("handOff 需要目标 bot");
+    if (!this.deps.store.getBot(toBotId)) throw new Error(`找不到 bot：${toBotId}`);
+    const plan =
+      (input.planId && this.plans.get(input.planId)) ||
+      this.findPlan(input.match ?? "") ||
+      [...this.plans.values()].find((p) => p.status === "running") ||
+      null;
+    if (!plan) throw new Error("找不到可移交的编排计划");
+    const stage =
+      (input.stageId && plan.stages.find((s) => s.id === input.stageId)) ||
+      plan.stages.find((s) => s.status === "running") ||
+      plan.stages.find((s) => s.status === "pending") ||
+      plan.stages[plan.stages.length - 1];
+    if (!stage) throw new Error("计划没有可移交的阶段");
+    stage.ownerBotId = toBotId;
+    stage.handOffNote = input.note?.trim() || undefined;
+    if (plan.status === "running" || stage.status === "running" || stage.status === "pending") {
+      const name = this.deps.store.getBot(toBotId)?.name ?? toBotId;
+      plan.currentStage = `负责人：${name}${stage.handOffNote ? `（${stage.handOffNote}）` : ""} · ${stage.prompt.slice(0, 28)}`;
+    }
+    this.persist(plan);
+    return { plan, stage };
+  }
+
+  /** 当前负责人 botId（运行中阶段优先） */
+  currentOwner(plan: OrchestrationPlan): string | undefined {
+    const s = plan.stages.find((x) => x.status === "running") ?? plan.stages.find((x) => x.status === "pending");
+    return s ? (s.ownerBotId ?? s.botId) : undefined;
+  }
+
+  private findPlan(match: string): OrchestrationPlan | undefined {
+    const key = match.trim();
+    if (!key) return undefined;
+    return (
+      this.plans.get(key) ||
+      [...this.plans.values()].find((p) => p.title === key) ||
+      [...this.plans.values()].find((p) => p.id.startsWith(key) || p.title.includes(key))
+    );
   }
 
   delete(planId: string) {

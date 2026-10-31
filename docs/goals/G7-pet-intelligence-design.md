@@ -16,6 +16,13 @@
 
 **原则（延续既有）：** 模型优先、规则兜底；进阶默认关；能力可关闭但不可假装已实现。
 
+**边界（硬约束）：** 桌宠是娱乐侧车，**不能干扰 Bot 完整设计**。
+
+- Bot 核心（`BotRuntime` / `RuntimeDeps`）不依赖 `petHost`，不内置 `pet.*` 工具。
+- 宿主通过 `core/pet/sidecar.ts` → `attachPetEntertainment(runtime, { host })` 可选挂载。
+- 未挂载 = 完整智能体（对话 / 工具 / 记忆 / 协作 / MCP…），零桌宠提示与工具。
+- `app.createBot` 只建 bot，不自动上台；上台走 UI 或侧车 `pet.show` / `pet.create`。
+
 ---
 
 ## 1. 目标产品形态
