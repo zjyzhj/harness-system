@@ -42,6 +42,7 @@ import { ProactiveEngine, collectSignals } from "../core/proactive";
 import { GatewayServer } from "../core/gateway-server";
 import { PetSkinRegistry } from "../core/pet-skin";
 import { ConsentCenter, capLabel as capLabelOf, type ConsentDecision } from "../core/consent-center";
+import { CodingThreadStore } from "../core/coding-thread";
 import { AuditLog } from "../core/audit-log";
 import { SystemAccess } from "../core/system-access";
 import { BotRuntime } from "../core/bot-runtime";
@@ -170,6 +171,7 @@ const orchestrator = new Orchestrator({ store, groups, providers }, home);
 const migration = new MigrationV2(store, assetsDir, memory, skills, scheduler, groups, orchestrator);
 const workspace = join(home, "workspace");
 const consent = new ConsentCenter(home);
+const codingThreads = new CodingThreadStore(home);
 const audit = new AuditLog(home);
 const systemAccess = new SystemAccess(consent, audit, { workDir: workspace, screenshotDir: join(workspace, "screenshots") });
 const executor = new ToolExecutor({
@@ -556,7 +558,7 @@ const petHost: PetHost = {
 const demoSkills = new DemoSkillEngine();
 const runtime: BotRuntime = new BotRuntime({
   store, providers, memory, skills, system, systemAccess, executor, offline: new OfflinePersona(), mcp, mcpManage, askBot, tasks: scheduler, notifyCheck,
-  groups, secrets, env, workspaceRoot: workspace, demo: demoSkills, vault,
+  groups, secrets, env, workspaceRoot: workspace, demo: demoSkills, vault, codingThreads,
   groupPost: async (from, name, message, signal) => {
     const all = groups.list();
     const g = all.find((x) => x.name === name) ?? all.find((x) => x.name.includes(name) || name.includes(x.name));
@@ -2216,7 +2218,7 @@ ipcMain.handle("bots:create", async (_e, text: string, opts?: { name?: string; a
   if (bot.petEnabled && !EVAL_MODE) createPetWindow(bot.id);
   return bot;
 });
-ipcMain.handle("bots:update", (_e, id: string, patch: { name?: string; role?: string; persona?: string; providerId?: string; isMaster?: boolean; order?: number; avatar?: Bot["avatar"]; reasoning?: Bot["reasoning"]; agentCwd?: string | null; agentCli?: Bot["agentCli"] | null }) => {
+ipcMain.handle("bots:update", (_e, id: string, patch: { name?: string; role?: string; persona?: string; providerId?: string; isMaster?: boolean; order?: number; avatar?: Bot["avatar"]; reasoning?: Bot["reasoning"]; agentCwd?: string | null; agentCli?: Bot["agentCli"] | null; agentResume?: Bot["agentResume"] | null }) => {
   const bot = store.getBot(id);
   if (!bot) throw new Error("bot 不存在");
   if (patch.isMaster) {
@@ -2248,6 +2250,10 @@ ipcMain.handle("bots:update", (_e, id: string, patch: { name?: string; role?: st
       if (id) next.agentCli = id;
       else delete next.agentCli;
     }
+  }
+  if (patch.agentResume !== undefined) {
+    if (!patch.agentResume || patch.agentResume === "auto") delete next.agentResume;
+    else if (patch.agentResume === "always" || patch.agentResume === "once") next.agentResume = patch.agentResume;
   }
   store.saveBot(next);
   return next;

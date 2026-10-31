@@ -8,6 +8,7 @@ import { rulesWhereabouts } from "./rules-text";
 import { isDemoTopic } from "../demo-skill";
 import { diffNeeds, hasAnyGaps, onboardPromptSection } from "../bot-share-needs";
 import { formatCodingAgentsPromptLine } from "../coding-agents";
+import { threadStub } from "../coding-thread";
 
 /** 可选提示词附加（娱乐侧车等挂载；默认空 = Bot 完整设计不受干扰） */
 export type PromptExtras = {
@@ -69,6 +70,10 @@ export class PromptBuilder {
     }
     const extra = this.extras.volatile?.(bot, query);
     if (extra?.trim()) parts.push(extra.trim());
+    if (bot.agentCwd && this.deps.codingThreads) {
+      const stub = threadStub(this.deps.codingThreads.get(bot.id, bot.agentCwd));
+      if (stub) parts.push(stub);
+    }
     return parts.join("\n\n");
   }
 

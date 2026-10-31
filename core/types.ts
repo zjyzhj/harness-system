@@ -53,6 +53,8 @@ export interface Bot {
   agentCwd?: string;
   /** G10：cli.agent 偏好后端 id（注册表内；以本机探测为准，未装会自动换） */
   agentCli?: string;
+  /** 编码连续性：auto 默认证会话；always 总是续；once 仅下一次新开后回到 auto */
+  agentResume?: "auto" | "always" | "once";
 }
 
 /** 分享 / 开箱依赖声明：只带名单与说明，不含密钥或 env 值 */

@@ -7,6 +7,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, resolve, sep } from "node:path";
+import { randomUUID } from "node:crypto";
 import { strippedCliEnv } from "./adapters/cli";
 import {
   agentBin,
@@ -15,8 +16,10 @@ import {
   parseCodingAgentId,
   pickCodingAgent,
   probeCodingAgents,
+  type AgentArgOpts,
   type CodingAgentId,
 } from "./coding-agents";
+import { parseAgentOutput } from "./coding-thread";
 
 /** @deprecated 使用 CodingAgentId；保留别名以兼容旧测例 */
 export type CliName = CodingAgentId;
@@ -34,6 +37,14 @@ export interface CliAgentRequest {
   signal?: AbortSignal;
   /** 运行中进度（stdout/stderr 尾部摘要） */
   onProgress?: (tail: string) => void;
+  /** 续我们记下的 CLI 会话。失败且提供了 fallbackPrompt 时只新开一次 */
+  resumeId?: string;
+  /** Claude 新开时指定的 UUID */
+  createSessionId?: string;
+  /** 续会话失败时改用的提示（含工作线） */
+  fallbackPrompt?: string;
+  /** 已拼好的提示。不传则按 resumeId 现拼 */
+  promptText?: string;
   /** 测试可注入 */
   spawnImpl?: typeof spawn;
   home?: string;
@@ -48,6 +59,12 @@ export interface CliAgentResult {
   exitCode: number;
   cancelled?: boolean;
   timedOut?: boolean;
+  /** 解析到的或我们指定的 CLI 会话号 */
+  sessionId?: string;
+  /** 这次是续会话失败后新开的 */
+  resumedThenFresh?: boolean;
+  /** 退出码非 0 且输出像是会话不存在 */
+  resumeMissing?: boolean;
 }
 
 export class CliAgentPathError extends Error {
@@ -94,21 +111,29 @@ function safeReal(p: string): string {
   }
 }
 
-export function buildAgentPrompt(req: Pick<CliAgentRequest, "task" | "cwd" | "botName" | "constraints">): string {
+export function buildAgentPrompt(req: Pick<CliAgentRequest, "task" | "cwd" | "botName" | "constraints"> & { brief?: string; resume?: boolean }): string {
+  const task = req.task.trim();
+  if (req.resume) {
+    const parts = [`【任务】${task}`];
+    if (req.constraints?.trim()) parts.push(`【约束】${req.constraints.trim().slice(0, 800)}`);
+    parts.push("【交付】沿用本会话已有上下文，只完成这次任务。用简洁中文说明改了哪些文件、怎么验证。");
+    return parts.join("\n");
+  }
   const who = req.botName?.trim() || "Harness bot";
   const parts = [
     `【角色】你是用户本机工程上的 coding agent，由 Harness bot「${who}」派来完成任务。`,
     `【工程】工作目录（cwd）= ${req.cwd}`,
-    `【任务】${req.task.trim()}`,
   ];
+  if (req.brief?.trim()) parts.push(`【进行中】\n${req.brief.trim().slice(0, 4096)}`);
+  parts.push(`【任务】${task}`);
   if (req.constraints?.trim()) parts.push(`【约束】${req.constraints.trim().slice(0, 2000)}`);
   parts.push("【交付】改完后用简洁中文说明改了哪些文件、怎么验证；不要索要 Harness 内部工具或向用户要 API Key。");
   return parts.join("\n");
 }
 
 /** Agent 模式参数（注册表驱动） */
-export function agentCliArgs(cli: CodingAgentId, prompt: string, cwd: string): string[] {
-  return buildCodingAgentArgs(cli, prompt, cwd);
+export function agentCliArgs(cli: CodingAgentId, prompt: string, cwd: string, opts?: AgentArgOpts): string[] {
+  return buildCodingAgentArgs(cli, prompt, cwd, opts);
 }
 
 export async function pickInstalledCli(preferred?: CodingAgentId | null): Promise<CodingAgentId | null> {
@@ -156,25 +181,43 @@ export async function runCliAgent(botId: string, req: CliAgentRequest): Promise<
       };
     }
   }
-  const prompt = buildAgentPrompt({ ...req, cwd });
-  const args = agentCliArgs(req.cli, prompt, cwd);
+  const prompt = req.promptText ?? buildAgentPrompt({ ...req, cwd, resume: !!req.resumeId });
   const timeoutMs = Math.min(Math.max(req.timeoutMs ?? 20 * 60_000, 60_000), 60 * 60_000);
   const spawnFn = req.spawnImpl ?? spawn;
+  const useProcessGroup = !req.spawnImpl;
 
   busyBots.add(botId);
   try {
-    return await spawnAgent({
+    const first = await spawnAgent({
       cli: req.cli,
       bin,
       cwd,
-      args,
+      args: agentCliArgs(req.cli, prompt, cwd, { resumeId: req.resumeId, createSessionId: req.createSessionId }),
       timeoutMs,
       signal: req.signal,
       spawnFn,
       onProgress: req.onProgress,
-      /** 测试 mock 常不支持 detached 进程组 */
-      useProcessGroup: !req.spawnImpl,
+      useProcessGroup,
+      resumeId: req.resumeId,
+      createSessionId: req.createSessionId,
     });
+    if (first.resumeMissing && req.resumeId && req.fallbackPrompt && !req.signal?.aborted) {
+      const freshId = req.cli === "claude" ? randomUUID() : undefined;
+      const second = await spawnAgent({
+        cli: req.cli,
+        bin,
+        cwd,
+        args: agentCliArgs(req.cli, req.fallbackPrompt, cwd, { createSessionId: freshId }),
+        timeoutMs,
+        signal: req.signal,
+        spawnFn,
+        onProgress: req.onProgress,
+        useProcessGroup,
+        createSessionId: freshId,
+      });
+      return { ...second, resumedThenFresh: true, output: `（上次 CLI 会话续不上，已新开并带上工作线）\n${second.output}` };
+    }
+    return first;
   } finally {
     busyBots.delete(botId);
   }
@@ -195,8 +238,10 @@ function spawnAgent(opts: {
   spawnFn: typeof spawn;
   onProgress?: (tail: string) => void;
   useProcessGroup?: boolean;
+  resumeId?: string;
+  createSessionId?: string;
 }): Promise<CliAgentResult> {
-  const { cli, bin, cwd, args, timeoutMs, signal, spawnFn, onProgress, useProcessGroup } = opts;
+  const { cli, bin, cwd, args, timeoutMs, signal, spawnFn, onProgress, useProcessGroup, resumeId, createSessionId } = opts;
   return new Promise((resolvePromise) => {
     let proc: ChildProcess;
     try {
@@ -240,14 +285,17 @@ function spawnAgent(opts: {
       settled = true;
       clearTimeout(timer);
       signal?.removeEventListener("abort", onAbort);
-      const text = (out.trim() || err.trim()).slice(-12_000);
+      const raw = (out.trim() || err.trim()).slice(-12_000);
+      const parsed = parseAgentOutput(raw, exitCode);
+      const sessionId = parsed.sessionId || (!resumeId ? createSessionId : resumeId);
+      const body = (parsed.text || raw).slice(-12_000);
       const ok = exitCode === 0 && !timedOut && !cancelled;
-      let output = text || (cancelled ? "（已取消）" : timedOut ? "（超时，无输出）" : `（无输出，退出码 ${exitCode}）`);
+      let output = body || (cancelled ? "（已取消）" : timedOut ? "（超时，无输出）" : `（无输出，退出码 ${exitCode}）`);
       if (cancelled) output = `⏹ 已停止 ${cli} 派工。\n${output}`;
       else if (timedOut) output = `⏱ ${cli} 派工超时（${Math.round(timeoutMs / 60000)} 分钟）。\n${output}`;
       else if (!ok) output = `❌ ${cli} 退出码 ${exitCode}\n${output}`;
       else output = `✅ ${cli} 已在 ${cwd} 完成派工。\n${output}`;
-      resolvePromise({ ok, cli, cwd, output, exitCode, cancelled, timedOut });
+      resolvePromise({ ok, cli, cwd, output, exitCode, cancelled, timedOut, sessionId, resumeMissing: parsed.resumeMissing });
     };
 
     const onAbort = () => {

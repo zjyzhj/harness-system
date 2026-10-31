@@ -587,6 +587,7 @@ async function renderDetails(b) {
       <div class="d-kv">
         <span title="cli.agent 默认工程根">工程目录</span><span><input id="d-agent-cwd" class="skin-select" style="width:100%" placeholder="绝对路径，可空" value="${esc(b.agentCwd || "")}" /></span>
         <span title="仅多台就绪时需要；未就绪会自动换">偏好 CLI</span><span><select id="d-agent-cli" class="skin-select" style="width:100%"><option value="">自动（跟随探测）</option>${Object.entries(codingCaps).filter(([, c]) => c?.ready).map(([id, c]) => `<option value="${esc(id)}" ${b.agentCli === id ? "selected" : ""}>${esc(c.label || id)}</option>`).join("")}${b.agentCli && !codingCaps[b.agentCli]?.ready ? `<option value="${esc(b.agentCli)}" selected>${esc(b.agentCli)}（当前未就绪，将自动换）</option>` : ""}</select></span>
+        <span title="同一工程同一 CLI 默认续它自己的会话；换 CLI 用工作线">连续性</span><span><select id="d-agent-resume" class="skin-select" style="width:100%">${[["auto", "自动（同 CLI 续会话）"], ["always", "总是续上次"], ["once", "下一次新开"]].map(([v, l]) => `<option value="${v}" ${(b.agentResume ?? "auto") === v ? "selected" : ""}>${l}</option>`).join("")}</select></span>
       </div>
     </div>
     <div class="d-sec"><h4>技能 <button class="list-add" id="d-skill-add" title="新建技能">＋</button></h4>
@@ -646,6 +647,11 @@ async function renderDetails(b) {
   const agentCli = panel.querySelector("#d-agent-cli");
   if (agentCli) agentCli.onchange = async () => {
     await api.bots.update(b.id, { agentCli: agentCli.value || null });
+    await refreshBots();
+  };
+  const agentResume = panel.querySelector("#d-agent-resume");
+  if (agentResume) agentResume.onchange = async () => {
+    await api.bots.update(b.id, { agentResume: agentResume.value === "auto" ? null : agentResume.value });
     await refreshBots();
   };
   const more = panel.querySelector("#d-more");

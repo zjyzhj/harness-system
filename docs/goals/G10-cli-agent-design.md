@@ -188,6 +188,7 @@ cap: "cli:agent"
 | **探测驱动** ✅ | Coding Agent **注册表** + 实时探测；工具说明/提示词/设置跟随本机，不手写死名单；加后端=注册一条 | [`core/coding-agents.ts`](../../core/coding-agents.ts) |
 | **加固** ✅ | 进程组终止；目录信任二次派工仍可见；`ready`；rule 注入；进度；bin 单表 | [`core/cli-agent.ts`](../../core/cli-agent.ts) |
 | **地基** ✅ | 无人值守拒绝派工；无 consent 拒绝；不把 `{{secret}}` 填进外部 CLI；spawn 剥劫持 env；绝对路径；过浅前缀不能长期信任 | 同上 |
+| **连续性** ✅ | 同 CLI 同目录续自己的会话号；续不上或换 CLI 时用工作线新开一次；聊天只带 ≤400 字摘要；偏好 auto/always/once | [`core/coding-thread.ts`](../../core/coding-thread.ts) |
 | **D 衔接** | 与 PROJECT_ROOT / 专 bot 记忆模板；文档 | 改包 bot 开箱话术 |
 
 ## 8. 风险

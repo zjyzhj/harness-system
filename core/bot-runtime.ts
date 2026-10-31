@@ -17,6 +17,7 @@ import { memoryLink, appendSkillRules, isDuplicateRule, type MemoryDraft, CLAIMS
 import { runTaskTool, sendFiles, uiTool, ownHistoryText, isSensitivePath, parseRunAt } from "./runtime/tool-helpers";
 import { PromptBuilder, type PromptExtras } from "./runtime/prompt";
 import {
+  buildAgentPrompt,
   CliAgentPathError,
   isCliAgentBusy,
   parseCliName,
@@ -26,6 +27,8 @@ import {
   runCliAgent,
 } from "./cli-agent";
 import { cliAgentToolDescription, probeCodingAgents } from "./coding-agents";
+import { nextCodingThread, shouldResume, threadBrief, wantsFreshTask } from "./coding-thread";
+import { randomUUID } from "node:crypto";
 export * from "./runtime/types";
 export * from "./runtime/turn-helpers";
 export * from "./runtime/rules-text";
@@ -1342,6 +1345,12 @@ export class BotRuntime {
       .map((e) => e.content.trim())
       .filter(Boolean);
     const constraints = rules.length ? rules.map((r) => `- ${r}`).join("\n").slice(0, 1800) : undefined;
+    const thread = this.deps.codingThreads?.get(bot.id, cwd);
+    const knownSession = thread?.sessions[cli];
+    const resume = shouldResume({ pref: bot.agentResume, task, sessionId: knownSession });
+    const promptBase = { task, cwd, botName: bot.name, constraints };
+    const freshPrompt = buildAgentPrompt({ ...promptBase, brief: threadBrief(thread) });
+    const promptText = resume ? buildAgentPrompt({ ...promptBase, resume: true }) : freshPrompt;
 
     const t0 = Date.now();
     try {
@@ -1351,6 +1360,10 @@ export class BotRuntime {
         cli,
         botName: bot.name,
         constraints,
+        promptText,
+        fallbackPrompt: resume ? freshPrompt : undefined,
+        resumeId: resume ? knownSession : undefined,
+        createSessionId: !resume && cli === "claude" ? randomUUID() : undefined,
         timeoutMs: timeoutMin * 60_000,
         signal: turn.signal,
         harnessHome,
@@ -1364,24 +1377,39 @@ export class BotRuntime {
         granted: true,
         ok: result.ok,
         latencyMs: Date.now() - t0,
-        detail: `${result.cancelled ? "cancelled" : result.timedOut ? "timeout" : `exit ${result.exitCode}`}${viaPathGrant ? ";path-grant" : ""}`,
+        detail: `${result.cancelled ? "cancelled" : result.timedOut ? "timeout" : `exit ${result.exitCode}`}${viaPathGrant ? ";path-grant" : ""}${resume ? ";resume" : ""}${result.resumedThenFresh ? ";resume-fallback" : ""}`,
       });
-      // 成功后记住默认工程 / CLI（不覆盖用户已显式设置的）
-      if (result.ok) {
+      if (this.deps.codingThreads && !result.cancelled) {
+        this.deps.codingThreads.save(nextCodingThread(thread, {
+          botId: bot.id,
+          cwd,
+          cli,
+          task,
+          summary: result.output,
+          sessionId: result.sessionId,
+          keepGoal: !wantsFreshTask(task) && task.trim().length < 16 && !!thread?.goal,
+        }));
+      }
+      if (bot.agentResume === "once") {
+        const nextBot = { ...bot };
+        delete nextBot.agentResume;
+        if (!nextBot.agentCwd) nextBot.agentCwd = cwd;
+        if (!nextBot.agentCli) nextBot.agentCli = cli;
+        this.deps.store.saveBot(nextBot);
+        this.deps.onAppChanged?.("bots");
+      } else if (result.ok && (!bot.agentCwd || !bot.agentCli)) {
         const patch: Partial<Bot> = {};
         if (!bot.agentCwd) patch.agentCwd = cwd;
         if (!bot.agentCli) patch.agentCli = cli;
-        if (Object.keys(patch).length) {
-          this.deps.store.saveBot({ ...bot, ...patch });
-          this.deps.onAppChanged?.("bots");
-        }
+        this.deps.store.saveBot({ ...bot, ...patch });
+        this.deps.onAppChanged?.("bots");
       }
-      const head = viaPathGrant
-        ? `（目录已信任，本次未再弹窗 · ${cli}）\n`
-        : shallowOnce
-          ? `（目录层级太浅，只批准这一次，没有记成长期信任 · ${cli}）\n`
-          : "";
-      return { output: head + result.output };
+      const head = [
+        viaPathGrant ? `（目录已信任，本次未再弹窗 · ${cli}）` : "",
+        shallowOnce ? `（目录层级太浅，只批准这一次，没有记成长期信任 · ${cli}）` : "",
+        resume && !result.resumedThenFresh ? `（续 ${cli} 会话）` : "",
+      ].filter(Boolean).join("\n");
+      return { output: head ? `${head}\n${result.output}` : result.output };
     } catch (e) {
       const msg = e instanceof CliAgentPathError ? e.message : e instanceof Error ? e.message : String(e);
       this.deps.audit?.append({

@@ -73,6 +73,8 @@ export interface RuntimeDeps {
   demo?: DemoSkillEngine;
   /** 本机保险库聚合（只读 list/contact；无则 vault.* 不可用） */
   vault?: Vault;
+  /** 编码工作线（bot + 工程目录）。无则派工不续会话、聊天不带摘要 */
+  codingThreads?: import("../coding-thread").CodingThreadStore;
   /** 语义回想：返回注入上下文的一节（没开 / 没命中返回空串）；excludeSession 是当前会话（已在历史里） */
   recall?: (bot: Bot, query: string, excludeSession?: string) => Promise<string>;
   /** 每轮结束时上报这一轮的模型用量（主进程汇总成每日统计） */

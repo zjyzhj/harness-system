@@ -8,13 +8,20 @@ import { CLI_BINS, builtinCliBin } from "./cli-bins";
 
 export type CodingAgentId = string;
 
+export interface AgentArgOpts {
+  /** 续我们记下的会话；不传则新开 */
+  resumeId?: string;
+  /** Claude 新开会话时指定 UUID，便于下次 --resume */
+  createSessionId?: string;
+}
+
 export interface CodingAgentBackend {
   id: CodingAgentId;
   bin: string;
   label: string;
   chat: boolean;
   agent: boolean;
-  buildAgentArgs?: (prompt: string, cwd: string) => string[];
+  buildAgentArgs?: (prompt: string, cwd: string, opts?: AgentArgOpts) => string[];
   order?: number;
 }
 
@@ -45,16 +52,17 @@ const BUILTIN: CodingAgentBackend[] = [
     chat: true,
     agent: true,
     order: 10,
-    buildAgentArgs: (prompt, cwd) => [
+    buildAgentArgs: (prompt, cwd, opts) => [
       "-p",
       "--output-format",
-      "text",
+      "json",
       "--trust",
       "--force",
       "--sandbox",
       "disabled",
       "--workspace",
       cwd,
+      ...(opts?.resumeId ? ["--resume", opts.resumeId] : []),
       prompt,
     ],
   },
@@ -66,7 +74,14 @@ const BUILTIN: CodingAgentBackend[] = [
     agent: true,
     order: 20,
     // 工程根靠 spawn cwd；提示词里也会写明 cwd
-    buildAgentArgs: (prompt) => ["-p", "--output-format", "text", "--dangerously-skip-permissions", prompt],
+    buildAgentArgs: (prompt, _cwd, opts) => [
+      "-p",
+      "--output-format",
+      "text",
+      "--dangerously-skip-permissions",
+      ...(opts?.resumeId ? ["--resume", opts.resumeId] : opts?.createSessionId ? ["--session-id", opts.createSessionId] : []),
+      prompt,
+    ],
   },
   {
     id: "codex",
@@ -75,7 +90,10 @@ const BUILTIN: CodingAgentBackend[] = [
     chat: true,
     agent: true,
     order: 30,
-    buildAgentArgs: (prompt, cwd) => ["exec", "--skip-git-repo-check", "-s", "workspace-write", "-C", cwd, prompt],
+    buildAgentArgs: (prompt, cwd, opts) =>
+      opts?.resumeId
+        ? ["exec", "resume", opts.resumeId, "--skip-git-repo-check", "--json", prompt]
+        : ["exec", "--skip-git-repo-check", "-s", "workspace-write", "-C", cwd, "--json", prompt],
   },
 ];
 
@@ -107,10 +125,10 @@ export function agentBin(id: string): string | undefined {
   return getCodingAgent(id)?.bin ?? builtinCliBin(id);
 }
 
-export function buildCodingAgentArgs(id: string, prompt: string, cwd: string): string[] {
+export function buildCodingAgentArgs(id: string, prompt: string, cwd: string, opts?: AgentArgOpts): string[] {
   const b = getCodingAgent(id);
   if (!b?.buildAgentArgs) throw new Error(`Coding Agent「${id}」未配置派工参数`);
-  return b.buildAgentArgs(prompt, cwd);
+  return b.buildAgentArgs(prompt, cwd, opts);
 }
 
 let cache: { at: number; items: CodingAgentStatus[] } | null = null;

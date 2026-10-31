@@ -185,4 +185,44 @@ describe("cli-agent spawn", () => {
     expect(r.ok).toBe(true);
     expect(tips.some((t) => t.includes("step one"))).toBe(true);
   });
+
+  test("续会话失败只新开一次", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "cli-resume-"));
+    let n = 0;
+    const spawnImpl = ((_bin: string, _args: string[]) => {
+      n += 1;
+      const ee = new EventEmitter() as any;
+      ee.stdout = new EventEmitter();
+      ee.stderr = new EventEmitter();
+      ee.killed = false;
+      ee.kill = () => {
+        ee.killed = true;
+      };
+      const attempt = n;
+      queueMicrotask(() => {
+        if (attempt === 1) {
+          ee.stderr.emit("data", Buffer.from("No conversation found\n"));
+          ee.emit("close", 1);
+        } else {
+          ee.stdout.emit("data", Buffer.from('{"session_id":"chat-2","result":"fresh ok"}\n'));
+          ee.emit("close", 0);
+        }
+      });
+      return ee;
+    }) as any;
+    const r = await runCliAgent("b-resume", {
+      task: "继续",
+      cwd: dir,
+      cli: "cursor",
+      resumeId: "chat-old",
+      fallbackPrompt: "【进行中】上次做到一半",
+      spawnImpl,
+      timeoutMs: 5_000,
+    });
+    expect(n).toBe(2);
+    expect(r.resumedThenFresh).toBe(true);
+    expect(r.ok).toBe(true);
+    expect(r.sessionId).toBe("chat-2");
+    expect(r.output).toContain("fresh ok");
+  });
 });
