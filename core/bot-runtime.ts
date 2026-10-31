@@ -482,8 +482,12 @@ export class BotRuntime {
     if (turn.unattended && t.tool.startsWith("ui.")) {
       return { output: "❌ 现在是无人值守的自动执行，没有用户能回答或确认。不要再提问，信息不全就自己做合理假设（在产出开头写明假设），直接完成任务。" };
     }
+    // 外部 Coding CLI 看不到 Vault：不要把 {{secret:}} 填进派工参数
+    if (t.tool === "cli.agent" && JSON.stringify(args).includes("{{secret:")) {
+      return { output: "❌ cli.agent 不会把保险库密钥交给外部 CLI。任务里去掉 {{secret:}}，让 Coding CLI 用它自己的登录态。" };
+    }
     // ui.* 需要看到未替换的密钥占位，所以不预填；其它工具执行前替换
-    if (!t.tool.startsWith("ui.") && this.deps.secrets && JSON.stringify(args).includes("{{")) {
+    if (t.tool !== "cli.agent" && !t.tool.startsWith("ui.") && this.deps.secrets && JSON.stringify(args).includes("{{")) {
       // 网址会被对方服务器记录：密钥不能拼进联网请求
       if (t.tool === "web.search" || t.tool === "web.fetch") return { output: "❌ 联网搜索 / 打开网页不能带 {{secret:}} 密钥。需要用密钥调接口时用 bash.run（会请用户确认）" };
       const filled = this.deps.secrets.fill(args, bot.id);
@@ -1271,6 +1275,8 @@ export class BotRuntime {
   private async cliAgentTool(bot: Bot, args: Record<string, unknown>, turn: TurnCtx): Promise<ToolOutcome> {
     const task = String(args.task ?? args.prompt ?? args.message ?? "").trim();
     if (!task) return { output: "cli.agent 需要 task（要改什么、验收标准）" };
+    if (turn.unattended) return { output: "❌ 无人值守（定时任务 / 后台编排）不能派 cli.agent 改仓库，需要用户在场批准。" };
+    if (!this.deps.consent) return { output: "❌ 没有授权中心，拒绝派工 Coding CLI。" };
     if (isCliAgentBusy(bot.id)) return { output: "❌ 该 bot 已有一个 cli.agent 在跑，等它结束再派" };
 
     const projectRoot = this.deps.env?.visibleTo(bot.id).find((e) => e.key === "PROJECT_ROOT")?.value;
@@ -1310,16 +1316,16 @@ export class BotRuntime {
       `派本机 ${cli} CLI（可写 Agent）改工程\n目录：${cwd}\n任务：${task.slice(0, 500)}${task.length > 500 ? "…" : ""}`;
 
     let viaPathGrant = false;
-    if (this.deps.consent) {
-      const r = await this.deps.consent.requestCliAgent(bot.id, cwd, desc, {
-        reasons: ["将启动外部 Coding CLI，可在该目录读写文件并执行命令", "可选「总是允许此目录」以免同工程反复确认；密钥不会从 Vault 自动注入"],
-      });
-      if (!r.granted) {
-        this.deps.audit?.append({ botId: bot.id, cap: "cli:agent", action: "cli.agent", args: `${cli} ${cwd}`, granted: false });
-        return { output: "❌ 用户没有批准派工 Coding CLI，不要换别的 CLI 重试绕过，直接告诉用户" };
-      }
-      viaPathGrant = !!r.viaPathGrant;
+    let shallowOnce = false;
+    const r = await this.deps.consent.requestCliAgent(bot.id, cwd, desc, {
+      reasons: ["将启动外部 Coding CLI，可在该目录读写文件并执行命令", "可选「总是允许此目录」以免同工程反复确认；密钥不会从 Vault 自动注入"],
+    });
+    if (!r.granted) {
+      this.deps.audit?.append({ botId: bot.id, cap: "cli:agent", action: "cli.agent", args: `${cli} ${cwd}`, granted: false });
+      return { output: "❌ 用户没有批准派工 Coding CLI，不要换别的 CLI 重试绕过，直接告诉用户" };
     }
+    viaPathGrant = !!r.viaPathGrant;
+    shallowOnce = !!r.shallow;
 
     // 目录信任二次派工：不再弹窗，但仍给模型/用户一条可见摘要（避免完全静默）
     if (viaPathGrant) {
@@ -1330,8 +1336,7 @@ export class BotRuntime {
       turn.onToolProgress?.(`偏好 ${preferred} 未就绪，改用 ${cli}`);
     }
 
-    const rules = this.deps.memory
-      .list(bot.id)
+    const rules = [...this.deps.memory.list("global"), ...this.deps.memory.list(bot.id)]
       .filter((e) => e.kind === "rule")
       .slice(-12)
       .map((e) => e.content.trim())
@@ -1371,7 +1376,11 @@ export class BotRuntime {
           this.deps.onAppChanged?.("bots");
         }
       }
-      const head = viaPathGrant ? `（目录已信任，本次未再弹窗 · ${cli}）\n` : "";
+      const head = viaPathGrant
+        ? `（目录已信任，本次未再弹窗 · ${cli}）\n`
+        : shallowOnce
+          ? `（目录层级太浅，只批准这一次，没有记成长期信任 · ${cli}）\n`
+          : "";
       return { output: head + result.output };
     } catch (e) {
       const msg = e instanceof CliAgentPathError ? e.message : e instanceof Error ? e.message : String(e);

@@ -332,6 +332,20 @@ describe("G10 cli.agent 目录前缀信任", () => {
     expect(c2.listCliAgentPaths("bot-g10")).toEqual([]);
   });
 
+  test("过浅目录不能记成长期信任", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "harness-cli-shallow-"));
+    const c = new ConsentCenter(dir);
+    c.decider = (req) => {
+      expect(req.rememberPath).toBeFalsy();
+      return "allow-command";
+    };
+    const r = await c.requestCliAgent("b", "/tmp", "太浅");
+    expect(r.granted).toBe(true);
+    expect(r.remembered).toBeFalsy();
+    expect(r.shallow).toBe(true);
+    expect(c.hasCliAgentPath("b", "/tmp")).toBe(false);
+  });
+
   test("目录信任持久化", async () => {
     const dir = mkdtempSync(join(tmpdir(), "harness-cli-path-p-"));
     const proj = mkdtempSync(join(tmpdir(), "proj-p-"));

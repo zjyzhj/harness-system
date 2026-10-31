@@ -264,12 +264,17 @@ export class ConsentCenter {
    * cli.agent 专用：已信任前缀则直接放行；否则弹窗，可选「总是允许此目录」。
    * 不用整 cap 的长期 grant（避免一次批准任意路径）。
    */
+  /** 层级太浅（如 /tmp、/Users/name）不能记成长期前缀，否则等于放开一大片盘 */
+  private isShallowPrefix(prefix: string): boolean {
+    return prefix.split(sep).filter(Boolean).length < 3;
+  }
+
   async requestCliAgent(
     botId: string,
     cwd: string,
     description: string,
     opts?: { reasons?: string[] },
-  ): Promise<{ granted: boolean; remembered?: boolean; viaPathGrant?: boolean }> {
+  ): Promise<{ granted: boolean; remembered?: boolean; viaPathGrant?: boolean; shallow?: boolean }> {
     const prefix = this.normalizePrefix(cwd);
     // 已信任前缀：放行但仍标记 viaPathGrant，调用方须写一条可见摘要（避免完全静默）
     if (this.hasCliAgentPath(botId, prefix)) return { granted: true, viaPathGrant: true };
@@ -279,12 +284,13 @@ export class ConsentCenter {
       cap: "cli:agent",
       description,
       requiresStrongConsent: true,
-      rememberPath: prefix,
+      rememberPath: this.isShallowPrefix(prefix) ? undefined : prefix,
       reasons: opts?.reasons,
     });
     if (decision === "deny") return { granted: false };
-    // 仅「总是允许此目录」(allow-command) 写入前缀信任；批准一次不记
+    // 仅「总是允许此目录」(allow-command) 写入前缀信任；过浅目录只放行这一次
     if (decision === "allow-command") {
+      if (this.isShallowPrefix(prefix)) return { granted: true, shallow: true };
       this.grantCliAgentPath(botId, prefix);
       return { granted: true, remembered: true };
     }

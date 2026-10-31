@@ -186,7 +186,8 @@ cap: "cli:agent"
 | **B 三家对齐** ✅ | `Bot.agentCli` / `agentCwd`；详情可设；`app.updateSelf`；派工回落；提示词可见 | [`core/types.ts`](../../core/types.ts)、[`app/renderer/side-panels.js`](../../app/renderer/side-panels.js) |
 | **C 目录信任** ✅ | `requestCliAgent` +「总是允许此目录」前缀信任；权限区可撤销 | [`core/consent-center.ts`](../../core/consent-center.ts) |
 | **探测驱动** ✅ | Coding Agent **注册表** + 实时探测；工具说明/提示词/设置跟随本机，不手写死名单；加后端=注册一条 | [`core/coding-agents.ts`](../../core/coding-agents.ts) |
-| **加固** ✅ | 进程组终止；目录信任二次派工仍可见摘要；`ready`≠仅 installed；rule 约束注入；进度尾刷；bin 单表 | [`core/cli-agent.ts`](../../core/cli-agent.ts)、[`core/cli-bins.ts`](../../core/cli-bins.ts) |
+| **加固** ✅ | 进程组终止；目录信任二次派工仍可见；`ready`；rule 注入；进度；bin 单表 | [`core/cli-agent.ts`](../../core/cli-agent.ts) |
+| **地基** ✅ | 无人值守拒绝派工；无 consent 拒绝；不把 `{{secret}}` 填进外部 CLI；spawn 剥劫持 env；绝对路径；过浅前缀不能长期信任 | 同上 |
 | **D 衔接** | 与 PROJECT_ROOT / 专 bot 记忆模板；文档 | 改包 bot 开箱话术 |
 
 ## 8. 风险

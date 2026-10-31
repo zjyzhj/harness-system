@@ -26,6 +26,10 @@ describe("cli-agent 路径与提示", () => {
     expect(() => resolveAgentCwd(join(h, "workspace"), { harnessHome: h })).toThrow(/Harness 数据目录/);
   });
 
+  test("拒绝相对路径", () => {
+    expect(() => resolveAgentCwd("relative/proj")).toThrow(/绝对路径/);
+  });
+
   test("接受普通工程目录", () => {
     const dir = mkdtempSync(join(tmpdir(), "proj-"));
     writeFileSync(join(dir, "a.txt"), "x");

@@ -218,12 +218,20 @@ const STRIP_CLI_ENV = [
   "CURSOR_REQUEST_ID",
   "CURSOR_EXTENSION_HOST_ROLE",
   "AGENT_TRANSCRIPTS",
+  "CLAUDECODE",
+  "CODEX_SANDBOX",
 ];
 
-/** 完整子进程 env：干净 process.env + 可选面板透传 */
-function mergeCliEnv(cli: CliName, p: Provider): NodeJS.ProcessEnv {
+/** 派工/聊天 spawn 共用：剥掉会劫持本机 CLI 登录的变量。不注入 Vault。 */
+export function strippedCliEnv(): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...process.env };
   for (const k of STRIP_CLI_ENV) delete env[k];
+  return env;
+}
+
+/** 完整子进程 env：干净 process.env + 可选面板透传（仅聊天 Provider） */
+function mergeCliEnv(cli: CliName, p: Provider): NodeJS.ProcessEnv {
+  const env = strippedCliEnv();
   const extra = cliEnv(cli, p);
   if (extra) Object.assign(env, extra);
   return env;
@@ -283,10 +291,9 @@ function runQuiet(cmd: string, args: string[], opts?: { timeoutMs?: number; env?
       // opts.env 若已是完整 env（mergeCliEnv）直接用；否则在 process.env 上合并并剥掉 Agent 劫持变量
       let env = opts?.env;
       if (!env) {
-        env = { ...process.env };
-        for (const k of STRIP_CLI_ENV) delete env[k];
+        env = strippedCliEnv();
       } else if (!("PATH" in env) || !env.PATH) {
-        env = { ...process.env, ...env };
+        env = { ...strippedCliEnv(), ...env };
         for (const k of STRIP_CLI_ENV) delete env[k];
       }
       proc = spawn(cmd, args, {

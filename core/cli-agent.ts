@@ -7,6 +7,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, resolve, sep } from "node:path";
+import { strippedCliEnv } from "./adapters/cli";
 import {
   agentBin,
   buildCodingAgentArgs,
@@ -61,7 +62,8 @@ export function resolveAgentCwd(raw: string, opts?: { home?: string; harnessHome
   const home = opts?.home ?? homedir();
   const text = raw.trim();
   if (!text) throw new CliAgentPathError("需要工程目录 cwd（或先 env.set PROJECT_ROOT）");
-  const abs = isAbsolute(text) ? resolve(text) : resolve(process.cwd(), text);
+  if (!isAbsolute(text)) throw new CliAgentPathError("工程目录必须是绝对路径，不要用相对路径");
+  const abs = resolve(text);
   if (!existsSync(abs)) throw new CliAgentPathError(`目录不存在：${abs}`);
   let real: string;
   try {
@@ -144,12 +146,12 @@ export async function runCliAgent(botId: string, req: CliAgentRequest): Promise<
   if (!req.spawnImpl) {
     const items = await probeCodingAgents();
     const cap = items.find((x) => x.id === req.cli);
-    if (!cap?.installed || !cap.agent) {
+    if (!cap?.ready) {
       return {
         ok: false,
         cli: req.cli,
         cwd,
-        output: `❌ 本机未安装或不可派工 ${req.cli}（bin: ${bin}）。到设置 → 模型刷新探测，或省略 cli 让系统自动选已装项。`,
+        output: `❌ ${req.cli} 未就绪（未安装、未登录或不支持派工，bin: ${bin}）。到设置 → 模型刷新探测，或省略 cli 让系统自动选已就绪项。`,
         exitCode: -1,
       };
     }
@@ -198,9 +200,7 @@ function spawnAgent(opts: {
   return new Promise((resolvePromise) => {
     let proc: ChildProcess;
     try {
-      const env = { ...process.env };
-      // 避免被外层 Agent 劫持
-      for (const k of ["CURSOR_AGENT", "CLAUDECODE", "CODEX_SANDBOX"]) delete env[k];
+      const env = strippedCliEnv();
       proc = spawnFn(bin, args, {
         stdio: ["ignore", "pipe", "pipe"],
         env,
