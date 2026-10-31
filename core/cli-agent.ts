@@ -31,6 +31,8 @@ export interface CliAgentRequest {
   constraints?: string;
   timeoutMs?: number;
   signal?: AbortSignal;
+  /** 运行中进度（stdout/stderr 尾部摘要） */
+  onProgress?: (tail: string) => void;
   /** 测试可注入 */
   spawnImpl?: typeof spawn;
   home?: string;
@@ -167,6 +169,9 @@ export async function runCliAgent(botId: string, req: CliAgentRequest): Promise<
       timeoutMs,
       signal: req.signal,
       spawnFn,
+      onProgress: req.onProgress,
+      /** 测试 mock 常不支持 detached 进程组 */
+      useProcessGroup: !req.spawnImpl,
     });
   } finally {
     busyBots.delete(botId);
@@ -186,8 +191,10 @@ function spawnAgent(opts: {
   timeoutMs: number;
   signal?: AbortSignal;
   spawnFn: typeof spawn;
+  onProgress?: (tail: string) => void;
+  useProcessGroup?: boolean;
 }): Promise<CliAgentResult> {
-  const { cli, bin, cwd, args, timeoutMs, signal, spawnFn } = opts;
+  const { cli, bin, cwd, args, timeoutMs, signal, spawnFn, onProgress, useProcessGroup } = opts;
   return new Promise((resolvePromise) => {
     let proc: ChildProcess;
     try {
@@ -198,6 +205,8 @@ function spawnAgent(opts: {
         stdio: ["ignore", "pipe", "pipe"],
         env,
         cwd,
+        // 独立进程组：停止/超时时整组杀掉（含 CLI 拉起的子 agent）
+        detached: !!useProcessGroup,
       });
     } catch (e) {
       resolvePromise({
@@ -215,6 +224,16 @@ function spawnAgent(opts: {
     let settled = false;
     let timedOut = false;
     let cancelled = false;
+    let lastProgressAt = 0;
+
+    const pushProgress = () => {
+      if (!onProgress) return;
+      const now = Date.now();
+      if (now - lastProgressAt < 1200) return;
+      lastProgressAt = now;
+      const tail = (out.trim() || err.trim()).slice(-400);
+      if (tail) onProgress(tail);
+    };
 
     const finish = (exitCode: number) => {
       if (settled) return;
@@ -233,7 +252,7 @@ function spawnAgent(opts: {
 
     const onAbort = () => {
       cancelled = true;
-      killTree(proc);
+      killAgentTree(proc, !!useProcessGroup);
     };
     signal?.addEventListener("abort", onAbort, { once: true });
     if (signal?.aborted) {
@@ -244,16 +263,18 @@ function spawnAgent(opts: {
 
     const timer = setTimeout(() => {
       timedOut = true;
-      killTree(proc);
+      killAgentTree(proc, !!useProcessGroup);
     }, timeoutMs);
 
     proc.stdout?.on("data", (d) => {
       out += d.toString();
       if (out.length > 400_000) out = out.slice(-200_000);
+      pushProgress();
     });
     proc.stderr?.on("data", (d) => {
       err += d.toString();
       if (err.length > 200_000) err = err.slice(-100_000);
+      pushProgress();
     });
     proc.on("error", (e) => {
       err += e.message;
@@ -263,7 +284,24 @@ function spawnAgent(opts: {
   });
 }
 
-function killTree(proc: ChildProcess) {
+/** 与 bash.run 对齐：优先杀进程组，再回落单进程 */
+function killAgentTree(proc: ChildProcess, processGroup: boolean) {
+  const pid = proc.pid;
+  if (processGroup && pid) {
+    try {
+      process.kill(-pid, "SIGTERM");
+    } catch {
+      /* ignore */
+    }
+    setTimeout(() => {
+      try {
+        process.kill(-pid, "SIGKILL");
+      } catch {
+        /* ignore */
+      }
+    }, 1500);
+    return;
+  }
   try {
     proc.kill("SIGTERM");
   } catch {

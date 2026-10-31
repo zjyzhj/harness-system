@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { contentText, type ChatMessage, type Provider } from "../types";
+import { CLI_BINS, type BuiltinCliId } from "../cli-bins";
 
 /** cursor-agent 工作目录：空沙箱，避免扫启动目录（harness 仓库）拖慢冷启动 */
 function cliWorkspaceDir(): string {
@@ -12,9 +13,9 @@ function cliWorkspaceDir(): string {
   return dir;
 }
 
-export type CliName = "codex" | "cursor" | "claude";
+export type CliName = BuiltinCliId;
 
-const CLI_BIN: Record<CliName, string> = { codex: "codex", cursor: "cursor-agent", claude: "claude" };
+const CLI_BIN: Record<CliName, string> = { ...CLI_BINS };
 
 export interface CliCapability {
   installed: boolean;

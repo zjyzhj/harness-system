@@ -301,6 +301,7 @@ describe("G10 cli.agent 目录前缀信任", () => {
     const once = await c.requestCliAgent("bot-g10", proj, "派工一次");
     expect(once.granted).toBe(true);
     expect(once.remembered).toBeFalsy();
+    expect(once.viaPathGrant).toBeFalsy();
     expect(last).toBeTruthy();
     expect(c.hasCliAgentPath("bot-g10", proj)).toBe(false);
 
@@ -318,6 +319,7 @@ describe("G10 cli.agent 目录前缀信任", () => {
     };
     const again = await c.requestCliAgent("bot-g10", join(proj, "src"), "同前缀");
     expect(again.granted).toBe(true);
+    expect(again.viaPathGrant).toBe(true);
     expect(asked).toBe(0);
 
     c.revokeCliAgentPath("bot-g10", proj);

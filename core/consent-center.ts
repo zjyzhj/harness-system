@@ -269,9 +269,10 @@ export class ConsentCenter {
     cwd: string,
     description: string,
     opts?: { reasons?: string[] },
-  ): Promise<{ granted: boolean; remembered?: boolean }> {
+  ): Promise<{ granted: boolean; remembered?: boolean; viaPathGrant?: boolean }> {
     const prefix = this.normalizePrefix(cwd);
-    if (this.hasCliAgentPath(botId, prefix)) return { granted: true };
+    // 已信任前缀：放行但仍标记 viaPathGrant，调用方须写一条可见摘要（避免完全静默）
+    if (this.hasCliAgentPath(botId, prefix)) return { granted: true, viaPathGrant: true };
     if (!this.decider) return { granted: false };
     const decision = await this.decider({
       botId,

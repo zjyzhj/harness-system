@@ -111,4 +111,11 @@ export interface RuntimeOptions {
 }
 
 /** 一轮回复里共享的状态：联网来源按出现顺序编号，正文用 [n] 引用 */
-export interface TurnCtx { sources: SourceItem[]; userImages?: ContentBlock[]; signal?: AbortSignal; unattended?: boolean }
+export interface TurnCtx {
+  sources: SourceItem[];
+  userImages?: ContentBlock[];
+  signal?: AbortSignal;
+  unattended?: boolean;
+  /** 长工具运行中刷新卡片摘要（如 cli.agent 进度尾） */
+  onToolProgress?: (text: string) => void;
+}

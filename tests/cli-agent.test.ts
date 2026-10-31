@@ -152,4 +152,33 @@ describe("cli-agent spawn", () => {
     expect(r.cancelled).toBe(true);
     expect(r.ok).toBe(false);
   });
+
+  test("onProgress 收到 stdout 尾", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "cli-prog-"));
+    const tips: string[] = [];
+    const spawnImpl = ((_bin: string, _args: string[]) => {
+      const ee = new EventEmitter() as any;
+      ee.stdout = new EventEmitter();
+      ee.stderr = new EventEmitter();
+      ee.killed = false;
+      ee.kill = () => {
+        ee.killed = true;
+      };
+      queueMicrotask(() => {
+        ee.stdout.emit("data", Buffer.from("step one doing stuff\n"));
+        ee.emit("close", 0);
+      });
+      return ee;
+    }) as any;
+    const r = await runCliAgent("b4", {
+      task: "x",
+      cwd: dir,
+      cli: "cursor",
+      spawnImpl,
+      onProgress: (t) => tips.push(t),
+      timeoutMs: 5_000,
+    });
+    expect(r.ok).toBe(true);
+    expect(tips.some((t) => t.includes("step one"))).toBe(true);
+  });
 });

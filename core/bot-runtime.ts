@@ -342,6 +342,9 @@ export class BotRuntime {
           return { t, r2: { output: `❌ 这个调用刚才已经失败过（${failedCalls.get(sig)}），重试结果不会变。不要再调用它，换别的办法，或者直接告诉用户做不到以及原因。` } as ToolOutcome };
         }
         if (!QUIET_TOOLS.has(t.tool)) opts.onBlock({ type: "tool_call", tool: t.tool, callId: t.callId, args: t.args, status: "running" });
+        turn.onToolProgress = (note) => {
+          if (!QUIET_TOOLS.has(t.tool)) opts.onBlock({ type: "tool_call", tool: t.tool, callId: t.callId, args: t.args, status: "running", result: note.slice(0, 500) });
+        };
         const r2 = await this.executeTool(bot, t, text, opts?.depth ?? 0, sessionId, turn);
         if (r2.output.startsWith("❌")) failedCalls.set(sig, r2.output.slice(0, 120));
         return { t, r2 };
@@ -1286,10 +1289,13 @@ export class BotRuntime {
 
     const preferred = parseCliName(args.cli ?? args.cliName) ?? bot.agentCli;
     const cli = preferred ? await pickInstalledCli(preferred) : await pickInstalledCli();
-    if (!cli) return { output: "❌ 本机未检测到 cursor / claude / codex CLI。请先安装并登录其一（设置 → 模型可看探测）。" };
-    if (preferred && preferred !== cli) {
-      /* 偏好未装，已回落 */
+    if (!cli) {
+      return {
+        output:
+          "❌ 本机没有就绪的 Coding CLI（需已安装且可派工；Cursor 未登录不算就绪）。到设置 → 模型刷新探测，安装并登录后再试。",
+      };
     }
+    const fellBack = !!(preferred && preferred !== cli);
 
     const timeoutMin = Math.min(Math.max(Number(args.timeoutMin ?? 20) || 20, 1), 60);
     const harnessHome = this.deps.workspaceRoot ? join(this.deps.workspaceRoot, "..") : undefined;
@@ -1303,6 +1309,7 @@ export class BotRuntime {
     const desc =
       `派本机 ${cli} CLI（可写 Agent）改工程\n目录：${cwd}\n任务：${task.slice(0, 500)}${task.length > 500 ? "…" : ""}`;
 
+    let viaPathGrant = false;
     if (this.deps.consent) {
       const r = await this.deps.consent.requestCliAgent(bot.id, cwd, desc, {
         reasons: ["将启动外部 Coding CLI，可在该目录读写文件并执行命令", "可选「总是允许此目录」以免同工程反复确认；密钥不会从 Vault 自动注入"],
@@ -1311,7 +1318,25 @@ export class BotRuntime {
         this.deps.audit?.append({ botId: bot.id, cap: "cli:agent", action: "cli.agent", args: `${cli} ${cwd}`, granted: false });
         return { output: "❌ 用户没有批准派工 Coding CLI，不要换别的 CLI 重试绕过，直接告诉用户" };
       }
+      viaPathGrant = !!r.viaPathGrant;
     }
+
+    // 目录信任二次派工：不再弹窗，但仍给模型/用户一条可见摘要（避免完全静默）
+    if (viaPathGrant) {
+      turn.onToolProgress?.(
+        `已信任目录，直接派工 ${cli} → ${cwd}${fellBack ? `（偏好 ${preferred} 未就绪，已换）` : ""}\n${task.slice(0, 200)}`,
+      );
+    } else if (fellBack) {
+      turn.onToolProgress?.(`偏好 ${preferred} 未就绪，改用 ${cli}`);
+    }
+
+    const rules = this.deps.memory
+      .list(bot.id)
+      .filter((e) => e.kind === "rule")
+      .slice(-12)
+      .map((e) => e.content.trim())
+      .filter(Boolean);
+    const constraints = rules.length ? rules.map((r) => `- ${r}`).join("\n").slice(0, 1800) : undefined;
 
     const t0 = Date.now();
     try {
@@ -1320,9 +1345,11 @@ export class BotRuntime {
         cwd,
         cli,
         botName: bot.name,
+        constraints,
         timeoutMs: timeoutMin * 60_000,
         signal: turn.signal,
         harnessHome,
+        onProgress: turn.onToolProgress,
       });
       this.deps.audit?.append({
         botId: bot.id,
@@ -1332,9 +1359,9 @@ export class BotRuntime {
         granted: true,
         ok: result.ok,
         latencyMs: Date.now() - t0,
-        detail: result.cancelled ? "cancelled" : result.timedOut ? "timeout" : `exit ${result.exitCode}`,
+        detail: `${result.cancelled ? "cancelled" : result.timedOut ? "timeout" : `exit ${result.exitCode}`}${viaPathGrant ? ";path-grant" : ""}`,
       });
-      // 成功后记住默认工程 / CLI（不覆盖用户已设的 agentCwd，除非为空）
+      // 成功后记住默认工程 / CLI（不覆盖用户已显式设置的）
       if (result.ok) {
         const patch: Partial<Bot> = {};
         if (!bot.agentCwd) patch.agentCwd = cwd;
@@ -1344,7 +1371,8 @@ export class BotRuntime {
           this.deps.onAppChanged?.("bots");
         }
       }
-      return { output: result.output };
+      const head = viaPathGrant ? `（目录已信任，本次未再弹窗 · ${cli}）\n` : "";
+      return { output: head + result.output };
     } catch (e) {
       const msg = e instanceof CliAgentPathError ? e.message : e instanceof Error ? e.message : String(e);
       this.deps.audit?.append({

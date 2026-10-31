@@ -47,4 +47,13 @@ describe("coding-agents 注册表", () => {
     const line = formatCodingAgentsPromptLine([]);
     expect(line).toMatch(/尚未探测|实时探测/);
   });
+
+  test("format 区分可派工 / 未就绪", () => {
+    const line = formatCodingAgentsPromptLine([
+      { id: "cursor", bin: "cursor-agent", label: "Cursor", installed: true, agent: true, chat: true, ready: true, version: "1.0" },
+      { id: "claude", bin: "claude", label: "Claude", installed: true, agent: true, chat: true, ready: false, account: "未登录" },
+    ]);
+    expect(line).toContain("可派工");
+    expect(line).toContain("未就绪");
+  });
 });

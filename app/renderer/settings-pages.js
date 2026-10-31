@@ -81,7 +81,7 @@ async function settingsFlow() {
     const usage = (p) => bots.filter((b) => effectiveProvider(b, providers)?.id === p.id).length;
     body.innerHTML = `
       <div class="d-sec"><h4>本机 CLI <button class="ghost-btn" id="cli-refresh" title="重新探测">刷新</button></h4>
-        <div class="mx-chips">${Object.keys(caps).length ? Object.entries(caps).map(([c, info]) => `<span class="mx-chip ${info?.installed ? "ok" : ""}" title="${esc(info?.bin || c)}">${info?.installed ? "✓" : "✕"} ${esc(c)}${info?.agent ? " · 可派工" : info?.installed ? " · 仅聊天" : ""}${info?.version ? ` · ${esc(String(info.version).split(" ")[0])}` : ""}${info?.account ? ` · ${esc(info.account)}` : ""}</span>`).join("") : ["claude", "codex", "cursor"].map((c) => `<span class="mx-chip">… ${c}</span>`).join("")}</div>
+        <div class="mx-chips">${Object.keys(caps).length ? Object.entries(caps).map(([c, info]) => `<span class="mx-chip ${info?.ready ? "ok" : info?.installed ? "" : ""}" title="${esc(info?.bin || c)}">${info?.ready ? "✓" : info?.installed ? "○" : "✕"} ${esc(c)}${info?.ready ? " · 可派工" : info?.installed ? " · 未就绪" : ""}${info?.version ? ` · ${esc(String(info.version).split(" ")[0])}` : ""}${info?.account ? ` · ${esc(info.account)}` : ""}</span>`).join("") : ["claude", "codex", "cursor"].map((c) => `<span class="mx-chip">… ${c}</span>`).join("")}</div>
         <div class="hint">名单来自 Coding Agent 注册表 + 本机实时探测（点刷新更新），提示词与 <code>cli.agent</code> 工具说明会跟着变，不必手写「能调哪些」。对话 Provider 选 CLI 只问答不改仓库；改工程走 <code>cli.agent</code>。Cursor 换号见钥匙串 / <code>cursor-agent login</code>。</div>
       </div>
       <div class="d-sec"><h4>Provider <button class="list-add" id="pv-new" title="添加">＋</button></h4>
