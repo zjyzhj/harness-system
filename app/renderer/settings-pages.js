@@ -1854,7 +1854,7 @@ async function aboutFlow() {
     <div class="d-sec">
       <h4>声明</h4>
       <ul class="about-list">
-        <li>本项目<strong>开源</strong>，欢迎 Fork、提 PR 与下载使用；源码与更新以 GitHub 仓库为准。</li>
+        <li>本项目<strong>开源</strong>（<a class="about-ext" href="${GITHUB_REPO}/blob/main/LICENSE" target="_blank" rel="noopener noreferrer">MIT License</a>），欢迎 Fork、提 PR 与下载使用；源码与更新以 GitHub 仓库为准。</li>
         <li><strong>本地优先</strong>：会话、密钥与配置默认保存在本机；不会把你的 API Key 上传到本项目服务器（本项目无云端账号体系）。</li>
         <li>界面风格参考 xAI Grok Bot 桌面端体验，<strong>非</strong> xAI / Grok 官方产品，亦无隶属或背书关系。</li>
         <li>调用第三方模型、CLI 或 MCP 时，请遵守对应服务商的条款与用量规定；风险与费用由你自行承担。</li>
@@ -1869,12 +1869,12 @@ async function aboutFlow() {
           与
           <a class="about-ext" href="https://www.live2d.com/zh-CHS/download/cubism-sdk/release-license/" target="_blank" rel="noopener noreferrer">发行许可</a>。
           详情见仓库 <code>app/renderer/live2d/LICENSE-samples.md</code>。</li>
-        <li>运行时还可能用到 Electron、PixiJS、Hugging Face Transformers 等依赖，各自遵循其许可证。</li>
+        <li>运行时还可能用到 Electron、PixiJS、Hugging Face Transformers、xterm.js 等依赖，各自遵循其许可证。</li>
       </ul>
     </div>
     <div class="d-sec">
       <h4>参与</h4>
-      <p class="hint">提交代码前请跑通 <code>bun test</code>；大功能建议先阅读 <code>docs/goals/</code> 中对应 Goal 的边界说明。</p>
+      <p class="hint">提交代码前请跑通 <code>bun test</code>；流程见仓库 <code>CONTRIBUTING.md</code>；大功能建议先阅读 <code>docs/goals/</code> 中对应 Goal 的边界说明。</p>
     </div>`;
   body.querySelector("#about-copy").onclick = async () => {
     try {

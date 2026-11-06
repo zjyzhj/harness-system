@@ -3,6 +3,7 @@
   "productName": "harness-bot",
   "version": "0.1.0",
   "description": "Harness Bot — macOS 桌面端 AI 智能体指挥中心（Grok-Bot 风格 + 桌面宠物）",
+  "license": "MIT",
   "type": "module",
   "private": true,
   "scripts": {
