@@ -1,20 +1,35 @@
 # Harness Bot
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
+[![Platform](https://img.shields.io/badge/platform-macOS-black.svg)](https://github.com/zjyzhj/harness-system)
+[![Built with Bun](https://img.shields.io/badge/runtime-Bun-fbf0df.svg)](https://bun.sh)
 
-macOS 本地优先的 AI 智能体指挥中心：一句话创建 bot、主控统一对话，bot 还能变成桌面上的 Live2D / 精灵宠物；多 bot 可组队协作，统一接入 OpenAI 兼容 API 与主流 CLI。
+macOS 本地优先的 **AI 智能体指挥中心**：一句话创建 bot，主控统一对话；多 bot 可组队协作，统一接入 OpenAI 兼容 API 与主流 Coding CLI。
 
-## 它是什么
+<p align="center">
+  <img src="docs/screenshots/02-multi-bot.png" alt="多 Bot 协作主控台" width="920" />
+</p>
 
-日常工具（Codex / Claude Code / Cursor / 各类 API 中转）配置分散、彼此不通。Harness Bot 把它们收进一个菜单栏应用：
+<p align="center"><sub>左侧一排专用 bot · 中间统一对话 · 右侧模型 / 工程 / 系统监听</sub></p>
 
-- **一句话建 bot** — 名称、角色、模型、性格一次成型
-- **主控面板** — Grok Bot 风格暗色对话台，统一指挥所有智能体
-- **桌面宠物** — Live2D / 精灵换装、主动搭话、进化与一句话导演
-- **多 bot 协作** — 群聊 @ / 接力、`bot.ask` 交接、消息总线与本机网关
-- **Coding 终端** — 每工程一块常驻 PTY；可切到 Coding CLI，界面与 bot 同看一屏
-- **系统能力** — 经同意的通知、剪贴板、文件、截屏、观察层与电脑操控
-- **短链与入站** — Share Bridge（Cloudflare）转发超长协议链接；Webhook 入站进会话
+## 为什么好看也有用
+
+日常工具（Codex / Claude Code / Cursor / 各类 API 中转）配置分散、彼此不通。Harness Bot 把它们收进一个菜单栏应用——**看得见的指挥台，而不是散落的终端窗口**。
+
+| 多 bot 接力 | 工具与技能 | Connect 连接层 |
+|:---:|:---:|:---:|
+| <img src="docs/screenshots/01-main.png" alt="主控面板产出日报" width="280" /> | <img src="docs/screenshots/03-tools.png" alt="模型·记忆·技能·MCP" width="280" /> | <img src="docs/screenshots/04-connect.png" alt="Connect 云桥与 MCP" width="280" /> |
+| 例行日报跑完、深度思考可见 | 模型 / 记忆 / 技能 / MCP 一处管 | 短链桥 · 密钥库 · Webhook · MCP |
+
+## 核心能力
+
+- **一句话建 bot** — 名称、角色、模型、性格一次成型；也可导入别人分享的模板
+- **主控面板** — 统一指挥所有智能体；`@` 点名、`bot.ask` 交接、群聊接力
+- **多 bot 协作** — 日报助手喊灵感助手、产包 / 改包流水线可组队
+- **Coding 终端** — 每工程一块常驻 PTY；可切 Claude Code / Cursor / Codex，界面与 bot 同看一屏
+- **系统观察** — 经同意监听本机应用上下文，例行任务自动汇总
+- **Connect** — Cloudflare 短链公网地址、出站 Webhook、本机网关、MCP / CLI 安装入口
+- **桌面宠物** — Live2D / 精灵换装、主动搭话（娱乐侧车，可关）
 - **灵境（实验）** — 私密 Presence：文本对话 + 参考音频音色还原
 
 数据默认只落本机，可整包导入导出。
