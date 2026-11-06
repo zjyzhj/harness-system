@@ -1,11 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { readJsonSafe, writeJsonAtomic } from "./atomic-fs";
 import { join } from "node:path";
+import { GROUP_MAX_MEMBERS } from "./group-relay";
 
 /**
- * G4 群组注册表 — 对标 Grok Bot 群组协作。
- * - 群组：name + members(botId[]) + admin(botId 或 "user")
- * - @组名 解析 → 成员列表（用于 MessageBus.broadcast）
+ * 群组注册表 — 一间共用的聊天室。
+ * - 群组：name + members(botId[]) + admin(botId 或 "user")，成员最多 6 人
+ * - 设置：目标、是否自动接力、发言硬顶、主持人
  * - 持久化 groups.json
  */
 export interface Group {
@@ -19,9 +20,9 @@ export interface Group {
 
 export interface GroupSettings {
   goal?: string;          // 群目标：注入每个成员的群聊提示
-  relay?: boolean;        // 自动接力（默认开）
-  maxTurns?: number;      // 一次接力最多几轮发言（默认 12）
-  moderator?: string;     // 主持人 bot id：每轮小结 + 最终结论
+  relay?: boolean;        // 自动接力（默认开）：点到谁谁接着说
+  maxTurns?: number;      // 发言硬顶（默认 12）。点名只决定谁先说，不缩短这个数
+  moderator?: string;     // 主持人 bot id：每轮小结 + 最终结论；插话没点人时由他回应
 }
 
 export class GroupRegistry {
@@ -42,7 +43,9 @@ export class GroupRegistry {
   }
 
   create(name: string, admin: string, members: string[] = []): Group {
-    const g: Group = { id: randomUUID(), name, admin, members: [...new Set(members)], createdAt: Date.now() };
+    const title = this.assertName(name);
+    const list = this.assertMembers(members);
+    const g: Group = { id: randomUUID(), name: title, admin, members: list, createdAt: Date.now() };
     this.groups.set(g.id, g);
     this.persist();
     return g;
@@ -51,7 +54,11 @@ export class GroupRegistry {
   join(groupId: string, botId: string) {
     const g = this.groups.get(groupId);
     if (!g) return null;
-    if (!g.members.includes(botId)) { g.members.push(botId); this.persist(); }
+    if (!g.members.includes(botId)) {
+      this.assertMembers([...g.members, botId]);
+      g.members.push(botId);
+      this.persist();
+    }
     return g;
   }
 
@@ -66,8 +73,8 @@ export class GroupRegistry {
   update(groupId: string, patch: { name?: string; members?: string[]; settings?: GroupSettings }) {
     const g = this.groups.get(groupId);
     if (!g) return null;
-    if (patch.name?.trim()) g.name = patch.name.trim();
-    if (patch.members) g.members = [...new Set(patch.members)];
+    if (patch.name?.trim()) g.name = this.assertName(patch.name, groupId);
+    if (patch.members) g.members = this.assertMembers(patch.members);
     if (patch.settings) g.settings = { ...g.settings, ...patch.settings };
     this.persist();
     return g;
@@ -89,6 +96,21 @@ export class GroupRegistry {
 
   members(groupId: string): string[] {
     return this.groups.get(groupId)?.members ?? [];
+  }
+
+  /** 群名在这份注册表里唯一，@ 和按名字发言才能对上同一间房 */
+  private assertName(name: string, exceptId?: string): string {
+    const title = name.trim();
+    if (!title) throw new Error("群聊需要名字");
+    const hit = [...this.groups.values()].find((g) => g.name === title && g.id !== exceptId);
+    if (hit) throw new Error(`已经有叫「${title}」的群聊`);
+    return title;
+  }
+
+  private assertMembers(members: string[]): string[] {
+    const list = [...new Set(members)];
+    if (list.length > GROUP_MAX_MEMBERS) throw new Error(`一个群最多 ${GROUP_MAX_MEMBERS} 个成员`);
+    return list;
   }
 
   /** @组名 → 群组对象（去掉 @ 前缀） */

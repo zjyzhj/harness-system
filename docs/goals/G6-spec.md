@@ -1,6 +1,6 @@
 # G6-SPEC — 打包·安全·分发
 
-> Goal：G6 · 状态：⏳ 待实现 · 上游：[AUDIT.md](../AUDIT.md)（缺口 #7）· 下游：[G6-design](./G6-design.md)
+> Goal：G6 · 状态：🟡 进行中（2026-11） · 上游：[AUDIT.md](../AUDIT.md)（缺口 #7）· 下游：[G6-design](./G6-design.md)
 > 目标：从「开发态可跑」到「可分发、可更新、密钥安全、行为可审计」的成熟 macOS 应用。
 
 ## 1. 问题陈述

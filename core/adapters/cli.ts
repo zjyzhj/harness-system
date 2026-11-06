@@ -66,10 +66,18 @@ async function cliAccount(name: CliName): Promise<string | undefined> {
  * 模型只取 provider.model：留空即沿用 CLI 本地配置（~/.codex/config.toml、claude/cursor 登录态等），
  * 不使用 bot.model，避免把 API 类模型名错误地塞给 CLI。
  */
-export async function completeCli(p: Provider, user: string, system?: string, history?: ChatMessage[], onDelta?: (text: string) => void, signal?: AbortSignal): Promise<string> {
+export async function completeCli(
+  p: Provider,
+  user: string,
+  system?: string,
+  history?: ChatMessage[],
+  onDelta?: (text: string) => void,
+  signal?: AbortSignal,
+  onThinking?: (text: string) => void,
+): Promise<string> {
   const cli = p.cliName ?? "claude";
   const prompt = buildPrompt(cli, user, system, history);
-  if (onDelta && cli !== "codex") return streamCli(cli, p, prompt, system, onDelta, signal);
+  if (onDelta && cli !== "codex") return streamCli(cli, p, prompt, system, onDelta, signal, onThinking);
   const outDir = cli === "codex" ? mkdtempSync(join(tmpdir(), "harness-codex-")) : undefined;
   const outFile = outDir ? join(outDir, "last.txt") : undefined;
   try {
@@ -94,10 +102,11 @@ export async function completeCli(p: Provider, user: string, system?: string, hi
  */
 export function streamCliArgs(cli: "claude" | "cursor", prompt: string, system?: string, model?: string): string[] {
   if (cli === "cursor") {
-    // ask：问答只读，不拉起写文件/shell 等重工具；workspace 指到空目录，避免索引 harness 仓库
+    // 不用 --mode ask：Ask 人设会拒调 Harness 工具、让用户切不存在的 Agent 模式。
+    // 隔离靠空沙箱 workspace + sandbox；改用户工程仍只经 Harness cli.agent / term.*。
     return [
       "-p", "--output-format", "stream-json", "--stream-partial-output",
-      "--trust", "--mode", "ask", "--workspace", cliWorkspaceDir(),
+      "--trust", "--sandbox", "enabled", "--workspace", cliWorkspaceDir(),
       ...(model ? ["--model", model] : []),
       prompt,
     ];
@@ -113,7 +122,7 @@ export function streamCliArgs(cli: "claude" | "cursor", prompt: string, system?:
 }
 
 /** 解析一行 stream-json，返回新增文本（cursor 最后会重发一次完整消息，需跳过）与最终结果 */
-export function parseStreamLine(cli: "claude" | "cursor", line: string, acc: string): { delta?: string; result?: string; error?: string } {
+export function parseStreamLine(cli: "claude" | "cursor", line: string, acc: string): { delta?: string; result?: string; error?: string; thinking?: string } {
   let e: any;
   try { e = JSON.parse(line); } catch { return {}; }
   if (e.type === "result") {
@@ -127,13 +136,30 @@ export function parseStreamLine(cli: "claude" | "cursor", line: string, acc: str
   }
   if (e.type === "assistant") {
     const text = (e.message?.content ?? []).filter((c: any) => c?.type === "text").map((c: any) => c.text ?? "").join("");
-    if (!text || (acc && text === acc)) return {};
-    return { delta: text };
+    if (!text) return {};
+    // --stream-partial-output 下 assistant 多为「本片增量」（春天/是/万物…）；
+    // 偶发也会推全文快照或收尾重发。两种都要吃对，不能把短增量当成回退快照丢掉。
+    if (acc && text === acc) return {};
+    if (acc && text.startsWith(acc)) return { delta: text.slice(acc.length) }; // 全文快照：取后缀
+    if (acc && acc.startsWith(text) && text.length < acc.length) return {}; // 更短回退快照
+    return { delta: text }; // 碎片增量：直接追加
+  }
+  // cursor 思考增量（与正文分流；无 text 的 completed 忽略）
+  if (e.type === "thinking" && e.subtype === "delta" && typeof e.text === "string" && e.text) {
+    return { thinking: e.text };
   }
   return {};
 }
 
-function streamCli(cli: "claude" | "cursor", p: Provider, prompt: string, system: string | undefined, onDelta: (t: string) => void, signal?: AbortSignal): Promise<string> {
+function streamCli(
+  cli: "claude" | "cursor",
+  p: Provider,
+  prompt: string,
+  system: string | undefined,
+  onDelta: (t: string) => void,
+  signal?: AbortSignal,
+  onThinking?: (t: string) => void,
+): Promise<string> {
   const args = streamCliArgs(cli, prompt, system, p.model);
   const env = mergeCliEnv(cli, p);
   if (cli === "claude") Object.assign(env, { CLAUDE_CODE_EFFORT_LEVEL: "low", CLAUDE_EFFORT: "low" });
@@ -155,6 +181,7 @@ function streamCli(cli: "claude" | "cursor", p: Provider, prompt: string, system
     const handle = (line: string) => {
       if (!line.trim()) return;
       const r = parseStreamLine(cli, line, acc);
+      if (r.thinking) onThinking?.(r.thinking);
       if (r.delta) { acc += r.delta; onDelta(r.delta); }
       if (r.result !== undefined) result = r.result;
       if (r.error) failure = r.error;
@@ -169,15 +196,27 @@ function streamCli(cli: "claude" | "cursor", p: Provider, prompt: string, system
     proc.on("close", (code) => {
       clearTimeout(to);
       handle(buf);
-      const text = (acc || result || "").trim();
-      if (failure && !text) return reject(new Error(formatCliError(cli, undefined, failure.slice(0, 300))));
-      if (code !== 0 && !text) return reject(new Error(formatCliError(cli, code, err.trim().slice(0, 300))));
-      if (!text) return reject(new Error(`${cli} CLI 返回为空`));
-      if (!acc && result) onDelta(result);
-      resolve(text);
+      // cursor 的 result 往往是干净全文；若流式快照拼坏了，以 result 为准并补上缺口
+      const final = (result || acc || "").trim();
+      const streamed = acc.trim();
+      if (failure && !final) return reject(new Error(formatCliError(cli, undefined, failure.slice(0, 300))));
+      if (code !== 0 && !final) return reject(new Error(formatCliError(cli, code ?? undefined, err.trim().slice(0, 300))));
+      if (!final) return reject(new Error(`${cli} CLI 返回为空`));
+      if (result && result.trim() && result.trim() !== streamed) {
+        if (!streamed) onDelta(result.trim());
+        else if (result.trim().startsWith(streamed)) onDelta(result.trim().slice(streamed.length));
+        // 分叉时上层仍拿 result；界面可能已有半段，会话落盘以 resolve 值为准由 runtime 用 r.text
+      }
+      resolve((result && result.trim()) ? result.trim() : final);
     });
   });
 }
+
+/** 对话用 cursor：纠正 CLI 默认人设，避免说 Ask/Agent、拒调 Harness 工具 */
+const CURSOR_CHAT_PREAMBLE =
+  "你是 Harness Bot 的对话脑（本机 cursor-agent 只负责生成回复）。本软件没有 Cursor IDE 的 Ask/Agent 切换，不要提、不要让用户去切。" +
+  "需要看目录、开终端、改用户工程时，按系统设定输出 Harness 工具块（fs.list / term.* / cli.agent 等）；空沙箱里的文件操作对用户工程无效。" +
+  "cli.agent 会另起可写的 Coding CLI，那才是改仓库的正路。";
 
 /** CLI 是单轮调用：把最近历史折叠进 prompt；claude 有独立 system 参数，其余 CLI 把 system 也拼进去 */
 function buildPrompt(cli: CliName, user: string, system?: string, history?: ChatMessage[]): string {
@@ -186,6 +225,7 @@ function buildPrompt(cli: CliName, user: string, system?: string, history?: Chat
   const sys = system && cli === "cursor" && system.length > 6000
     ? `${system.slice(0, 5500)}\n…（系统说明已截断以加快 CLI 响应）`
     : system;
+  if (cli === "cursor") parts.push(`[Harness]\n${CURSOR_CHAT_PREAMBLE}`);
   if (sys && cli !== "claude") parts.push(`[系统设定]\n${sys}`);
   const histN = cli === "cursor" ? 6 : 10;
   const hist = (history ?? []).slice(-histN).map((m) => `${m.role === "assistant" ? "助手" : "用户"}: ${contentText(m.content)}`);
@@ -262,7 +302,7 @@ export function cliArgs(cli: CliName, prompt: string, system?: string, model?: s
       return ["exec", "--skip-git-repo-check", "--sandbox", "read-only", ...(model ? ["-m", model] : []), ...(outFile ? ["-o", outFile] : []), prompt];
     case "cursor":
       return [
-        "-p", "--output-format", "text", "--trust", "--mode", "ask",
+        "-p", "--output-format", "text", "--trust", "--sandbox", "enabled",
         "--workspace", cliWorkspaceDir(),
         ...(model ? ["--model", model] : []),
         prompt,

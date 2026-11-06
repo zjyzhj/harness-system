@@ -1,11 +1,11 @@
 import { join } from "node:path";
 import { readJsonSafe, writeJsonAtomic } from "./atomic-fs";
-import { contentText, type ChatMessage, type OrchestrationPlan, type ScheduledTask, type Session } from "./types";
+import { contentText, type ChatMessage, type ScheduledTask, type Session } from "./types";
 
 /** 值得主动跟进的一件事：都来自软件里真实发生的状态，不是随机话术 */
 export interface ProactiveSignal {
   key: string;
-  kind: "choice" | "offer" | "plan" | "task";
+  kind: "choice" | "offer" | "task";
   botId: string;
   sessionId?: string;
   /** 给模型看的事实描述 */
@@ -17,11 +17,10 @@ const HOUR = 3600_000;
 const OFFER_RE = /需要我|要不要我|要我[^。！？\n]{0,20}吗|回复「继续」|还没做完|下一步可以|我可以继续/;
 const OWN_SESSION = /^s-/;
 
-/** 从会话 / 编排 / 定时任务里找出悬而未决的事 */
+/** 从会话 / 定时任务里找出悬而未决的事 */
 export function collectSignals(src: {
   sessions: Session[];
   messages: (sessionId: string) => ChatMessage[];
-  plans: OrchestrationPlan[];
   tasks: ScheduledTask[];
   masterId?: string;
   nameOf?: (botId: string) => string;
@@ -45,12 +44,6 @@ export function collectSignals(src: {
     if (age > 3 * HOUR && OFFER_RE.test(tailText)) {
       out.push({ key: `offer:${s.id}:${last.createdAt}`, kind: "offer", botId: s.botId, sessionId: s.id, at: last.createdAt, fact: `在会话「${s.title}」里最后说的是「${tailText.replace(/\s+/g, " ")}」，用户之后没有回复` });
     }
-  }
-  for (const p of src.plans) {
-    if (p.status !== "error" || !p.finishedAt || now - p.finishedAt > 24 * HOUR) continue;
-    const bad = p.stages.find((st) => st.status === "error");
-    if (bad?.error === "已取消") continue;
-    out.push({ key: `plan:${p.id}:${p.finishedAt}`, kind: "plan", botId: src.masterId ?? "", at: p.finishedAt, fact: `编排「${p.title}」没跑完${bad ? `，卡在「${src.nameOf?.(bad.botId) ?? bad.botId}」那一步：${(bad.error ?? "").slice(0, 80)}` : ""}，之后没有重跑` });
   }
   for (const t of src.tasks) {
     if (!t.enabled || !t.lastError || !t.lastRunAt || now - t.lastRunAt > 24 * HOUR) continue;

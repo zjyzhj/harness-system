@@ -1,13 +1,13 @@
 # G10 — CLI Agent 外包写代码（Bot 大脑 + 外部手脚）
 
-> Goal：G10 · 状态：Phase A ✅ · 日期：2026-10-31  
-> 原则：聊天 Provider **不改** Agent 模式；写仓库能力以工具 `cli.agent` **外包**给本机 Cursor / Claude / Codex CLI。  
+> Goal：G10 · 状态：Phase A ✅ · 延伸：Bot 通用终端底座（2026-11-01）  
+> 原则：聊天 Provider 负责理解与调度（Cursor 聊天**不再** `--mode ask`，靠空沙箱隔离，避免 Ask 人设拒工具）；**终端是 bot 能力**（默认 shell）；写用户仓库以 `cli.agent` **外包**。  
 > 对齐：Grok「Bot + Tools」切分；Harness 用本机 CLI 当 Tool，不复刻云电脑。
 
 ## 1. 动机
 
 Harness Bot 已有持久记忆、Vault、工具循环，但本机 `fs.write` / `bash` 只覆盖 workspace 白名单，扛不住大仓库改包。  
-本机已安装的 `cursor-agent` / `claude` / `codex` 具备完整 coding agent 能力，却在聊天适配器里被故意阉割（ask / 关 tools / read-only）。
+本机已安装的 `cursor-agent` / `claude` / `codex` 具备完整 coding agent 能力；聊天侧用空沙箱 / 关原生 tools 隔离，**写用户仓库**仍只走 `cli.agent`，避免聊天 CLI 直接改仓。
 
 目标：
 
@@ -27,20 +27,25 @@ Harness Bot 已有持久记忆、Vault、工具循环，但本机 `fs.write` / `
 
 ```text
 Bot (记忆 / 人设 / Vault)
-  └─ tool: cli.agent
-        ├─ resolve: which CLI + cwd + task
-        ├─ consent: cap cli:agent (strong)
-        ├─ spawn: cursor-agent | claude | codex  (agent / writable)
-        ├─ stream: 进度摘要 → 对话 / 可取消
-        └─ result: 文本摘要 + 可选变更提示 → 记忆可记 PROJECT_ROOT / 偏好 CLI
+  ├─ 工程目录 agentCwd / agentDirs
+  ├─ 终端槽（每目录一块 PTY）
+  │     program = shell | agent:<cli>
+  │     tools: term.open / read / write / keys / stop（cli.term 别名）
+  │     consent: term:open（目录前缀，与派工分开）
+  ├─ tool: cli.agent（上层：同槽切到 Coding CLI + 打 task）
+  │     consent: cli:agent (strong) — 已有终端 ≠ 已批准改仓库
+  └─ tool: bash.run（短命令 + 授权卡片；无常驻屏幕）
 ```
 
 | 对象 | 职责 |
 |------|------|
-| 聊天 Provider | 仍为 API 或 CLI-ask；负责理解与调度 |
-| `cli.agent` | 唯一写大仓库的外包入口（本 Goal） |
+| 聊天 Provider | API 或本机 CLI（Cursor：无 ask 人设 + 空沙箱；Claude：关原生 tools）；负责理解与调度 |
+| 终端底座 | 默认 shell；界面 xterm 与 Bot 读同一屏；不依赖本机是否装好 Coding CLI |
+| `cli.agent` | 唯一写大仓库的外包入口；把该目录终端切到 agent 程序 |
 | `cwd` | 工程根；须显式传入或来自 bot 已批准的绑定 |
-| Consent `cli:agent` | 与 `bash:dev` 分离；默认强确认 |
+| Consent `term:open` | 打开 shell 终端的目录信任 |
+| Consent `cli:agent` | 与 `bash:*` / `term:open` 分离；默认强确认 |
+| `bash.run` | 短命令；与终端并存，不接到 xterm |
 
 ## 4. 必须想清楚的设计点
 
@@ -49,11 +54,12 @@ Bot (记忆 / 人设 / Vault)
 | | 聊天 CLI Provider | `cli.agent` |
 |--|-------------------|-------------|
 | 何时 | 每轮补全 | 模型主动调工具 |
-| 模式 | ask / tools 关 / read-only | agent / 可写 |
-| cwd | 空沙箱（防扫 harness 仓） | 用户工程绝对路径 |
+| 模式 | Cursor：**不** `--mode ask`（Ask 会拒 Harness 工具）；`--sandbox enabled` + 空 workspace。Claude：`--tools ""` | agent / 可写用户工程 |
+| cwd | 空沙箱（防扫 harness 仓；原生写文件无意义） | 用户工程绝对路径 |
 | 超时 | ~3 min | 更长（默认 15–30 min，可配） |
 
-**定案**：两套入口、两套参数构造，禁止复用 `completeCli` 的 ask 参数。新模块 `core/cli-agent.ts`。
+**定案**：两套入口、两套参数构造，禁止复用 `completeCli` 的聊天参数去派工。模块 `core/cli-agent.ts`。  
+**2026-11-01**：取消对话 Cursor 的 `--mode ask`——实战里模型会自称 Ask、拒 `cli.agent`、让用户切不存在的 Agent 模式。
 
 ### 4.2 三家 CLI 的 Agent 参数（实现时以本机 `--help` 再核）
 
@@ -72,7 +78,10 @@ Bot (记忆 / 人设 / Vault)
 3. **允许根（Allowlist）**：
    - Phase A：每次强确认卡片展示完整 `cwd`；确认即「本次允许该目录」。
    - Phase B：Consent 可「总是允许此 bot 在此前缀下派工」（持久化 path prefix grants）。
-4. **与 `allowedRoots`（fs/bash）解耦**：`cli.agent` 不扩大 Harness `fs.write` 白名单；外包进程自己的权限模型。
+4. **工程名单与 fs 权限（2026-11-01 再修订）**：
+   - **`fs.list` / `fs.read`：本机任意可读路径**（桌面/下载等），**不再**用工程名单当读白名单；看结构不必 `bash ls`，也不要因「不在名单」绕 MCP。
+   - 【工程目录】/`PROJECT_ROOT` = **终端槽位 + 派工默认 cwd**，不是浏览门槛。
+   - **`fs.write` 仍只限 bot 工作区**；大仓库改文件走 `cli.agent`，不因「选目录 / 开终端」扩大 Harness 写面。
 
 ### 4.4 授权与审计
 
@@ -172,7 +181,7 @@ cap: "cli:agent"
 | 文件 | 职责 |
 |------|------|
 | `core/cli-agent.ts` | 参数构造、spawn、stream 解析、超时/取消、结果裁剪 |
-| `core/adapters/cli.ts` | 保持聊天 ask；**不**把 agent 参数混进去；可复用 `detectCli` / bin 表 |
+| `core/adapters/cli.ts` | 聊天 Cursor：空沙箱 + sandbox，**无** `--mode ask`；**不**把派工 agent 参数混进聊天；可复用 `detectCli` / bin 表 |
 | `core/bot-runtime.ts` | 注册 `cli.agent`；busy 锁；consent |
 | `core/consent-center.ts` | 增加 `cli:agent` 标签 |
 | `app/main` / 审计 UI | 如有能力矩阵页则展示新 cap |
@@ -189,7 +198,36 @@ cap: "cli:agent"
 | **加固** ✅ | 进程组终止；目录信任二次派工仍可见；`ready`；rule 注入；进度；bin 单表 | [`core/cli-agent.ts`](../../core/cli-agent.ts) |
 | **地基** ✅ | 无人值守拒绝派工；无 consent 拒绝；不把 `{{secret}}` 填进外部 CLI；spawn 剥劫持 env；绝对路径；过浅前缀不能长期信任 | 同上 |
 | **连续性** ✅ | 同 CLI 同目录续自己的会话号；续不上或换 CLI 时用工作线新开一次；聊天只带 ≤400 字摘要；偏好 auto/always/once | [`core/coding-thread.ts`](../../core/coding-thread.ts) |
+| **编码终端** ✅ | 一个工程目录一块真终端。一个 Bot 可以同时留着几块（上限 4，多出来关掉最久没用的空闲终端），看着的是当前这块。换目录不关掉别的工程。打开方式与平时执行 CLI 相同。界面、Bot 易变上下文、cli.agent / cli.term 共用正在看的这一屏。用户和 Bot 都能继续输入。同一时刻只有一块在忙。空闲 30 分钟、这块换了 CLI、结束这块、退出应用会关掉对应终端。可靠性：缺 python3/桥接可读失败；starting 超时收尸；stop 后 SIGKILL 兜底；`stopAll` 清槽 | [`core/coding-presence.ts`](../../core/coding-presence.ts)、[`assets/pty-bridge.py`](../../assets/pty-bridge.py) |
 | **D 衔接** | 与 PROJECT_ROOT / 专 bot 记忆模板；文档 | 改包 bot 开箱话术 |
+
+## 7.1 产品契约：三条路径 + 何时亮终端面板（2026-11-01）
+
+### 基层硬约定（审查后强制）
+
+1. **空口进 Cursor 无效**：`actionGrounding`（与深度思考 `selfCheck` 同族）把本轮工具、此前工具、终端 presence（含冷 gaze 下其它活槽）交给快模型对照回复判决；不符则撤回并打回。**不靠中文词表**。闲聊/过短收尾可跳过核对。点「打开」≠ 进 Cursor；进 Coding CLI 必须真调 `cli.agent`（或 presence 已是活 agent）。
+2. **打开必有活屏或可见失败**：`coding:open` 校验路径；失败 `phase=exited`（禁止 starting 僵尸）。「打开」撞上活着的 Coding CLI：**展示现有 agent 屏 + notice**，不画成失败空屏，也不偷偷换成 shell。
+3. **对话脑 ≠ 派工手脚**：详情「对话模型」与「派工 CLI」分栏；聊天 Cursor 无 `--mode ask`，靠空沙箱隔离。
+4. **两级 ui.ask（路径 → CLI）**：意图含糊时必须出路径卡（只看文件 / 打开终端 shell / 进 Coding CLI）；选进 CLI 且 ≥2 家已装、未点名、无 `agentCli` 时再出 CLI 卡。清晰意图禁止多此一举出卡。面板「打开」仍只起 shell。
+
+## 7.1b 三条路径表
+
+对外三条路径（工具名对用户隐形）；意图卡 options 与此对齐：
+
+| 路径 | 用户看到 | Bot 路径 | 终端面板 |
+|------|----------|----------|----------|
+| **看/找/交文件** | 对话卡片、图片/文件 | `fs.list` / `fs.read` / `file.send` | **不亮** |
+| **交互现场（shell）** | 终端黑底 + 对话 | `term.open` / 点「打开」 | **抢焦点亮起** |
+| **派工改仓（Coding CLI）** | 终端黑底 + 对话 | `cli.agent` | **抢焦点亮起**（含复用进入 `busy` 且面板已收起） |
+
+硬规则：
+
+1. **`bash.run` / `fs.*` / `file.send` 永不自动打开终端面板**（短命令只有授权卡片）。
+2. **抢焦点**：`term.open`、用户点「打开」、`cli.agent`→`starting`，以及 **复用 agent 进入 `busy` 且面板已收起**。
+3. `term.read` / 已有活终端的后台刷新：可更新角标；用户主动收起后，非上述抢焦点条件**不**强弹。
+4. 「工程目录」名单 = **终端槽位键 + 派工默认 cwd**；≠ 浏览白名单；≠ 已批准改仓库（仍要 `cli:agent`）；≠ `fs.write`。
+5. 相册/下载/桌面等浏览：直接 `fs.list` / `fs.read`；**不要为浏览去 `term.open`**，也不要暗示「必须先加工程目录」。
+6. 冷 gaze（视线在未开槽目录）：UI `snapshot` 可为 null；提示词 / grounding 用 `groundingSnapshot` 带上其它活槽。
 
 ## 8. 风险
 
@@ -205,7 +243,7 @@ cap: "cli:agent"
 1. Bot 调 `cli.agent` 且用户批准后，在指定 git 仓库内出现预期文件变更（人工或测例用 temp repo）。
 2. `cwd` 指向 `~/.harness-bot` 或 `/` → 工具拒绝。
 3. 用户点停止 → 子进程结束，工具返回「已取消」。
-4. 聊天用 Cursor Provider 仍为 ask，不写仓库。
+4. 聊天用 Cursor Provider 不写用户仓库（空沙箱）；派工 `cli.agent` 才改工程。
 5. 审计一条 `cli:agent` 记录含 cwd/cli/ok。
 
 ## 10. 与后续「专 bot + skill 包」的接口预留

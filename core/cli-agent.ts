@@ -6,7 +6,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { isAbsolute, resolve, sep } from "node:path";
+import { isAbsolute, join, resolve, sep } from "node:path";
 import { randomUUID } from "node:crypto";
 import { strippedCliEnv } from "./adapters/cli";
 import {
@@ -65,6 +65,10 @@ export interface CliAgentResult {
   resumedThenFresh?: boolean;
   /** 退出码非 0 且输出像是会话不存在 */
   resumeMissing?: boolean;
+  /** 这次结束后进程还在（同目录下次不用重新启动） */
+  keptAlive?: boolean;
+  /** 这次没有新起进程，任务送进了已经空闲的常驻进程 */
+  reused?: boolean;
 }
 
 export class CliAgentPathError extends Error {
@@ -74,10 +78,17 @@ export class CliAgentPathError extends Error {
   }
 }
 
+/** `~/工程` 展开成家目录下的绝对路径。`~别人` 不展开 */
+function expandTilde(text: string, home: string): string {
+  if (text === "~") return home;
+  if (text.startsWith("~/")) return join(home, text.slice(2));
+  return text;
+}
+
 /** 解析并校验工程根：拒绝 /、家目录本身、Harness 数据目录 */
 export function resolveAgentCwd(raw: string, opts?: { home?: string; harnessHome?: string }): string {
   const home = opts?.home ?? homedir();
-  const text = raw.trim();
+  const text = expandTilde(raw.trim(), home);
   if (!text) throw new CliAgentPathError("需要工程目录 cwd（或先 env.set PROJECT_ROOT）");
   if (!isAbsolute(text)) throw new CliAgentPathError("工程目录必须是绝对路径，不要用相对路径");
   const abs = resolve(text);
@@ -127,7 +138,10 @@ export function buildAgentPrompt(req: Pick<CliAgentRequest, "task" | "cwd" | "bo
   if (req.brief?.trim()) parts.push(`【进行中】\n${req.brief.trim().slice(0, 4096)}`);
   parts.push(`【任务】${task}`);
   if (req.constraints?.trim()) parts.push(`【约束】${req.constraints.trim().slice(0, 2000)}`);
-  parts.push("【交付】改完后用简洁中文说明改了哪些文件、怎么验证；不要索要 Harness 内部工具或向用户要 API Key。");
+  parts.push(
+    "【交付】改完后用简洁中文说明改了哪些文件、怎么验证；不要索要 Harness 内部工具或向用户要 API Key。",
+    "【执行】本派工会话已关闭 Bash 沙箱限制；需要读写工程外路径、起本机面板时直接做，不要空转「沙箱跑不通再换路」的说辞。",
+  );
   return parts.join("\n");
 }
 

@@ -24,8 +24,13 @@ export interface LLMParser {
 export class AgentRegistry {
   constructor(private store: Store, private parser?: LLMParser) {}
 
+  /** 只解析、不落盘——创建页预填用 */
+  async draftFromText(text: string): Promise<ParsedCreateRequest> {
+    return (this.parser && (await this.parser.parseCreate(text).catch(() => null))) || ruleParse(text);
+  }
+
   async createBotFromText(text: string, opts?: { defaultProviderId?: string; petEnabled?: boolean }): Promise<Bot> {
-    const parsed = (this.parser && (await this.parser.parseCreate(text).catch(() => null))) || ruleParse(text);
+    const parsed = await this.draftFromText(text);
     const providerId = parsed.providerId || opts?.defaultProviderId || this.store.getDefaultProvider()?.id || "default";
     const bot: Bot = {
       id: randomUUID(),

@@ -4,6 +4,7 @@
  */
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { extname, join } from "node:path";
+import { safeFetch } from "./web-search";
 
 export interface ImageGenConfig {
   baseUrl: string;
@@ -41,7 +42,8 @@ async function saveImages(data: any, outDir: string, prefix: string): Promise<st
     let buf: Buffer;
     if (it.b64_json) buf = Buffer.from(it.b64_json, "base64");
     else if (it.url) {
-      const r = await apiFetch(it.url, { signal: AbortSignal.timeout(60_000) });
+      // 跟链下载走 safeFetch，防恶意接口 302 进内网
+      const r = await safeFetch(String(it.url), { signal: AbortSignal.timeout(60_000) });
       if (!r.ok) throw new Error(`下载生成的图片失败 HTTP ${r.status}`);
       buf = Buffer.from(await r.arrayBuffer());
     } else continue;

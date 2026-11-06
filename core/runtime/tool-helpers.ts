@@ -1,6 +1,6 @@
 // 内置工具的纯实现：定时任务、file.send、ui.*
 import type { Bot, ContentBlock } from "../types";
-import type { Scheduler } from "../scheduler";
+import { describeCron, type Scheduler } from "../scheduler";
 import type { SecretStore } from "../secret-store";
 import { existsSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
@@ -43,42 +43,57 @@ export function parseRunAt(args: Record<string, unknown>, now = Date.now()): num
   return Number.isFinite(ts) ? ts : null;
 }
 
-export function runTaskTool(tasks: Pick<Scheduler, "create" | "listForBot" | "delete">, bot: Bot, tool: string, args: Record<string, unknown>, sessionId?: string): string {
+function routineBlock(t: { id: string; name: string; cron: string; kind?: string; enabled: boolean; nextRunAt?: number; timezone?: string }): ContentBlock {
+  const when = t.kind === "once"
+    ? (t.nextRunAt ? `一次性 · ${formatNow(new Date(t.nextRunAt))}` : "一次性")
+    : `${describeCron(t.cron)}${t.timezone ? ` · ${t.timezone}` : ""}`;
+  return { type: "routine", taskId: t.id, name: t.name, when, enabled: t.enabled };
+}
+
+export function runTaskTool(tasks: Pick<Scheduler, "create" | "listForBot" | "delete">, bot: Bot, tool: string, args: Record<string, unknown>, sessionId?: string): ToolOutcome {
   const fmt = (ts?: number) => (ts ? formatNow(new Date(ts)) : "—");
   if (tool === "task.list") {
     const list = tasks.listForBot(bot.id);
-    return list.length
-      ? list.map((x) => `- ${x.name}（id=${x.id.slice(0, 8)}，${x.kind === "once" ? "一次性" : x.cron}，${x.enabled ? "启用" : "停用"}，下次 ${fmt(x.nextRunAt)}）`).join("\n")
-      : "（没有定时任务）";
+    return {
+      output: list.length
+        ? list.map((x) => `- ${x.name}（id=${x.id.slice(0, 8)}，${x.kind === "once" ? "一次性" : x.cron}，${x.enabled ? "启用" : "停用"}，下次 ${fmt(x.nextRunAt)}）`).join("\n")
+        : "（没有定时任务）",
+    };
   }
   if (tool === "task.delete") {
     const key = String(args.id ?? args.name ?? "").trim();
-    if (!key) return "task.delete 需要 id 或 name";
+    if (!key) return { output: "task.delete 需要 id 或 name" };
     const list = tasks.listForBot(bot.id);
     const exact = list.filter((x) => x.id === key || x.name === key);
     if (exact.length === 1) {
       tasks.delete(exact[0].id);
-      return `已删除任务「${exact[0].name}」`;
+      return { output: `已删除任务「${exact[0].name}」` };
     }
     if (exact.length > 1) {
-      return `有 ${exact.length} 个叫「${key}」的任务，请用 id 指定：\n${exact.map((x) => `- ${x.name}（id=${x.id.slice(0, 8)}）`).join("\n")}`;
+      return { output: `有 ${exact.length} 个叫「${key}」的任务，请用 id 指定：\n${exact.map((x) => `- ${x.name}（id=${x.id.slice(0, 8)}）`).join("\n")}` };
     }
     // 短前缀太容易误伤；task.list 展示的是 8 位前缀
     if (key.length >= 8) {
       const prefix = list.filter((x) => x.id.startsWith(key));
       if (prefix.length === 1) {
         tasks.delete(prefix[0].id);
-        return `已删除任务「${prefix[0].name}」`;
+        return { output: `已删除任务「${prefix[0].name}」` };
       }
       if (prefix.length > 1) {
-        return `id 前缀「${key}」匹配到 ${prefix.length} 个任务，请写更长一点：\n${prefix.map((x) => `- ${x.name}（id=${x.id.slice(0, 8)}）`).join("\n")}`;
+        return { output: `id 前缀「${key}」匹配到 ${prefix.length} 个任务，请写更长一点：\n${prefix.map((x) => `- ${x.name}（id=${x.id.slice(0, 8)}）`).join("\n")}` };
       }
     }
-    return `找不到任务「${key}」`;
+    return { output: `找不到任务「${key}」` };
   }
   const name = String(args.name ?? args.title ?? "定时任务");
   const prompt = String(args.prompt ?? args.task ?? name);
   const runAt = parseRunAt(args);
+  // 对齐 Grok：定时默认无 Webhook；显式 webhook/inbound 时默认仅 Webhook（schedule:false）；要兼定时须 schedule:true
+  const wantWebhook = args.webhook === true || args.webhook === "true" || args.inbound === true;
+  const scheduleFinal = wantWebhook
+    ? (args.schedule === true || args.schedule === "true")
+    : true;
+  const timezone = typeof args.timezone === "string" ? args.timezone : undefined;
   if (runAt) {
     // runPrompt 默认 true；notifyPet 默认 true。纯气泡闹钟：runPrompt:false
     const runPrompt = !(args.runPrompt === false || args.runPrompt === "false" || args.alarmOnly === true);
@@ -86,17 +101,31 @@ export function runTaskTool(tasks: Pick<Scheduler, "create" | "listForBot" | "de
     const t = tasks.create({
       botId: bot.id, name, prompt, cron: "* * * * *", kind: "once", alarmAt: runAt,
       notifyPet, runPrompt, deleteAfterRun: args.keep !== true, sessionId,
+      webhook: wantWebhook, schedule: scheduleFinal, timezone,
     });
     const mode = runPrompt ? "到点执行" : "到点仅宠物提醒";
-    return `已创建一次性任务「${t.name}」，将在 ${fmt(t.nextRunAt)} ${mode}${t.deleteAfterRun ? "，执行后自动删除" : ""}`;
+    const hook = t.webhookToken ? "；入站 Webhook 已开通，请用户到例行面板点 🪝 复制触发 URL（令牌勿写入聊天）" : "";
+    const output = `已创建一次性任务「${t.name}」，将在 ${fmt(t.nextRunAt)} ${mode}${t.deleteAfterRun ? "，执行后自动删除" : ""}${hook}`;
+    return { output, blocks: [routineBlock(t)] };
   }
-  const cron = String(args.cron ?? "");
-  if (!cron) return "task.create 需要 cron（周期任务）或 at / in（一次性任务）";
+  const cron = String(args.cron ?? (wantWebhook ? "0 0 1 1 *" : ""));
+  if (!cron) return { output: "task.create 需要 cron（周期任务）或 at / in（一次性任务）；纯 Webhook 可设 webhook:true" };
   try {
-    const t = tasks.create({ botId: bot.id, name, prompt, cron, sessionId });
-    return `已创建周期任务「${t.name}」（${cron}），下次 ${fmt(t.nextRunAt)}`;
+    const t = tasks.create({
+      botId: bot.id, name, prompt, cron, sessionId,
+      webhook: wantWebhook, schedule: scheduleFinal, timezone,
+    });
+    const hook = t.webhookToken
+      ? (t.schedule === false
+        ? "；仅 Webhook 触发（不到点跑），请用户到例行面板 🪝 复制 URL"
+        : "；已兼开通 Webhook，请用户到例行面板 🪝 复制 URL")
+      : "";
+    const output = t.schedule === false && t.webhookToken
+      ? `已创建 Webhook 例行「${t.name}」${hook}`
+      : `已创建周期任务「${t.name}」（${describeCron(cron)}${t.timezone ? ` · ${t.timezone}` : ""}），下次 ${fmt(t.nextRunAt)}${hook}`;
+    return { output, blocks: [routineBlock(t)] };
   } catch (e) {
-    return `创建失败：${e instanceof Error ? e.message : String(e)}`;
+    return { output: `创建失败：${e instanceof Error ? e.message : String(e)}` };
   }
 }
 
@@ -174,11 +203,10 @@ export function uiTool(tool: string, args: Record<string, unknown>, secrets?: Se
   if (tool === "ui.secret") {
     const name = String(args.name ?? "").trim().replace(/[^\w.\-]/g, "_");
     if (!name) return { output: "ui.secret 需要 name（英文标识，如 FEISHU_APP_SECRET）" };
-    if (botId && secrets?.ownedByOther(name, botId)) return { output: `密钥名 ${name} 已被另一个 bot 私用，换一个名字（如 ${name}_2）` };
-    if (secrets?.has(name) && args.overwrite !== true) return { output: `密钥 ${name} 已保存过，bash.run 里写 $${name}、其它工具参数里写 {{secret:${name}}} 直接用；要换新值传 overwrite:true` };
+    if (secrets?.has(name) && args.overwrite !== true) return { output: `密钥 ${name} 已保存过（账号级，所有 bot 都能用）。bash.run 写 $${name}、其它工具写 {{secret:${name}}}；要换新值传 overwrite:true` };
     const note = args.note ? String(args.note).slice(0, 200) : undefined;
-    const shared = args.scope === "all" || args.scope === "global";
-    return { output: "已向用户展示加密输入框，等待用户填写（本轮结束）", blocks: [{ type: "secret", name, label: String(args.label ?? name), ...(note ? { note } : {}), ...(shared ? { scope: "all" as const } : {}) }], halt: true };
+    // 账号级保险库：一律 scope all（Grok Vault）；scope 参数保留兼容，无「锁给单个 bot」
+    return { output: "已向用户展示加密输入框，等待用户填写（本轮结束）", blocks: [{ type: "secret", name, label: String(args.label ?? name), ...(note ? { note } : {}), scope: "all" as const }], halt: true };
   }
   if (tool === "ui.form") {
     const title = String(args.title ?? args.question ?? "请填写").trim();

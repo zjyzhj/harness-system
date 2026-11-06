@@ -57,4 +57,26 @@ describe("会话操作", () => {
     const last = store.listMessages("s-stop").at(-1)!;
     expect(contentText(last.content)).toContain("已停止生成");
   });
+
+  test("退出时留下已经写出的回复", async () => {
+    const providers = new SlowProvider(store);
+    providers.addProvider({ kind: "openai-compat", name: "默认", baseUrl: "https://fake/v1", apiKey: "x", model: "m", isDefault: true });
+    const rt = new BotRuntime({ store, providers, memory: new MemorySystem(home), skills: new SkillRegistry(join(home, "skills")) });
+    const ac = new AbortController();
+    const pending = rt.handleStream({ bot, from: "user", text: "请开始写", sessionId: "s-quit" }, { signal: ac.signal, onBlock: () => {} });
+    await new Promise((r) => setTimeout(r, 40));
+    rt.flushInflight();
+    const texts = store.listMessages("s-quit").map((m) => contentText(m.content));
+    expect(texts[0]).toContain("请开始写");
+    expect(texts.at(-1)).toContain("写到一半");
+    expect(texts.at(-1)).toContain("回复未完成，应用已退出");
+    const reopened = new Store(home);
+    const again = reopened.listMessages("s-quit").map((m) => contentText(m.content));
+    expect(again.join("\n")).toContain("写到一半");
+    expect(again.filter((t) => t.includes("写到一半")).length).toBe(1);
+    reopened.close();
+    ac.abort();
+    await pending;
+    expect(store.listMessages("s-quit").filter((m) => m.role === "assistant")).toHaveLength(1);
+  });
 });

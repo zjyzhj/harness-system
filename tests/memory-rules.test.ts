@@ -14,9 +14,9 @@ describe("从用户原话识别要记的东西", () => {
     expect(memoryFromText("定下规范：你是主控")).toEqual([{ kind: "rule", scope: "bot", content: "用户定下的规范：你是主控" }]);
     expect(memoryFromText("以后都先给结论再展开")[0]).toMatchObject({ kind: "rule" });
     expect(memoryFromText("从现在起所有助手都用中文回答")[0]).toMatchObject({ kind: "rule", scope: "all" });
-    expect(memoryFromText("记住：我喜欢喝美式")).toEqual([{ kind: "fact", scope: "bot", content: "用户喜欢喝美式" }]);
+    expect(memoryFromText("记住：我喜欢喝美式")).toEqual([{ kind: "fact", scope: "all", content: "用户喜欢喝美式" }]);
     expect(memoryFromText("好，帮我记住：回复别超过三段")[0]).toMatchObject({ kind: "rule", content: "回复别超过三段" });
-    expect(memoryFromText("我叫小周")[0]).toMatchObject({ kind: "fact", content: "用户叫小周" });
+    expect(memoryFromText("我叫小周")[0]).toMatchObject({ kind: "fact", scope: "all", content: "用户叫小周" });
   });
 
   test("「以后 / 从现在开始」用在一次性的话里不算规范", () => {

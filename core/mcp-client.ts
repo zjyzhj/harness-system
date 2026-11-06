@@ -2,6 +2,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { homedir } from "node:os";
 import { delimiter, join } from "node:path";
 import type { ToolInvocation } from "./types";
+import { isPrivateHost, safeFetch } from "./web-search";
 
 export interface McpServerConfig {
   id: string;
@@ -178,10 +179,22 @@ export class McpClient {
 
   // ---- Streamable HTTP ----
   private async httpPost(s: McpServerConfig, body: unknown, session: string | null): Promise<{ res: Response; data: any }> {
-    const res = await fetch(s.url!, {
+    const url = s.url!;
+    let allowPrivate = false;
+    try {
+      allowPrivate = await isPrivateHost(new URL(url).hostname);
+    } catch { /* 无效 URL 交给 safeFetch */ }
+    const res = await safeFetch(url, {
       method: "POST",
-      headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream", ...(session ? { "Mcp-Session-Id": session } : {}), ...(s.headers ? this.fillSecrets(s.headers) : {}) },
+      allowPrivate,
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json, text/event-stream",
+        ...(session ? { "Mcp-Session-Id": session } : {}),
+        ...(s.headers ? this.fillSecrets(s.headers) : {}),
+      },
       body: JSON.stringify(body),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
     if (!res.ok && res.status !== 202) throw new Error(`HTTP ${res.status}${res.statusText ? ` ${res.statusText}` : ""}`);
     const text = await res.text();

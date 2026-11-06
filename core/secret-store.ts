@@ -10,9 +10,12 @@ export interface SecretInfo { name: string; label?: string; note?: string; saved
 type SecretEntry = Omit<SecretInfo, "name"> & { value: string };
 
 /**
- * 本机密钥：bot 用 ui.secret 请用户填写，值加密落盘（Electron safeStorage → 系统钥匙串）。
- * 模型只知道名字，工具参数里写 {{secret:名字}}，执行前才替换成真值，输出里再打码。
- * botId 为空 = 所有 bot 共用；否则只有该 bot 能看到和使用。
+ * 本机密钥（对齐 Grok Vault：账号级共用）。
+ * bot 用 ui.secret 请用户填写，值加密落盘（Electron safeStorage → 系统钥匙串）。
+ * 模型只知道名字；工具参数写 {{secret:名字}}，执行前才替换，输出再打码。
+ *
+ * 本机所有 bot 都能看到和使用——不能锁给单个 bot（Grok：Vault covers whole account）。
+ * savedBy / 历史 botId 只作「谁收录」归因；访问不再按 botId 过滤。
  */
 export class SecretStore {
   private file: string;
@@ -22,40 +25,71 @@ export class SecretStore {
     this.file = join(home, "secrets.json");
     const data = readJsonSafe<SecretStore["data"]>(this.file, {});
     this.data = data && typeof data === "object" && !Array.isArray(data) ? data : {};
+    this.migrateAccountVault();
+  }
+
+  /** 旧版「仅某 bot」ACL → 账号级；落盘一次 */
+  private migrateAccountVault() {
+    let dirty = false;
+    for (const e of Object.values(this.data)) {
+      if (e.botId) {
+        delete e.botId;
+        dirty = true;
+      }
+    }
+    if (dirty) this.persist();
   }
 
   private persist() {
     writeJsonAtomic(this.file, this.data, { mode: 0o600 });
   }
 
-  private visible(e: SecretEntry | undefined, botId?: string): e is SecretEntry {
-    return !!e && (botId === undefined || !e.botId || e.botId === botId);
-  }
-
-  /** meta.botId：undefined 保持原范围，null 改为共用 */
+  /** meta.botId 忽略（兼容旧调用）；一律账号级 */
   set(name: string, value: string, label?: string, meta?: { note?: string; savedBy?: string; botId?: string | null }) {
     const prev = this.data[name];
-    const botId = meta?.botId === undefined ? prev?.botId : meta.botId ?? undefined;
-    this.data[name] = { value: this.cipher.encrypt(value), label: label ?? prev?.label, note: meta?.note ?? prev?.note, savedBy: meta?.savedBy ?? prev?.savedBy, botId, savedAt: Date.now() };
+    this.data[name] = {
+      value: this.cipher.encrypt(value),
+      label: label ?? prev?.label,
+      note: meta?.note ?? prev?.note,
+      savedBy: meta?.savedBy ?? prev?.savedBy,
+      savedAt: Date.now(),
+    };
     this.persist();
   }
 
-  setScope(name: string, botId: string | null): boolean {
+  /** @deprecated 账号级保险库不再按 bot 隔离；调用等价于清掉历史 botId 标记 */
+  setScope(name: string, _botId: string | null): boolean {
     const e = this.data[name];
     if (!e) return false;
-    if (botId) e.botId = botId; else delete e.botId;
-    this.persist();
+    if (e.botId) {
+      delete e.botId;
+      this.persist();
+    }
     return true;
   }
 
-  /** 名称在命令里以 $NAME / ${NAME} 出现、且这个 bot 能用的密钥 */
-  referencedIn(command: string, botId?: string): string[] {
-    return Object.keys(this.data).filter((n) => this.visible(this.data[n], botId) && /^[A-Za-z_]\w*$/.test(n) && new RegExp(`\\$\\{?${n}\\b`).test(command));
+  /**
+   * 主动共用（兼容旧私有标记）：清掉 botId。
+   * 账号级下访问本就全员可用；本工具主要统一界面归因，任意 bot 可调。
+   */
+  share(name: string, _byBotId: string): { ok: true } | { ok: false; error: string } {
+    const e = this.data[name];
+    if (!e) return { ok: false, error: `没有密钥 ${name}` };
+    if (e.botId) {
+      delete e.botId;
+      this.persist();
+    }
+    return { ok: true };
   }
 
-  get(name: string, botId?: string): string | undefined {
+  /** 命令里出现的 $NAME / ${NAME} */
+  referencedIn(command: string, _botId?: string): string[] {
+    return Object.keys(this.data).filter((n) => /^[A-Za-z_]\w*$/.test(n) && new RegExp(`\\$\\{?${n}\\b`).test(command));
+  }
+
+  get(name: string, _botId?: string): string | undefined {
     const e = this.data[name];
-    if (!this.visible(e, botId)) return undefined;
+    if (!e) return undefined;
     try { return this.cipher.decrypt(e.value); } catch { return undefined; }
   }
 
@@ -63,10 +97,16 @@ export class SecretStore {
     return name in this.data;
   }
 
-  /** 名字已被别的 bot 私有占用 */
-  ownedByOther(name: string, botId: string): boolean {
+  /** @deprecated 账号级下名字全局；恒 false（保留调用点不炸） */
+  ownedByOther(_name: string, _botId: string): boolean {
+    return false;
+  }
+
+  /** 元数据（不含真值） */
+  meta(name: string): SecretInfo | undefined {
     const e = this.data[name];
-    return !!e?.botId && e.botId !== botId;
+    if (!e) return undefined;
+    return { name, label: e.label, note: e.note, savedBy: e.savedBy, botId: e.botId, savedAt: e.savedAt };
   }
 
   remove(name: string) {
@@ -74,21 +114,27 @@ export class SecretStore {
     this.persist();
   }
 
-  list(botId?: string): SecretInfo[] {
-    return Object.entries(this.data)
-      .filter(([, e]) => this.visible(e, botId))
-      .map(([name, e]) => ({ name, label: e.label, note: e.note, savedBy: e.savedBy, botId: e.botId, savedAt: e.savedAt }));
+  list(_botId?: string): SecretInfo[] {
+    return Object.entries(this.data).map(([name, e]) => ({
+      name, label: e.label, note: e.note, savedBy: e.savedBy, botId: e.botId, savedAt: e.savedAt,
+    }));
   }
 
-  /** 把参数里的 {{secret:名字}} 换成真值；缺失（或这个 bot 无权使用）的名字返回给调用方提示 */
-  fill(args: Record<string, unknown>, botId?: string): { args: Record<string, unknown>; missing: string[]; used: string[] } {
+  /**
+   * 把参数里的 {{secret:名字}} 换成真值。
+   * missing = 库里没有；denied 保留字段（账号级下恒为空）。
+   */
+  fill(args: Record<string, unknown>, botId?: string): { args: Record<string, unknown>; missing: string[]; denied: string[]; used: string[] } {
     const missing = new Set<string>();
     const used = new Set<string>();
     const walk = (v: unknown): unknown => {
       if (typeof v === "string") {
         return v.replace(/\{\{\s*secret:([\w.\-]+)\s*\}\}/g, (_m, name: string) => {
           const val = this.get(name, botId);
-          if (val === undefined) { missing.add(name); return _m; }
+          if (val === undefined) {
+            missing.add(name);
+            return _m;
+          }
           used.add(name);
           return val;
         });
@@ -97,7 +143,7 @@ export class SecretStore {
       if (v && typeof v === "object") return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, walk(x)]));
       return v;
     };
-    return { args: walk(args) as Record<string, unknown>, missing: [...missing], used: [...used] };
+    return { args: walk(args) as Record<string, unknown>, missing: [...missing], denied: [], used: [...used] };
   }
 
   /** 工具输出里出现的密钥真值打码，防止回流给模型 */

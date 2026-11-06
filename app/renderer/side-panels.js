@@ -65,11 +65,27 @@ document.addEventListener("paste", async (e) => {
   }
 });
 
-$("#composer").addEventListener("dragover", (e) => { e.preventDefault(); $("#composer").classList.add("drop"); });
-$("#composer").addEventListener("dragleave", () => $("#composer").classList.remove("drop"));
+const dragIsBot = (e) => [...(e.dataTransfer?.types ?? [])].includes("text/bot-id");
+$("#composer").addEventListener("dragover", (e) => {
+  e.preventDefault();
+  const bot = dragIsBot(e);
+  if (e.dataTransfer) e.dataTransfer.dropEffect = "copy";
+  $("#composer").classList.add("drop");
+  $("#composer").classList.toggle("drop-at", bot);
+});
+$("#composer").addEventListener("dragleave", (e) => {
+  if (e.relatedTarget && $("#composer").contains(e.relatedTarget)) return;
+  $("#composer").classList.remove("drop", "drop-at");
+});
 $("#composer").addEventListener("drop", async (e) => {
   e.preventDefault();
-  $("#composer").classList.remove("drop");
+  $("#composer").classList.remove("drop", "drop-at");
+  const botId = e.dataTransfer?.getData("text/bot-id");
+  if (botId) {
+    const b = bots.find((x) => x.id === botId);
+    if (b?.name && typeof insertBotMention === "function") insertBotMention(b.name);
+    return;
+  }
   const files = [...(e.dataTransfer?.files ?? [])];
   const paths = files.map((f) => api.files.pathOf(f)).filter(Boolean);
   if (paths.length) return attachPaths(paths);
@@ -102,7 +118,7 @@ $("#search-input").addEventListener("input", async (e) => {
 });
 document.addEventListener("click", (e) => { if (!e.target.closest("#search-box")) $("#search-results")?.classList.add("hidden"); });
 
-/** G1：按 session 打开（搜索跳转 / 宠物跳转共用） */
+/** G1：按 session 打开（搜索跳转 / 宠物跳转 / Dock 激活共用） */
 async function openSessionById(sid, botId) {
   const s = (await api.sessions.get(sid).catch(() => null)) ?? (pending.has(sid) && botId ? { id: sid, botId } : null);
   if (!s) return;
@@ -110,10 +126,16 @@ async function openSessionById(sid, botId) {
   if (g) return selectGroup(g, sid);
   const bot = bots.find((b) => b.id === s.botId);
   if (!bot) return;
+  // 已在看这个会话：切回前台 / 点通知勿再 clear→reload（会闪空白）
+  if (currentSession === sid && currentBot?.id === bot.id && !currentGroup && $("#messages")?.children?.length) {
+    markActiveBot(bot);
+    return;
+  }
   currentBot = bot;
+  currentGroup = null;
   currentSession = sid;
   markActiveBot(bot);
-  clearMessages();
+  // 不先 clearMessages：loadSessionMessages(initial) 拉完后 replaceChildren，避免空白间隙
   await loadSessionMessages(sid, true);
 }
 
@@ -165,14 +187,14 @@ $("#messages").addEventListener("contextmenu", async (e) => {
 $("#input").addEventListener("keydown", (e) => {
   if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
     e.preventDefault();
-    if (!pending.has(currentSession)) send();
-    else if (currentGroup && $("#input").value.trim()) interject(currentGroup, currentSession);
+    // 忙时也走 send()：有字=插话/steer，空=停止；勿在 pending 时直接 return
+    send();
   }
 });
 document.querySelectorAll(".chip").forEach((c) => (c.onclick = async () => {
   const bot = await api.bots.create(c.dataset.tpl);
-  await refreshBots();
-  selectBot(bot);
+  if (typeof openCreatedBot === "function") await openCreatedBot(bot);
+  else { await refreshBots(); selectBot(bot); }
 }));
 // 双击 bot 头像 → 生成形象
 $("#bot-list").addEventListener("dblclick", (e) => {
@@ -190,6 +212,16 @@ api.onOpenSession(async (sid) => {
 let detailsTab = "info";
 let showArchived = false;
 let detailsPinned = true;
+/** 详情栏「高级」默认收起，少打扰日常例行/技能 */
+let detailsAdvanced = localStorage.getItem("harness.detailsAdvanced") === "1";
+
+/** 跳转到监听等高级区块前展开折叠 */
+function revealDetailsAdvanced() {
+  detailsAdvanced = true;
+  try { localStorage.setItem("harness.detailsAdvanced", "1"); } catch {}
+  const adv = document.getElementById("d-adv");
+  if (adv) adv.open = true;
+}
 function toggleDetails(show) {
   const panel = $("#details");
   const on = show ?? panel.classList.contains("hidden");
@@ -243,7 +275,7 @@ function workspaceHtml(ws, b) {
     </div>
     ${ws.env?.length || ws.secrets.length ? `<div class="d-sec"><h4>它记得的配置 <a class="ref" data-ref="settings" data-id="env">管理</a></h4>
       ${(ws.env || []).map((e) => `<div class="d-card"><div class="c-main"><div class="c-title">⚙️ ${esc(e.label || e.key)}</div><div class="c-sub">$${esc(e.key)} = ${esc(e.value.length > 60 ? `${e.value.slice(0, 60)}…` : e.value)}${e.botId ? "" : " · 共用"}</div></div></div>`).join("")}
-      ${ws.secrets.map((x) => `<div class="d-card"><div class="c-main"><div class="c-title">🔑 ${esc(x.label || x.name)}</div><div class="c-sub">$${esc(x.name)} · 加密${x.botId ? "" : " · 共用"} · ${esc(fmtTime(x.savedAt))}</div></div><button class="ghost-btn" data-secret-del="${esc(x.name)}">删除</button></div>`).join("")}</div>` : ""}`;
+      ${ws.secrets.map((x) => `<div class="d-card"><div class="c-main"><div class="c-title">🔑 ${esc(x.label || x.name)}</div><div class="c-sub">$${esc(x.name)} · 加密 · 全员可用 · ${esc(fmtTime(x.savedAt))}</div></div><button class="ghost-btn" data-secret-del="${esc(x.name)}">删除</button></div>`).join("")}</div>` : ""}`;
 }
 function bindWorkspace(panel, ws, b) {
   if (!ws) return;
@@ -337,13 +369,17 @@ async function renderGroupDetails(g) {
   const st = g.settings ?? {};
   const master = bots.find((b) => b.isMaster && g.members.includes(b.id));
   const modId = st.moderator === undefined ? master?.id ?? "" : st.moderator;
-  const [sessPage, library] = await Promise.all([
+  const looking = currentSession && (currentSession === `group-${g.id}` || currentSession.startsWith(`group-${g.id}-`));
+  const [sessPage, library, board] = await Promise.all([
     groupTab === "sessions" ? api.sessions.page({ botId: g.id, limit: 100, archived: groupArchived }).catch(() => ({ sessions: [] })) : Promise.resolve({ sessions: [] }),
     groupTab === "library" ? api.system.library(null, g.id).catch(() => []) : Promise.resolve([]),
+    groupTab === "members" && looking ? api.groups.board(currentSession).catch(() => []) : Promise.resolve([]),
   ]);
   if (currentGroup?.id !== g.id) return;
+  panel.dataset.forBot = `g:${g.id}`;
   const others = bots.filter((b) => !g.members.includes(b.id));
   const tabBody = groupTab === "members" ? `
+    ${board.length ? `<div class="d-sec"><h4>已定事项</h4>${board.map((item) => `<div class="hint">${esc(item)}</div>`).join("")}</div>` : ""}
     <div class="d-sec"><h4>成员 · 发言顺序</h4>
       ${members.map((m, i) => `
         <div class="d-card gm-card" data-bot="${esc(m.id)}">
@@ -355,7 +391,7 @@ async function renderGroupDetails(g) {
             <button data-rm title="移出群聊">✕</button>
           </span>
         </div>`).join("")}
-      ${others.length ? `<div class="gm-add"><select id="gm-pick" class="skin-select">${others.map((b) => `<option value="${esc(b.id)}">${esc(b.name)}</option>`).join("")}</select><button class="ghost-btn" id="gm-add">＋ 拉进群</button></div>` : ""}
+      ${others.length && members.length < 6 ? `<div class="gm-add"><select id="gm-pick" class="skin-select">${others.map((b) => `<option value="${esc(b.id)}">${esc(b.name)}</option>`).join("")}</select><button class="ghost-btn" id="gm-add">＋ 拉进群</button></div>` : members.length >= 6 ? `<div class="hint">一个群最多 6 个成员</div>` : ""}
     </div>
     <div class="d-sec d-actions">
       <button class="ghost-btn" id="g-export">导出对话</button>
@@ -365,9 +401,9 @@ async function renderGroupDetails(g) {
     <div class="d-sec gs-form">
       <label class="sk-label">群目标 <span class="hint">（每次发言都会带上，让讨论不跑题）</span></label>
       <textarea id="gs-goal" rows="3" placeholder="例如：一周内定下 App 的首页改版方案">${esc(st.goal || "")}</textarea>
-      <div class="d-card"><div class="c-main"><div class="c-title">自动接力</div><div class="c-sub">成员 @ 谁，谁就接着说；关掉后只回应你</div></div>
+      <div class="d-card"><div class="c-main"><div class="c-title">自动接力</div><div class="c-sub">默认按需发言：没 @ 时主持人先说；成员 @ / 【交给】谁，谁才接着说。关掉后只回应你点名的人</div></div>
         <label class="switch"><input type="checkbox" id="gs-relay" ${st.relay === false ? "" : "checked"}/><span></span></label></div>
-      <div class="d-card"><div class="c-main"><div class="c-title">最多发言次数</div><div class="c-sub">一次接力最多多少次发言，到了就停</div></div>
+      <div class="d-card"><div class="c-main"><div class="c-title">最多发言次数</div><div class="c-sub">一段接力的硬顶。没点名不齐声；到顶会停住，你再发一句会再给一段</div></div>
         <input id="gs-max" type="number" min="1" max="40" value="${st.maxTurns ?? 12}" class="gs-num" /></div>
       <label class="sk-label">主持人 <span class="hint">（每轮小结，结束时出结论卡片；插话没 @ 人时由他回应）</span></label>
       <select id="gs-mod" class="skin-select" style="width:100%">
@@ -394,7 +430,7 @@ async function renderGroupDetails(g) {
     </div>` : libraryHtml(library);
   panel.innerHTML = `
     <button class="icon-btn d-close" title="关闭">✕</button>
-    <button class="icon-btn d-share" title="分享 bot：创建副本 / 模板链接">⇪</button>
+    <button class="icon-btn d-share" title="分享 / 导入 bot">⇪</button>
     <div class="d-hero">
       <div class="d-avatar">👥</div>
       <div class="d-name gd-name" title="点击改群名">${esc(g.name)} <span class="gd-edit">✎</span></div>
@@ -434,7 +470,11 @@ async function renderGroupDetails(g) {
     if (b) selectBot(b);
   }));
   const add = panel.querySelector("#gm-add");
-  if (add) add.onclick = () => setMembers([...g.members, panel.querySelector("#gm-pick").value]);
+  if (add) add.onclick = async () => {
+    if (g.members.length >= 6) return alert("一个群最多 6 个成员");
+    try { await setMembers([...g.members, panel.querySelector("#gm-pick").value]); }
+    catch (e) { alert(e?.message || String(e)); }
+  };
   const exp = panel.querySelector("#g-export");
   if (exp) exp.onclick = () => exportSession(currentSession);
   const clr = panel.querySelector("#g-clear");
@@ -447,13 +487,15 @@ async function renderGroupDetails(g) {
   if (del) del.onclick = async () => {
     if (!confirm(`解散群聊「${g.name}」？（聊天记录保留）`)) return;
     await api.groups.remove(g.id);
+    api.groups.gaze(g.id, null);
     currentGroup = null;
     currentSession = null;
+    renderRelayBar();
     clearMessages();
     $("#chat-bar").classList.add("hidden");
-    $("#empty-state").style.display = "";
     toggleDetails(false);
-    refreshBots();
+    await refreshBots();
+    if (!currentBot && !currentGroup) await renderEmptyState();
   };
   const save = panel.querySelector("#gs-save");
   if (save) {
@@ -472,7 +514,7 @@ async function renderGroupDetails(g) {
     };
   }
   const nw = panel.querySelector("#gss-new");
-  if (nw) nw.onclick = () => { currentSession = `group-${g.id}-${Date.now()}`; clearMessages(); setSending(); renderRelayBar(); $("#input").focus(); renderGroupDetails(g); };
+  if (nw) nw.onclick = () => { currentSession = `group-${g.id}-${Date.now()}`; api.groups.gaze(g.id, currentSession); clearMessages(); setSending(); renderRelayBar(); $("#input").focus(); renderGroupDetails(g); };
   const arch = panel.querySelector("#gss-arch");
   if (arch) arch.onclick = () => { groupArchived = !groupArchived; renderGroupDetails(g); };
   panel.querySelectorAll(".sess-card").forEach((card) => (card.onclick = async (e) => {
@@ -485,16 +527,25 @@ async function renderGroupDetails(g) {
     }
     if (op === "archive") {
       await api.sessions.archive(sid, !groupArchived);
-      if (sid === currentSession) { currentSession = `group-${g.id}-${Date.now()}`; clearMessages(); }
+      if (sid === currentSession) {
+        currentSession = `group-${g.id}-${Date.now()}`;
+        api.groups.gaze(g.id, currentSession);
+        clearMessages();
+      }
       return renderGroupDetails(g);
     }
     if (op === "delete") {
       if (!confirm("删除这个会话及全部消息？")) return;
       await api.sessions.remove(sid);
-      if (sid === currentSession) { currentSession = `group-${g.id}-${Date.now()}`; clearMessages(); }
+      if (sid === currentSession) {
+        currentSession = `group-${g.id}-${Date.now()}`;
+        api.groups.gaze(g.id, currentSession);
+        clearMessages();
+      }
       return renderGroupDetails(g);
     }
     currentSession = sid;
+    api.groups.gaze(g.id, sid);
     await loadSessionMessages(sid, true);
     renderRelayBar();
     renderGroupDetails(g);
@@ -502,9 +553,39 @@ async function renderGroupDetails(g) {
   if (groupTab === "library") bindLibrary(panel, library);
 }
 
+function termFace(p) {
+  if (!p || p.phase === "exited") return { key: "off", label: p?.exitReason ? "没打开" : "已关掉" };
+  if (p.phase === "starting" && (p.exitReason || !p.pid)) return { key: "off", label: "没打开" };
+  const prog = p.program?.kind === "shell" || p.cli === "shell" ? "shell" : (p.cli || "agent");
+  if (p.phase === "starting") return { key: "run", label: `${prog}·打开中` };
+  if (p.posture === "composing") return { key: "wait", label: `${prog}·等送出` };
+  if (p.posture === "prompt") return { key: "idle", label: `${prog}·空闲` };
+  if (p.posture === "running" || p.phase === "busy") return { key: "run", label: `${prog}·正在跑` };
+  return { key: "idle", label: `${prog}·空闲` };
+}
+
+function botCodingDirs(b) {
+  const out = [];
+  const push = (raw) => {
+    const t = String(raw || "").trim();
+    if (t && !out.includes(t)) out.push(t);
+  };
+  push(b?.agentCwd);
+  for (const d of b?.agentDirs || []) push(d);
+  return out;
+}
+
+function dirFace(cwd, presence, lives) {
+  const live = (p) => p && p.phase !== "exited" && !(p.phase === "starting" && (p.exitReason || !p.pid));
+  const pools = [presence, ...(presence?.others || []), ...(Array.isArray(lives) ? lives : [])];
+  const hit = pools.find((p) => p && p.cwd === cwd && live(p));
+  if (hit) return termFace(hit).label;
+  return "未打开";
+}
+
 async function renderDetails(b) {
   const panel = $("#details");
-  const [tasks, providers, mem, sessPage, botSkills, library, ws, grants, caps, cmd, cliPaths, codingCaps] = await Promise.all([
+  const [tasks, providers, mem, sessPage, botSkills, library, ws, grants, caps, cmd, cliPaths, termPaths, codingCaps, presence, termLives, watchSt] = await Promise.all([
     api.tasks.list(b.id).catch(() => []),
     api.providers.list().catch(() => []),
     detailsTab === "memory" ? api.memory.list(b.id).catch(() => []) : Promise.resolve([]),
@@ -516,7 +597,11 @@ async function renderDetails(b) {
     detailsTab === "info" ? api.consent.caps().catch(() => []) : Promise.resolve([]),
     detailsTab === "info" ? api.consent.rules().catch(() => ({ rules: [], trusted: [] })) : Promise.resolve({ rules: [], trusted: [] }),
     detailsTab === "info" ? api.consent.cliPaths(b.id).catch(() => []) : Promise.resolve([]),
+    detailsTab === "info" && api.consent.termPaths ? api.consent.termPaths(b.id).catch(() => []) : Promise.resolve([]),
     detailsTab === "info" ? api.providers.capabilities().catch(() => ({})) : Promise.resolve({}),
+    detailsTab === "info" && api.coding?.presence ? api.coding.presence(b.id).catch(() => null) : Promise.resolve(null),
+    detailsTab === "info" && api.coding?.list ? api.coding.list(b.id).catch(() => []) : Promise.resolve([]),
+    detailsTab === "info" && api.systemWatch?.status ? api.systemWatch.status(b.id).catch(() => null) : Promise.resolve(null),
   ]);
   const sessList = sessPage.sessions.filter((x) => !isB2b(x.id) || b2bAsker(x.id, b.id));
   const sessHtml = `
@@ -535,6 +620,7 @@ async function renderDetails(b) {
         </span>
       </div>`).join("") : `<div class="d-empty">${showArchived ? "没有归档的会话" : "还没有会话"}</div>`}`;
   if (currentBot?.id !== b.id) return;
+  panel.dataset.forBot = b.id;
   const bound = providers.find((p) => p.id === b.providerId);
   const def = providers.find((p) => isDefaultProvider(p, providers));
   const provLabel = (p) => `${p.name}${p.model ? ` · ${p.model}` : ""}`;
@@ -542,16 +628,109 @@ async function renderDetails(b) {
     `<option value="">跟随默认${def ? `（${esc(provLabel(def))}）` : "（离线人格）"}</option>`,
     ...providers.map((p) => `<option value="${esc(p.id)}" ${bound?.id === p.id ? "selected" : ""}>${esc(provLabel(p))}</option>`),
   ].join("");
-  const routines = tasks.length ? tasks.map((t) => `
-    <div class="d-card">
-      <div class="c-main"><div class="c-title">${esc(t.name)}</div><div class="c-sub">${esc(t.cron)}${t.nextRunAt ? ` · 下次 ${esc(fmtTime(t.nextRunAt))}` : ""}</div></div>
-      <label class="switch"><input type="checkbox" data-task="${esc(t.id)}" ${t.enabled ? "checked" : ""}/><span></span></label>
-    </div>`).join("") : `<div class="d-empty">还没有定时任务，可以对它说「每天早上 9 点提醒我…」</div>`;
+  const routines = tasks.length ? tasks.map((t) => {
+    const last = t.lastResult === "ok" ? "上次成功" : t.lastResult === "error" ? `上次失败${t.lastError ? `：${t.lastError.slice(0, 40)}` : ""}` : t.lastResult === "running" ? "正在跑" : "";
+    const tags = [
+      t.source === "demo" ? "演示" : "",
+      t.skillKey ? "技能" : "",
+      t.webhookToken ? (t.schedule === false ? "仅 Webhook" : "Webhook") : "定时",
+      t.kind === "once" ? "一次" : "",
+      t.timezone ? t.timezone : "",
+    ].filter(Boolean).map((x) => `<span class="tag">${esc(x)}</span>`).join(" ");
+    const hist = (t.history || []).slice(-5).reverse();
+    return `
+    <div class="d-card routine-card" data-task="${esc(t.id)}">
+      <div class="rc-head">
+        <div class="c-main">
+          <div class="c-title" title="${esc(t.name)}">${esc(t.name)}</div>
+          <div class="c-sub">${esc(routineWhen(t))}${t.runCount ? ` · 已跑 ${t.runCount} 次` : ""}${last ? ` · ${esc(last)}` : ""}${tags ? ` · ${tags}` : ""}</div>
+        </div>
+        <label class="switch" title="${t.enabled ? "暂停" : "启用"}"><input type="checkbox" data-task-on="${esc(t.id)}" ${t.enabled ? "checked" : ""}/><span></span></label>
+      </div>
+      <div class="rc-ops">
+        <button type="button" data-rop="run" title="立即试跑">⚡ 试跑</button>
+        <button type="button" data-rop="hist" title="运行历史">📋</button>
+        <button type="button" data-rop="edit" title="编辑">✎</button>
+        ${t.webhookToken
+          ? `<button type="button" data-rop="hook" title="查看 Webhook">🪝</button>`
+          : `<button type="button" data-rop="hook" class="rc-hook-add" title="可选：开通入站 Webhook（默认没有）">＋ Webhook</button>`}
+        <button type="button" data-rop="del" title="删除">🗑</button>
+      </div>
+      <div class="routine-hist hidden" data-hist="${esc(t.id)}">${hist.length
+        ? hist.map((h) => `<div class="hint">${esc(fmtTime(h.ranAt))} · ${h.ok ? "✅" : "❌"}${h.error ? ` ${esc(h.error.slice(0, 80))}` : ""}</div>`).join("")
+        : `<div class="hint">还没有运行记录</div>`}</div>
+    </div>`;
+  }).join("") : `<div class="d-empty">还没有例行。对它说「每天 9 点…」，或点 ＋</div>`;
+  const skillsHtml = botSkills.length ? botSkills.map((k) => {
+    const on = k.owner
+      ? !!k.enabled
+      : !!k.enabled && !(b.disabledSkills || []).includes(k.key);
+    return `
+        <div class="d-card skill-card" data-skill="${esc(k.key)}" data-shared="${k.owner ? "0" : "1"}">
+          <div class="c-main"><div class="c-title">${esc(k.name)} <span class="tag">${k.owner ? "私有" : "共享"}</span></div><div class="c-sub" title="${esc(k.description)}">${esc(k.description)}</div></div>
+          <label class="switch" title="${k.owner ? "启用" : "对本 bot 启用"}"><input type="checkbox" data-skill-on="${esc(k.key)}" ${on ? "checked" : ""}/><span></span></label>
+        </div>`;
+  }).join("") : `<div class="d-empty">还没有技能</div>`;
+  const dirRow = (cwd, looking) => {
+    const parts = String(cwd).split("/").filter(Boolean);
+    const name = parts[parts.length - 1] || cwd;
+    const parent = parts.length > 1 ? parts[parts.length - 2] : "";
+    const face = dirFace(cwd, presence, termLives);
+    const meta = looking ? (face === "未打开" ? "正在看" : `正在看 · ${face}`) : face;
+    return `<div class="dir-row ${looking ? "on" : ""}"><button type="button" class="dir-main" data-cwd="${esc(cwd)}" title="${esc(cwd)}"><span class="dir-name">${esc(name)}</span><span class="dir-meta"><span>${esc(parent)}</span><span>${esc(meta)}</span></span></button><span class="dir-ops">${face === "未打开" ? `<button type="button" data-dir-open="${esc(cwd)}">打开终端</button>` : `<button type="button" data-dir-show="${esc(cwd)}">看终端</button>`}${face !== "未打开" ? `<button type="button" data-dir-stop="${esc(cwd)}">结束</button>` : ""}<button type="button" data-dir-drop="${esc(cwd)}" title="从名单拿掉">×</button></span></div>`;
+  };
+  const allDirs = botCodingDirs(b);
+  const lookingCwd = b.agentCwd && allDirs.includes(b.agentCwd) ? b.agentCwd : allDirs[0];
+  const otherDirs = allDirs.filter((cwd) => cwd !== lookingCwd);
+  const dirsHtml = !allDirs.length
+    ? `<div class="d-empty">还没有目录。选一个之后，终端和派工都用它。</div>`
+    : dirRow(lookingCwd, true) + (otherDirs.length ? `<details class="dir-more"><summary>其他 ${otherDirs.length} 个目录</summary>${otherDirs.map((cwd) => dirRow(cwd, false)).join("")}</details>` : "");
   const memHtml = mem.length ? mem.slice(-30).reverse().map((m) => `
     <div class="d-card"><div class="c-main"><div class="c-title" title="${esc(m.content)}">${esc(m.content)}</div><div class="c-sub">${esc(MEMORY_KIND[m.kind] || m.kind)}${m.createdAt ? ` · ${esc(fmtTime(m.createdAt))}` : ""}</div></div></div>`).join("") : `<div class="d-empty">暂无记忆</div>`;
+  const infoMain = `
+    <div class="d-sec"><h4>例行 <button class="list-add" id="d-routine-add" title="新建例行">＋</button></h4>${notifyBlocked ? NOTIFY_HINT() : ""}${routines}</div>
+    <div class="d-sec"><h4>技能 <button class="list-add" id="d-skill-add" title="新建技能">＋</button></h4>${skillsHtml}</div>
+    <div class="d-sec">
+      <div class="d-card d-pet-row"><div class="c-main"><div class="c-title">桌面宠物</div><div class="c-sub">${b.petEnabled ? "已显示" : "已隐藏"}</div></div>
+        <label class="switch"><input type="checkbox" id="d-pet" ${b.petEnabled ? "checked" : ""}/><span></span></label></div>
+    </div>
+    <details class="d-adv" id="d-adv" ${detailsAdvanced ? "open" : ""}>
+      <summary class="d-adv-sum">高级<span class="d-adv-hint">模型 · 工程 · 监听 · 权限</span><span class="d-adv-caret">›</span></summary>
+      <div class="d-adv-body">
+        <div class="d-sec d-guide">
+          <button type="button" class="guide-chip" data-guide="demo">🎬 教我一遍</button>
+          <button type="button" class="guide-chip" data-guide="connect">🔗 Connect</button>
+          <button type="button" class="guide-chip" data-guide="templates">📦 模板</button>
+        </div>
+        <div class="d-sec"><h4>对话</h4>
+          <div class="d-kv">
+            <span title="聊天脑；改仓库靠下方派工 CLI">模型</span><span><select id="d-provider" class="skin-select" style="width:100%">${provOptions}</select></span>
+            <span>深度思考</span><span><select id="d-reasoning" class="skin-select" style="width:100%">${[["auto", "复杂任务自动"], ["always", "每次都用"], ["off", "关闭"]].map(([v, l]) => `<option value="${v}" ${(b.reasoning ?? (b.isMaster ? "auto" : "off")) === v ? "selected" : ""}>${l}</option>`).join("")}</select></span>
+            <span>人设</span><span>${esc(b.persona || "—")}</span>
+          </div>
+        </div>
+        ${watchSectionHtml(watchSt)}
+        <div class="d-sec"><h4>工程与派工</h4>
+          <div id="d-presence-card" class="dir-list">${dirsHtml}</div>
+          <button type="button" class="ghost-btn dir-add" id="d-agent-pick">选择目录</button>
+          <input id="d-agent-cwd" class="skin-select dir-paste" placeholder="粘贴路径，回车添加" />
+          <div class="mx-chips" style="margin-bottom:8px">${Object.entries(codingCaps).map(([id, c]) => `<span class="mx-chip ${c?.ready ? "ok" : ""}" title="${esc(c?.bin || id)}${c?.account ? ` · ${c.account}` : ""}">${c?.ready ? "✓" : c?.installed ? "○" : "✕"} ${esc(id)}</span>`).join("") || `<span class="hint">探测中…</span>`}</div>
+          <div class="d-kv">
+            <span title="改仓库用；与上方对话模型无关">派工 CLI</span><span><select id="d-agent-cli" class="skin-select" style="width:100%"><option value="">自动</option>${Object.entries(codingCaps).filter(([, c]) => c?.ready).map(([id, c]) => `<option value="${esc(id)}" ${b.agentCli === id ? "selected" : ""}>${esc(c.label || id)}</option>`).join("")}${b.agentCli && !codingCaps[b.agentCli]?.ready ? `<option value="${esc(b.agentCli)}" selected>${esc(b.agentCli)}（未就绪）</option>` : ""}</select></span>
+            <span>连续性</span><span><select id="d-agent-resume" class="skin-select" style="width:100%">${[["auto", "同 CLI 续会话"], ["always", "总是续"], ["once", "下次新开"]].map(([v, l]) => `<option value="${v}" ${(b.agentResume ?? "auto") === v ? "selected" : ""}>${l}</option>`).join("")}</select></span>
+          </div>
+        </div>
+        ${botPermSection(b.id, grants, caps, cmd.modes?.[b.id] || (cmd.trusted?.includes(b.id) ? "auto" : "ask"), { cliPaths, termPaths })}
+      </div>
+    </details>
+    <div class="d-sec d-actions">
+      <button class="ghost-btn" id="d-more">更多设置</button>
+      <button class="ghost-btn" id="d-newchat">新会话</button>
+      <button class="ghost-btn" id="d-export">导出</button>
+    </div>`;
   panel.innerHTML = `
     <button class="icon-btn d-close" title="关闭">✕</button>
-    <button class="icon-btn d-share" title="分享 bot：创建副本 / 模板链接">⇪</button>
+    <button class="icon-btn d-share" title="分享 / 导入 bot">⇪</button>
     <div class="d-hero">
       <div class="d-avatar${isBusy(b.id) ? " busy" : ""}" data-av-bot="${esc(b.id)}" title="换头像">${avatarHtml(b)}</div>
       <div class="d-name gd-name" title="点击改名">${esc(b.name)} <span class="gd-edit">✎</span></div>
@@ -568,41 +747,7 @@ async function renderDetails(b) {
       <button data-tab="computer" class="${detailsTab === "computer" ? "on" : ""}">工作区</button>
       <button data-tab="memory" class="${detailsTab === "memory" ? "on" : ""}">记忆</button>
     </div>
-    ${detailsTab === "info" ? `
-    <div class="d-sec"><h4>定时任务</h4>${notifyBlocked ? NOTIFY_HINT() : ""}${routines}</div>
-    <div class="d-sec"><h4>桌面宠物</h4>
-      <div class="d-card"><div class="c-main"><div class="c-title">在桌面显示</div><div class="c-sub">${b.petEnabled ? "已开启" : "已关闭"}</div></div>
-      <label class="switch"><input type="checkbox" id="d-pet" ${b.petEnabled ? "checked" : ""}/><span></span></label></div>
-    </div>
-    <div class="d-sec"><h4>配置</h4>
-      <div class="d-kv">
-        <span>模型</span><span><select id="d-provider" class="skin-select" style="width:100%">${provOptions}</select></span>
-        <span title="复杂任务先用推理模型想清楚思路，执行完再自检一遍">深度思考</span><span><select id="d-reasoning" class="skin-select" style="width:100%">${[["auto", "复杂任务自动"], ["always", "每次都用"], ["off", "关闭"]].map(([v, l]) => `<option value="${v}" ${(b.reasoning ?? (b.isMaster ? "auto" : "off")) === v ? "selected" : ""}>${l}</option>`).join("")}</select></span>
-        <span>人设</span><span>${esc(b.persona || "—")}</span>
-      </div>
-    </div>
-    <div class="d-sec"><h4>写代码派工</h4>
-      <p class="hint">大仓库改代码走 <code>cli.agent</code>。列表来自本机实时探测（设置 → 模型可刷新）；「模型」若选 CLI 只用于对话，不会写仓库。偏好可空＝自动选已装可派工项。</p>
-      <div class="mx-chips" style="margin-bottom:8px">${Object.entries(codingCaps).map(([id, c]) => `<span class="mx-chip ${c?.ready ? "ok" : ""}" title="${esc(c?.bin || id)}${c?.account ? ` · ${c.account}` : ""}">${c?.ready ? "✓" : c?.installed ? "○" : "✕"} ${esc(id)}${c?.ready ? " 可派工" : c?.installed ? " 未就绪" : ""}</span>`).join("") || `<span class="hint">探测中…</span>`}</div>
-      <div class="d-kv">
-        <span title="cli.agent 默认工程根">工程目录</span><span><input id="d-agent-cwd" class="skin-select" style="width:100%" placeholder="绝对路径，可空" value="${esc(b.agentCwd || "")}" /></span>
-        <span title="仅多台就绪时需要；未就绪会自动换">偏好 CLI</span><span><select id="d-agent-cli" class="skin-select" style="width:100%"><option value="">自动（跟随探测）</option>${Object.entries(codingCaps).filter(([, c]) => c?.ready).map(([id, c]) => `<option value="${esc(id)}" ${b.agentCli === id ? "selected" : ""}>${esc(c.label || id)}</option>`).join("")}${b.agentCli && !codingCaps[b.agentCli]?.ready ? `<option value="${esc(b.agentCli)}" selected>${esc(b.agentCli)}（当前未就绪，将自动换）</option>` : ""}</select></span>
-        <span title="同一工程同一 CLI 默认续它自己的会话；换 CLI 用工作线">连续性</span><span><select id="d-agent-resume" class="skin-select" style="width:100%">${[["auto", "自动（同 CLI 续会话）"], ["always", "总是续上次"], ["once", "下一次新开"]].map(([v, l]) => `<option value="${v}" ${(b.agentResume ?? "auto") === v ? "selected" : ""}>${l}</option>`).join("")}</select></span>
-      </div>
-    </div>
-    <div class="d-sec"><h4>技能 <button class="list-add" id="d-skill-add" title="新建技能">＋</button></h4>
-      ${botSkills.length ? botSkills.map((k) => `
-        <div class="d-card skill-card" data-skill="${esc(k.key)}">
-          <div class="c-main"><div class="c-title">${esc(k.name)} <span class="tag">${k.owner ? "私有" : "共享"}</span></div><div class="c-sub" title="${esc(k.description)}">${esc(k.description)}</div></div>
-          <label class="switch" title="启用"><input type="checkbox" data-skill-on="${esc(k.key)}" ${k.enabled ? "checked" : ""}/><span></span></label>
-        </div>`).join("") : `<div class="d-empty">还没有技能。可以对它说「把这套规范记成技能」</div>`}
-    </div>
-    ${botPermSection(b.id, grants, caps, !!cmd.trusted?.includes(b.id), { cliPaths })}
-    <div class="d-sec d-actions">
-      <button class="ghost-btn" id="d-more">更多设置</button>
-      <button class="ghost-btn" id="d-newchat">新会话</button>
-      <button class="ghost-btn" id="d-export">导出对话</button>
-    </div>` : detailsTab === "sessions" ? `<div class="d-sec">${sessHtml}</div>`
+    ${detailsTab === "info" ? infoMain : detailsTab === "sessions" ? `<div class="d-sec">${sessHtml}</div>`
       : detailsTab === "library" ? libraryHtml(library)
       : detailsTab === "computer" ? workspaceHtml(ws, b)
       : `<div class="d-sec"><h4>最近记忆</h4>${memHtml}</div>`}`;
@@ -631,24 +776,121 @@ async function renderDetails(b) {
   const pickAv = panel.querySelector("#d-avatar-pick");
   if (pickAv) pickAv.onclick = openAvatar;
   panel.querySelectorAll(".d-tabs button").forEach((btn) => (btn.onclick = () => { detailsTab = btn.dataset.tab; renderDetails(b); }));
-  panel.querySelectorAll("input[data-task]").forEach((inp) => (inp.onchange = () => api.tasks.setEnabled(inp.dataset.task, inp.checked)));
+  panel.querySelectorAll("input[data-task-on]").forEach((inp) => (inp.onchange = () => api.tasks.setEnabled(inp.dataset.taskOn, inp.checked)));
+  panel.querySelectorAll(".routine-card").forEach((card) => {
+    const id = card.dataset.task;
+    card.querySelectorAll("[data-rop]").forEach((btn) => (btn.onclick = async (e) => {
+      e.stopPropagation();
+      const op = btn.dataset.rop;
+      if (op === "run") {
+        btn.textContent = "…";
+        try { await api.tasks.runNow(id); } catch (err) { alert(errText(err)); }
+        // runNow 已后台执行；稍后再刷一次看结果
+        if (currentBot) renderDetails(currentBot);
+        return;
+      }
+      if (op === "hist") {
+        card.querySelector(`[data-hist="${CSS.escape(id)}"]`)?.classList.toggle("hidden");
+        return;
+      }
+      if (op === "del") {
+        if (!confirm("删除这个例行？")) return;
+        await api.tasks.remove(id);
+        if (currentBot) renderDetails(currentBot);
+        return;
+      }
+      if (op === "edit") {
+        const t = tasks.find((x) => x.id === id);
+        if (t) routineEditFlow(t, b);
+        return;
+      }
+      if (op === "hook") {
+        await manageRoutineWebhook(id);
+        if (currentBot) renderDetails(currentBot);
+      }
+    }));
+  });
+  const addRoutine = panel.querySelector("#d-routine-add");
+  if (addRoutine) addRoutine.onclick = () => routineCreateFlow(b);
+  const adv = panel.querySelector("#d-adv");
+  if (adv) adv.addEventListener("toggle", () => {
+    detailsAdvanced = adv.open;
+    try { localStorage.setItem("harness.detailsAdvanced", detailsAdvanced ? "1" : "0"); } catch {}
+  });
+  bindWatchSection(panel, b, watchSt);
+  panel.querySelectorAll("[data-guide]").forEach((el) => (el.onclick = () => {
+    const g = el.dataset.guide;
+    if (g === "demo") startDemoTeach(b);
+    else if (g === "voice") { if (typeof startVoiceMode === "function") startVoiceMode(); }
+    else if (g === "connect") vaultFlow();
+    else if (g === "templates") templatesBrowseFlow(b);
+  }));
   const pet = panel.querySelector("#d-pet");
   if (pet) pet.onchange = async () => { await api.bots.setPet(b.id, pet.checked); await refreshBots(); if (currentBot) renderDetails(currentBot); };
   const provSel = panel.querySelector("#d-provider");
   if (provSel) provSel.onchange = async () => { await api.bots.update(b.id, { providerId: provSel.value }); await refreshBots(); };
   const reasonSel = panel.querySelector("#d-reasoning");
   if (reasonSel) reasonSel.onchange = async () => { await api.bots.update(b.id, { reasoning: reasonSel.value }); await refreshBots(); };
-  const agentCwd = panel.querySelector("#d-agent-cwd");
-  if (agentCwd) agentCwd.onchange = async () => {
-    const v = agentCwd.value.trim();
-    await api.bots.update(b.id, { agentCwd: v || null });
+  const addAgentDir = async () => {
+    const agentCwd = panel.querySelector("#d-agent-cwd");
+    const v = agentCwd?.value.trim();
+    if (!v || typeof focusCodingDir !== "function") return;
+    agentCwd.value = "";
+    await focusCodingDir(v);
     await refreshBots();
+    const fresh = typeof botById === "function" ? botById(b.id) : null;
+    if (fresh && currentBot?.id === b.id) currentBot = fresh;
+    if (currentBot?.id === b.id) renderDetails(currentBot);
   };
+  const agentCwd = panel.querySelector("#d-agent-cwd");
+  if (agentCwd) agentCwd.onchange = () => addAgentDir();
+  const agentPick = panel.querySelector("#d-agent-pick");
+  if (agentPick) agentPick.onclick = () => pickCodingCwd();
   const agentCli = panel.querySelector("#d-agent-cli");
   if (agentCli) agentCli.onchange = async () => {
     await api.bots.update(b.id, { agentCli: agentCli.value || null });
     await refreshBots();
   };
+  const presenceCard = panel.querySelector("#d-presence-card");
+  if (presenceCard) presenceCard.onclick = (e) => {
+    if (e.target.closest("[data-dir-stop]") || e.target.closest("[data-dir-drop]") || e.target.closest("[data-dir-open]") || e.target.closest("[data-dir-show]")) return;
+    const row = e.target.closest("[data-cwd]");
+    if (row?.dataset.cwd && typeof focusCodingDir === "function") focusCodingDir(row.dataset.cwd);
+  };
+  const showTerm = async (cwd) => {
+    if (typeof focusCodingDir === "function") await focusCodingDir(cwd);
+    if (typeof focusCodingTerm === "function") focusCodingTerm();
+  };
+  panel.querySelectorAll("[data-dir-open]").forEach((btn) => btn.onclick = async (e) => {
+    e.stopPropagation();
+    await showTerm(btn.dataset.dirOpen);
+    if (typeof openCodingHere === "function") await openCodingHere(btn.dataset.dirOpen);
+  });
+  panel.querySelectorAll("[data-dir-show]").forEach((btn) => btn.onclick = async (e) => {
+    e.stopPropagation();
+    await showTerm(btn.dataset.dirShow);
+  });
+  panel.querySelectorAll("[data-dir-stop]").forEach((btn) => btn.onclick = async (e) => {
+    e.stopPropagation();
+    await api.coding.stop(b.id, btn.dataset.dirStop);
+    if (typeof syncCodingTerm === "function") await syncCodingTerm();
+    if (currentBot?.id === b.id) renderDetails(currentBot);
+  });
+  panel.querySelectorAll("[data-dir-drop]").forEach((btn) => btn.onclick = async (e) => {
+    e.stopPropagation();
+    const cwd = btn.dataset.dirDrop;
+    const saved = await api.bots.update(b.id, { dropAgentCwd: cwd });
+    if (api.coding?.stop) await api.coding.stop(b.id, cwd).catch(() => {});
+    try {
+      if (saved?.agentCwd) await api.env.set({ key: "PROJECT_ROOT", value: saved.agentCwd, label: "工程目录", note: "正在看的工程", botId: b.id });
+      else await api.env.remove("PROJECT_ROOT", b.id);
+    } catch { /* 环境项跟着正在看的目录走 */ }
+    await refreshBots();
+    const fresh = typeof botById === "function" ? botById(b.id) : null;
+    if (fresh && currentBot?.id === b.id) currentBot = fresh;
+    if (typeof syncCodingTerm === "function") await syncCodingTerm();
+    if (currentBot?.id === b.id) renderDetails(currentBot);
+  });
   const agentResume = panel.querySelector("#d-agent-resume");
   if (agentResume) agentResume.onchange = async () => {
     await api.bots.update(b.id, { agentResume: agentResume.value === "auto" ? null : agentResume.value });
@@ -672,7 +914,20 @@ async function renderDetails(b) {
     const k = botSkills.find((x) => x.key === card.dataset.skill);
     if (k) skillEditor(k, b);
   }));
-  panel.querySelectorAll("input[data-skill-on]").forEach((inp) => (inp.onchange = () => api.skills.setEnabled(inp.dataset.skillOn, inp.checked)));
+  panel.querySelectorAll("input[data-skill-on]").forEach((inp) => (inp.onchange = async () => {
+    const key = inp.dataset.skillOn;
+    const card = inp.closest(".skill-card");
+    const shared = card?.dataset.shared === "1";
+    if (!shared) {
+      await api.skills.setEnabled(key, inp.checked);
+      return;
+    }
+    const disabled = new Set(b.disabledSkills || []);
+    if (inp.checked) disabled.delete(key);
+    else disabled.add(key);
+    await api.bots.update(b.id, { disabledSkills: [...disabled] });
+    await refreshBots();
+  }));
   if (detailsTab === "info") bindBotPerm(panel, b.id, () => { if (currentBot?.id === b.id) renderDetails(currentBot); });
   if (detailsTab === "library") bindLibrary(panel, library);
   if (detailsTab === "computer") bindWorkspace(panel, ws, b);
@@ -704,4 +959,73 @@ async function renderDetails(b) {
       renderDetails(b);
     };
   });
+}
+
+/** bot 详情：系统监听名单（紧凑，不刷全机） */
+function watchSectionHtml(st) {
+  if (!api.systemWatch) {
+    return `<div class="d-sec" id="d-watch"><h4>系统监听</h4><div class="d-empty">需重建壳后可用</div></div>`;
+  }
+  const watch = st?.watch || { enabled: true, apps: [] };
+  const apps = st?.apps || [];
+  const front = st?.front || {};
+  const frontName = front.identity?.label || front.name || "";
+  const disk = (st?.disk || [])[0];
+  const statusLine = st?.summary || (watch.enabled ? (watch.apps.length ? "…" : "未选 App") : "监听已关");
+  const rows = apps.length
+    ? apps.map((a) => {
+        const id = { ...(a.identity || {}), iconDataUrl: a.iconDataUrl || a.identity?.iconDataUrl, label: a.name };
+        return `<div class="sw-row ${a.running ? "live" : ""}">
+          ${typeof soLogo === "function" ? soLogo(id, 24) : `<span class="so-logo so-logo-24">${esc((a.name || "?").slice(0, 2))}</span>`}
+          <div class="sw-main">
+            <div class="sw-name">${esc(a.name)}</div>
+            <div class="sw-meta">${a.running ? `在跑 · ${Number(a.cpu || 0).toFixed(1)}% · ${a.rssMb || 0} MB` : "未运行"}</div>
+          </div>
+          <button type="button" class="sw-x" data-sw-drop="${esc(a.name)}" title="移出名单">×</button>
+        </div>`;
+      }).join("")
+    : `<div class="d-empty">${watch.enabled ? "点「选择 App」加入名单" : "监听已关闭"}</div>`;
+  const frontBit = frontName
+    ? `<div class="sw-stat">${typeof soLogo === "function" ? soLogo({ ...(front.identity || {}), iconDataUrl: front.iconDataUrl || front.identity?.iconDataUrl }, 18) : ""}<span>前台 ${esc(frontName)}</span></div>`
+    : "";
+  const diskBit = disk
+    ? `<div class="sw-stat"><span>磁盘 ${esc(disk.mount)} ${disk.usedPct}%</span></div>`
+    : "";
+  return `
+    <div class="d-sec" id="d-watch">
+      <h4>系统监听 <span class="sw-sum">${esc(statusLine)}</span>
+        <label class="switch" title="${watch.enabled ? "关闭监听" : "开启监听"}"><input type="checkbox" id="d-watch-on" ${watch.enabled ? "checked" : ""}/><span></span></label>
+      </h4>
+      <div class="hint">名单内 App 才进 sys.observe，不刷全机。</div>
+      <div class="sw-stats">${frontBit}${diskBit}</div>
+      <div class="sw-list">${rows}</div>
+      <div class="sw-actions">
+        <button type="button" class="ghost-btn" id="d-watch-add">＋ 选择 App</button>
+        <button type="button" class="ghost-btn" id="d-watch-refresh" title="刷新状态">刷新</button>
+      </div>
+    </div>`;
+}
+
+function bindWatchSection(panel, b, st) {
+  if (!api.systemWatch || detailsTab !== "info") return;
+  const on = panel.querySelector("#d-watch-on");
+  if (on) on.onchange = async () => {
+    await api.systemWatch.set(b.id, { enabled: on.checked });
+    if (typeof refreshWatchChip === "function") refreshWatchChip();
+    if (currentBot?.id === b.id) renderDetails(currentBot);
+  };
+  panel.querySelector("#d-watch-add")?.addEventListener("click", () => {
+    if (typeof pickWatchAppsFlow === "function") pickWatchAppsFlow(b.id);
+  });
+  panel.querySelector("#d-watch-refresh")?.addEventListener("click", () => {
+    if (currentBot?.id === b.id) renderDetails(currentBot);
+  });
+  panel.querySelectorAll("[data-sw-drop]").forEach((btn) => (btn.onclick = async () => {
+    const name = btn.dataset.swDrop;
+    const apps = (st?.watch?.apps || []).filter((x) => x !== name);
+    await api.systemWatch.set(b.id, { apps });
+    if (typeof refreshWatchChip === "function") refreshWatchChip();
+    if (currentBot?.id === b.id) renderDetails(currentBot);
+  }));
+  if (typeof refreshWatchChip === "function") refreshWatchChip(st);
 }

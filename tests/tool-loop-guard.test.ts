@@ -24,6 +24,14 @@ describe("工具块截断", () => {
     expect(toolBlockCutoff(`${block}\n\`\`\`tool\n{"tool"`)).toBeNull();
     expect(toolBlockCutoff("没有工具块的普通回答")).toBeNull();
   });
+
+  test("顶格裸工具 JSON 写完后编造结果也截断", () => {
+    const bare = '{"tool":"fs.list","args":{"path":"/tmp"}}';
+    const text = `我查一下。\n${bare}\n\n目录是空的，我再换个路径。`;
+    expect(toolBlockCutoff(text)).toBe(text.indexOf(bare) + bare.length);
+    // 句中举例不算截断点
+    expect(toolBlockCutoff(`例如可以写 ${bare} 这样`)).toBeNull();
+  });
 });
 
 describe("工具循环防护", () => {

@@ -85,7 +85,15 @@ export class ProviderCenter {
 
   async streamComplete(p: Provider, req: CompletionRequest & { _onChunk: (b: import("./types").ContentBlock) => void }): Promise<CompletionResult> {
     if (p.kind === "cli" && !p.baseUrl) {
-      const r = await completeCli(p, contentText(req.user ?? ""), req.system, req.history, (t) => req._onChunk({ type: "text", text: t }), req.signal);
+      const r = await completeCli(
+        p,
+        contentText(req.user ?? ""),
+        req.system,
+        req.history,
+        (t) => req._onChunk({ type: "text", text: t }),
+        req.signal,
+        (t) => req._onChunk({ type: "thinking", text: t }),
+      );
       return { text: r, content: [{ type: "text", text: r }] };
     }
     if (p.kind === "openai-compat") {
@@ -118,10 +126,9 @@ export class ProviderCenter {
     }
   }
 
-  async capabilities(): Promise<Record<string, { installed: boolean; version?: string; chat: boolean; agent?: boolean; ready?: boolean; bin?: string; label?: string; account?: string }>> {
-    const { probeCodingAgents, invalidateCodingAgentsCache } = await import("./coding-agents");
-    invalidateCodingAgentsCache();
-    const items = await probeCodingAgents({ force: true });
+  async capabilities(force = false): Promise<Record<string, { installed: boolean; version?: string; chat: boolean; agent?: boolean; ready?: boolean; bin?: string; label?: string; account?: string }>> {
+    const { probeCodingAgents } = await import("./coding-agents");
+    const items = await probeCodingAgents(force ? { force: true } : undefined);
     const out: Record<string, { installed: boolean; version?: string; chat: boolean; agent?: boolean; ready?: boolean; bin?: string; label?: string; account?: string }> = {};
     for (const x of items) {
       out[x.id] = {

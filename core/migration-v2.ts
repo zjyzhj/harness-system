@@ -7,7 +7,6 @@ import type { MemorySystem } from "./memory-system";
 import type { SkillRegistry } from "./skill-registry";
 import type { Scheduler } from "./scheduler";
 import type { GroupRegistry } from "./group-registry";
-import type { Orchestrator } from "./orchestrator";
 import type { EnvStore } from "./env-store";
 import type { SecretStore } from "./secret-store";
 import type { ProjectRegistry, GlobalInstructions } from "./projects";
@@ -32,7 +31,6 @@ export class MigrationV2 {
     private skills: SkillRegistry,
     private scheduler: Scheduler,
     private groups?: GroupRegistry,
-    private orchestrator?: Orchestrator,
     /** G5.5：社区宠物皮肤目录（assets/skins），导出/导入 spritesheet + index */
     private skinsDir = "",
   ) {
@@ -92,13 +90,12 @@ export class MigrationV2 {
       skills: {},
       tasks: this.scheduler.list(),
       groups: this.groups?.list() ?? [],
-      plans: this.orchestrator?.list() ?? [],
       skins: this.exportSkins(),
       env: this.extras.env?.list(),
       projects: this.extras.projects?.list(),
       instructions: this.store.readConfig().instructions as GlobalInstructions | undefined,
       commandRules: this.extras.consent?.listCommandRules(),
-      secretNames: this.extras.secrets?.list().map(({ name, label, note, botId }) => ({ name, label, note, botId })),
+      secretNames: this.extras.secrets?.list().map(({ name, label, note, botId, savedBy }) => ({ name, label, note, botId, savedBy })),
     };
     // 每个 bot 的记忆
     for (const b of payload.bots) {
@@ -118,10 +115,10 @@ export class MigrationV2 {
     writeFileSync(filePath, JSON.stringify(this.exportPayload(opts), null, 2), "utf8");
   }
 
-  importFromPayload(payload: MigrationPayload): { importedProviders: number; importedBots: number; importedPets: number; importedMemories: number; importedSkills: number; importedTasks: number; importedGroups: number; importedPlans: number; importedSkins: number; importedEnv: number; importedProjects: number; importedRules: number; secretsToReenter: { name: string; label?: string; bot?: string }[] } {
+  importFromPayload(payload: MigrationPayload): { importedProviders: number; importedBots: number; importedPets: number; importedMemories: number; importedSkills: number; importedTasks: number; importedGroups: number; importedPlans: number; skippedPlans: number; importedSkins: number; importedEnv: number; importedProjects: number; importedRules: number; secretsToReenter: { name: string; label?: string; bot?: string }[] } {
     if (!payload.format?.startsWith("harness-bot-migration/v")) throw new Error(`不支持的迁移格式：${payload.format}`);
     const usedNames = new Set(this.store.listBots().map((b) => b.name.toLowerCase()));
-    let importedBots = 0, importedPets = 0, importedMemories = 0, importedSkills = 0, importedTasks = 0, importedGroups = 0, importedPlans = 0;
+    let importedBots = 0, importedPets = 0, importedMemories = 0, importedSkills = 0, importedTasks = 0, importedGroups = 0;
 
     // providers
     for (const p of payload.providers ?? []) {
@@ -192,18 +189,8 @@ export class MigrationV2 {
       this.groups?.create(g.name, this.store.getBot(newAdmin) ? newAdmin : "user", newMembers);
       importedGroups++;
     }
-    // plans（仅导入 pending/done 历史，按新 bot id 映射）
-    for (const p of payload.plans ?? []) {
-      try {
-        const stages = p.stages.map((st) => ({
-          botId: idMap.get(st.botId) ?? st.botId,
-          prompt: st.prompt,
-          mode: st.mode,
-        })).filter((st) => this.store.getBot(st.botId));
-        if (stages.length) this.orchestrator?.create({ ownerBotId: idMap.get(p.ownerBotId) ?? p.ownerBotId, title: p.title, stages });
-        importedPlans++;
-      } catch {}
-    }
+    // 编排已下线：旧包里的 plans 字段忽略，不落盘、不重建
+    const skippedPlans = Array.isArray(payload.plans) ? payload.plans.length : 0;
     // skins（复制 spritesheet + 写 index.json；重名 id 生成新 id 并改写 bot.skinId）
     const skinIdMap = new Map<string, string>();
     const existingSkinIds = new Set<string>();
@@ -281,8 +268,11 @@ export class MigrationV2 {
     }
     const secretsToReenter = (payload.secretNames ?? [])
       .filter((x) => !this.extras.secrets?.has(x.name))
-      .map((x) => ({ name: x.name, label: x.label, bot: x.botId ? this.store.getBot(mapBot(x.botId) ?? "")?.name : undefined }));
-    return { importedProviders: payload.providers?.length ?? 0, importedBots, importedPets, importedMemories, importedSkills, importedTasks, importedGroups, importedPlans, importedSkins, importedEnv, importedProjects, importedRules, secretsToReenter };
+      .map((x) => {
+        const who = (x as { savedBy?: string }).savedBy || x.botId;
+        return { name: x.name, label: x.label, bot: who ? this.store.getBot(mapBot(who) ?? "")?.name : undefined };
+      });
+    return { importedProviders: payload.providers?.length ?? 0, importedBots, importedPets, importedMemories, importedSkills, importedTasks, importedGroups, importedPlans: 0, skippedPlans, importedSkins, importedEnv, importedProjects, importedRules, secretsToReenter };
   }
 
   importFromFile(filePath: string) {

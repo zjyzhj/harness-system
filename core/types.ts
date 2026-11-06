@@ -38,8 +38,16 @@ export interface Bot {
   skinId?: string;
   /** 换装前的皮肤，便于「换回去」 */
   prevSkinId?: string;
-  /** 主控 bot：置顶显示，负责调度其他成员 */
+  /** 主控 / Primary bot：置顶显示，负责调度其他成员（对齐 Grok primary Bot） */
   isMaster?: boolean;
+  /** 侧栏钉住（独立于主控） */
+  pinned?: boolean;
+  /** 从主列表隐藏；例行仍跑，可在「已隐藏」里恢复 */
+  hidden?: boolean;
+  /** 花名册分区名（如「工作」「个人」） */
+  section?: string;
+  /** 对该 bot 关闭的共享技能 key（账号级技能仍在；按角色关掉） */
+  disabledSkills?: string[];
   /** 模型路由：复杂任务先让推理模型想清楚再执行并自检。默认主控 auto、其他 off */
   reasoning?: "auto" | "always" | "off";
   /** 左栏手动排序（越小越靠前） */
@@ -49,8 +57,10 @@ export interface Bot {
    * 开箱时对照本机 Vault diff；硬缺口齐了仍可保留作参考，或由宿主清掉。
    */
   shareOnboard?: BotNeeds;
-  /** G10：cli.agent 默认工程根（realpath）；派工时可省略 cwd */
+  /** G10：正在看的工程。派工没写 cwd 时用它。 */
   agentCwd?: string;
+  /** 这个 bot 记住的工程目录。正在看的也在里面。一块终端对其中一个。 */
+  agentDirs?: string[];
   /** G10：cli.agent 偏好后端 id（注册表内；以本机探测为准，未装会自动换） */
   agentCli?: string;
   /** 编码连续性：auto 默认证会话；always 总是续；once 仅下一次新开后回到 auto */
@@ -116,7 +126,9 @@ export type ContentBlock =
   /** 多字段预填表单卡：用户填完后以一条消息交回 */
   | { type: "form"; id: string; title: string; fields: FormField[]; submitLabel?: string; answer?: Record<string, string> }
   /** 群聊主持人的结论卡片：决定了什么、谁负责什么、还有什么没定 */
-  | { type: "conclusion"; summary: string; decisions: string[]; tasks: ConclusionTask[]; open?: string[] };
+  | { type: "conclusion"; summary: string; decisions: string[]; tasks: ConclusionTask[]; open?: string[] }
+  /** 对话里创建/展示例行（对齐 Grok Routines in transcript） */
+  | { type: "routine"; taskId: string; name: string; when?: string; enabled?: boolean };
 
 export interface FormField {
   key: string;
@@ -141,6 +153,10 @@ export interface MessageMeta {
   scheduled?: string;
   /** bot 主动跟进（不是对用户消息的回复） */
   proactive?: boolean;
+  /** 入站 Webhook 注入的用户消息 */
+  webhook?: boolean;
+  /** 入站优先级：普通等当前轮；紧急可打断 */
+  priority?: "normal" | "urgent";
   /** 这一轮所有模型调用的用量合计（含推理预想、自检、工具轮、压缩） */
   /** cached：输入里命中前缀缓存的部分（DeepSeek 约 1/10 计费） */
   usage?: { input: number; output: number; calls: number; cached?: number };
@@ -151,14 +167,22 @@ export interface MessageMeta {
   streamed?: boolean;
   /** 群聊：这条是回应谁的（bot id 或 "user"） */
   replyTo?: string;
-  /** 群聊：主持人的小结 / 结论 */
-  tag?: "summary" | "conclusion";
+  /** 群聊：主持人的小结 / 结论；新建群欢迎房 */
+  tag?: "summary" | "conclusion" | "group-welcome";
   /** 回复后给用户的追问建议 */
   suggestions?: string[];
   /** 灵境 Presence 会话消息 */
   realm?: boolean;
   /** 合成语音本机路径（与 content 里 audio 块一致，便于检索） */
   audioPath?: string;
+  /** 回复还没写完就落盘的草稿，结束后会去掉 */
+  partial?: boolean;
+  /** 桌宠空闲小事产出 */
+  petIdleWork?: boolean;
+  /** 桌宠陪伴消息来源（chat / work / appear 等） */
+  companion?: string;
+  /** 陪伴/空闲小事的生成途径（model / rule） */
+  via?: string;
 }
 
 export interface ChatMessage {
@@ -194,6 +218,9 @@ export function contentText(c: string | ContentBlock[]): string {
       }
       if (b.type === "conclusion") {
         return [`【讨论结论】${b.summary}`, ...b.decisions.map((d) => `- 决定：${d}`), ...b.tasks.map((t) => `- ${t.owner} 负责：${t.task}${t.done ? "（已完成）" : t.dispatched ? "（已分派）" : ""}`), ...(b.open ?? []).map((o) => `- 待定：${o}`)].join("\n");
+      }
+      if (b.type === "routine") {
+        return `[例行「${b.name}」${b.when ? ` · ${b.when}` : ""}${b.enabled === false ? " · 已暂停" : ""}]`;
       }
       return null;
     })
@@ -275,9 +302,10 @@ export interface MigrationPayload {
   /** G5.5：社区宠物皮肤元数据 + 源文件路径，随迁移往返（导入端重建注册并复制文件） */
   skins?: Record<string, SkinExport>;
   tasks?: ScheduledTask[];
-  /** G4：群组与编排计划随迁移往返 */
+  /** G4：群组随迁移往返 */
   groups?: Group[];
-  plans?: OrchestrationPlan[];
+  /** @deprecated 编排已下线；旧导出可能仍带此字段，导入时忽略 */
+  plans?: unknown[];
   /** 普通配置（env.json） */
   env?: { key: string; value: string; label?: string; note?: string; botId?: string; updatedAt: number; updatedBy?: string }[];
   /** 项目与自定义指令；files 里的 path / textPath 是导出端的本机路径，导入时复制 */
@@ -285,7 +313,7 @@ export interface MigrationPayload {
   instructions?: { about?: string; style?: string };
   commandRules?: { botId: string; command: string; decision: "allow" | "deny"; createdAt: number }[];
   /** 密钥绑定本机钥匙串不能带走，只带名单，导入后提示重新填写 */
-  secretNames?: { name: string; label?: string; note?: string; botId?: string }[];
+  secretNames?: { name: string; label?: string; note?: string; botId?: string; savedBy?: string }[];
 }
 
 // ---- V3 适配器抽象（对齐 CowAgent LLMModel）----
@@ -376,6 +404,25 @@ export interface ScheduledTask {
   deleteAfterRun?: boolean;
   /** G3：一次性闹钟关联的会话 id（用于宠物「打开会话」跳转） */
   sessionId?: string;
+  /** 关联技能（演示→例行、模板例行） */
+  skillKey?: string;
+  /** 来源：聊天 / 演示 / 手动 / 模板 */
+  source?: "manual" | "demo" | "chat" | "template";
+  /**
+   * 入站 Webhook 令牌：网关开启时 POST /routines/:token 可触发一次试跑。
+   * 与出站 ConnectorStore.webhooks 不同。
+   * 对齐 Grok：定时例行默认无此字段；Webhook 例行才开通。
+   */
+  webhookToken?: string;
+  /**
+   * 是否参与 cron/闹钟调度。默认 true。
+   * false = 仅 Webhook 触发（到点不跑）；enabled=false 则定时与 Webhook 都暂停。
+   */
+  schedule?: boolean;
+  /** 最近运行历史（上限由 Scheduler 裁剪） */
+  history?: TaskRunLog[];
+  /** IANA 时区（如 Asia/Shanghai）；空=本机墙钟 */
+  timezone?: string;
 }
 
 export interface ToolCall {
@@ -404,7 +451,7 @@ export interface RuntimeResult {
 
 export interface AgentStatus {
   botId: string;
-  state: "idle" | "running" | "error";
+  state: "idle" | "running" | "waiting" | "error";
   lastRunAt?: number;
   lastError?: string;
   currentTask?: string;
@@ -440,37 +487,3 @@ export interface Group {
   settings?: { goal?: string; relay?: boolean; maxTurns?: number; moderator?: string };
 }
 
-export type OrchestrationStageMode = "seq" | "fan";
-
-export interface OrchestrationStage {
-  id: string;
-  botId: string;
-  /** 阶段实际负责人；缺省 = botId。handOff 后可变 */
-  ownerBotId?: string;
-  prompt: string;
-  mode: OrchestrationStageMode;
-  status: "pending" | "running" | "done" | "error";
-  result?: string;
-  error?: string;
-  startedAt?: number;
-  finishedAt?: number;
-  retries: number;
-  /** 移交备注（最近一次） */
-  handOffNote?: string;
-  /** 运行中的实时产出 / 当前动作，不持久化 */
-  live?: string;
-  activity?: string;
-}
-
-export interface OrchestrationPlan {
-  id: string;
-  ownerBotId: string;       // "user" 或 bot id（仅主控/授权可发起）
-  title: string;
-  createdAt: number;
-  status: "pending" | "running" | "done" | "error";
-  stages: OrchestrationStage[];
-  currentStage?: string;
-  result?: string;          // 最终产出
-  startedAt?: number;
-  finishedAt?: number;
-}

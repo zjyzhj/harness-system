@@ -46,6 +46,26 @@ const run = async (scripts: string[], text = "开始", sid = `s-${Math.random()}
 };
 
 describe("交互卡片", () => {
+  test("system 提示含两级选择卡约定（意图卡 → CLI 卡）", async () => {
+    const systems: string[] = [];
+    const orig = providers.streamComplete.bind(providers);
+    providers.streamComplete = async (p: any, req: any) => {
+      systems.push(req.system ?? "");
+      return orig(p, req);
+    };
+    await run(["ok"], "你好");
+    providers.streamComplete = orig;
+    const sys = systems[0] ?? "";
+    expect(sys).toContain("两级选择卡");
+    expect(sys).toContain("三条路径");
+    expect(sys).toContain("只看/找文件（不打开终端）");
+    expect(sys).toContain("打开终端 shell");
+    expect(sys).toContain("进 Coding CLI 改仓库");
+    expect(sys).toContain("再 ui.ask 一张 CLI 卡");
+    expect(sys).toContain("agentCli");
+    expect(sys).toContain("不要因为「不在工程名单」就去 MCP");
+  });
+
   test("ui.ask：旁白 + 选项卡片，本轮结束不再调模型", async () => {
     const { r, saved } = await run([`提审文案有三种出法，你选一个\n${tool("ui.ask", { question: "提审文案怎么出？", options: ["等合进 main", "按草案出并推 Mattermost", "只写 Baserow"] })}`]);
     expect(providers.calls).toBe(1);
@@ -54,6 +74,15 @@ describe("交互卡片", () => {
     expect(c.options.length).toBe(3);
     expect(r.text).toBe("提审文案有三种出法，你选一个");
     expect(contentText(saved)).toContain("B. 按草案出并推 Mattermost");
+  });
+
+  test("ui.choice 别名静默当成 ui.ask，不出「工具不可用」", async () => {
+    const { saved } = await run([`请选\n${tool("ui.choice", { question: "走哪条？", choices: ["甲", "乙"] })}`]);
+    expect(providers.calls).toBe(1);
+    expect(saved.some((b) => b.type === "choice")).toBe(true);
+    const c = saved.find((b) => b.type === "choice") as Extract<ContentBlock, { type: "choice" }>;
+    expect(c.options).toEqual(["甲", "乙"]);
+    expect(contentText(saved)).not.toContain("不可用");
   });
 
   test("ui.ask 的选项写成对象时取出文字，不显示 [object Object]", () => {
@@ -79,6 +108,37 @@ describe("交互卡片", () => {
     const again = new Store(home);
     expect(contentText(again.listMessages(sid).at(-1)!.content)).toContain("用户已选：乙");
     again.close();
+  });
+
+  test("强选择话术却没 ui.ask：同轮直接出卡，不烧检查轮", async () => {
+    const { r, saved } = await run([
+      "提审有三种出法，你选一个：\n1. 等合进 main\n2. 按草案出\n3. 只写 Baserow",
+    ]);
+    expect(providers.calls).toBe(1);
+    expect(saved.some((b) => b.type === "choice")).toBe(true);
+    const c = saved.find((b) => b.type === "choice") as Extract<ContentBlock, { type: "choice" }>;
+    expect(c.options).toEqual(["等合进 main", "按草案出", "只写 Baserow"]);
+    expect(r.content!.some((b: any) => b.type === "choice")).toBe(true);
+  });
+
+  test("建议方案枚举：软芯片进 meta.suggestions，不出硬卡", async () => {
+    const { sid, saved } = await run([
+      "建议下一步可以：\n1. 先核对 skill 边界\n2. 改挂 package lane\n3. 继续只跑工厂产包",
+    ]);
+    expect(saved.some((b) => b.type === "choice")).toBe(false);
+    const msg = store.listMessages(sid).at(-1)!;
+    expect(msg.meta?.suggestions).toEqual(["先核对 skill 边界", "改挂 package lane", "继续只跑工厂产包"]);
+  });
+
+  test("被转问时不出硬卡纠偏", async () => {
+    providers.calls = 0;
+    providers.scripts = ["你可以选：\n1. 甲\n2. 乙\n请选择一个"];
+    const r = await rt.handleStream(
+      { bot: store.getBot("a")!, from: "b", text: "帮我看看", sessionId: "b2b-b-a" },
+      { depth: 1, onBlock: () => {} },
+    );
+    expect(providers.calls).toBe(1);
+    expect(r.content?.some((b: any) => b.type === "choice")).toBe(false);
   });
 });
 
@@ -150,9 +210,10 @@ describe("bot 操作软件", () => {
 });
 
 describe("群聊记忆", () => {
-  const mem = () => new MemorySystem(home).list("b");
-  test("只从用户原话提取；接力回合不提取；群聊不自动记事件", async () => {
-    const before = mem().length;
+  const mem = () => new MemorySystem(home);
+  test("只从用户原话提取；接力回合不提取；群聊不自动记事件；用户事实进全局", async () => {
+    const beforeBot = mem().list("b").length;
+    const beforeGlobal = mem().list("global").length;
     const bot = store.getBot("b")!;
     const go = async (text: string, reply: string, opts: object) => {
       providers.calls = 0;
@@ -161,7 +222,7 @@ describe("群聊记忆", () => {
     };
     await go("[群聊「组」] 用户说：记住 我喜欢深色模式\n（群聊规则：……很长的规则文字……）", "收到，已经完成", { memoryText: "记住 我喜欢深色模式" });
     await go("[群聊「组」] 法务 在群里点到了你。用户最初说的是：记住 我喜欢深色模式", "好的，搞定", { memoryText: null });
-    const added = mem().slice(before);
-    expect(added.map((m) => m.content)).toEqual(["用户喜欢深色模式"]);
+    expect(mem().list("b").slice(beforeBot)).toEqual([]); // 用户事实不进 bot 私有
+    expect(mem().list("global").slice(beforeGlobal).map((m) => m.content)).toEqual(["用户喜欢深色模式"]);
   });
 });

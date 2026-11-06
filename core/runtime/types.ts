@@ -19,6 +19,7 @@ import type { SecretStore } from "../secret-store";
 import type { EnvStore } from "../env-store";
 import type { DemoSkillEngine } from "../demo-skill";
 import type { Vault } from "../vault";
+import type { ConnectorStore } from "../connectors";
 
 export interface RuntimeDeps {
   store: Store;
@@ -44,20 +45,12 @@ export interface RuntimeDeps {
   /** bot 间通信：from 向名为 target 的 bot 提问并拿到回复；depth 防止互相无限转发 */
   askBot?: (from: Bot, target: string, message: string, depth: number, parentSessionId?: string, signal?: AbortSignal) => Promise<string>;
   tasks?: Pick<Scheduler, "create" | "listForBot" | "delete"> & Partial<Pick<Scheduler, "list">>;
-  /** 软件里不归 runtime 管的现状：编排计划、项目（main 提供） */
-  appFacts?: () => { plans: { title: string; status: string }[]; projects: { name: string; instructions?: string }[] };
+  /** 软件里不归 runtime 管的现状：项目等（main 提供） */
+  appFacts?: () => { projects: { name: string; instructions?: string }[] };
   groups?: GroupRegistry;
-  /** 编排计划：bot 在聊天里发起 / 查看 / 停止（main 提供，跑完把结果发回发起的会话） */
-  plans?: {
-    start(req: { requester: Bot; sessionId?: string; task?: string; title?: string; stages?: Array<{ bot: string; prompt: string; mode?: string }> }): Promise<{ title: string; steps: string[] }>;
-    list(): Array<{ id: string; title: string; status: string; result?: string; currentOwner?: string }>;
-    cancel(match: string): string | null;
-    /** 把当前/指定阶段负责人移交给另一个 bot */
-    handOff?(req: { plan?: string; to: string; note?: string; stageId?: string }): { plan: string; stage: string; owner: string; note?: string };
-  };
   /** 以 from 的身份在软件里的群聊发言，群成员接力回应，返回他们的回复 */
   groupPost?: (from: Bot, group: string, message: string, signal?: AbortSignal) => Promise<
-    { ok: true; group: string; replies: { name: string; text: string }[]; reason: string } | { ok: false; error: string }
+    { ok: true; group: string; replies: { name: string; text: string }[]; reason: string; joined?: boolean } | { ok: false; error: string }
   >;
   /** 确认系统通知能弹（必要时发一条并触发授权）；false = 没权限，到点只能在聊天里提醒 */
   notifyCheck?: (title: string, body: string) => Promise<boolean>;
@@ -66,15 +59,23 @@ export interface RuntimeDeps {
   env?: EnvStore;
   /** bot 的工作目录根（每个 bot 一个子目录，fs.write 可写） */
   workspaceRoot?: string;
+  /** 软件数据目录（活动账本等）；缺省时 sys.activity 不可用 */
+  harnessHome?: string;
   /** bot 通过 app.* / skill.* 改了软件里的数据：通知界面刷新 */
   onAppChanged?: (what: string) => void;
+  /** 工具创建 bot 后：主进程刷新侧栏并跳到欢迎会话 */
+  onBotCreated?: (ev: { botId: string; sessionId: string }) => void;
   // 桌宠不进 RuntimeDeps — 见 core/pet/sidecar.ts → attachPetEntertainment
   /** 演示→技能：录制本机工具轨迹（可选；无则 demo.* 不可用） */
   demo?: DemoSkillEngine;
   /** 本机保险库聚合（只读 list/contact；无则 vault.* 不可用） */
   vault?: Vault;
+  /** 出站 Webhook 登记；有则开放 webhook.list / add / remove / post */
+  connectors?: ConnectorStore;
   /** 编码工作线（bot + 工程目录）。无则派工不续会话、聊天不带摘要 */
   codingThreads?: import("../coding-thread").CodingThreadStore;
+  /** 编码进程在不在。无则每次派工都是一次性启动 */
+  codingPresence?: import("../coding-presence").CodingPresence;
   /** 语义回想：返回注入上下文的一节（没开 / 没命中返回空串）；excludeSession 是当前会话（已在历史里） */
   recall?: (bot: Bot, query: string, excludeSession?: string) => Promise<string>;
   /** 每轮结束时上报这一轮的模型用量（主进程汇总成每日统计） */
@@ -84,6 +85,11 @@ export interface RuntimeDeps {
   /** 授权中心：MCP 工具、内网地址、工作区外文件、改共享技能都要过它 */
   consent?: ConsentCenter;
   audit?: AuditLog;
+  /**
+   * 动作落地判决（可选）。生产默认走模型对照事实；单测可注入，避免假 provider 联网挂死。
+   * facts 为 buildActionGroundingFacts 的纯文本。
+   */
+  judgeAction?: (input: { reply: string; facts: string }) => Promise<{ ok: boolean; issues: string[] }>;
 }
 
 export type ToolOutcome = RegOutcome;
@@ -106,7 +112,7 @@ export interface RuntimeOptions {
   think?: boolean;
   /** 全局 / 项目自定义指令 */
   extraSystem?: string;
-  /** 无人值守（编排阶段等）：没有用户能回答提问 / 确认 */
+  /** 无人值守（定时任务 / 自动执行）：没有用户能回答提问 / 确认 */
   unattended?: boolean;
   /** 内部：本轮走原生 function calling（影响工具说明的写法） */
   nativeTools?: boolean;

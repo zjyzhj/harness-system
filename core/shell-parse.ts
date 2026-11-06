@@ -8,7 +8,7 @@ export interface CommandAnalysis {
   heads: string[];
   /** 需要每次确认、不能「总是允许」的原因 */
   risks: string[];
-  /** 危险命令：每次强确认，信任模式也不放过 */
+  /** 危险命令：每次强确认（信任模式也不放过） */
   dangerous: string[];
 }
 

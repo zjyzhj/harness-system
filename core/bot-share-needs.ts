@@ -120,7 +120,7 @@ export function collectNeeds(opts: {
   privateSkills: SkillLike[];
   sharedSkills?: SkillLike[];
   vault?: VaultMeta;
-  /** 该 bot 私有的 secret / env（即使技能未引用也带上） */
+  /** 该 bot 收录的 secret（账号级共用，按 savedBy 归因；即使技能未引用也带上）/ 私有 env 覆盖 */
   ownedSecrets?: { name: string; label?: string; note?: string }[];
   ownedEnv?: { key: string; label?: string; note?: string }[];
 }): BotNeeds {

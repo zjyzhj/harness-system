@@ -129,13 +129,27 @@ export async function readCapped(res: Response, maxBytes = 2_000_000): Promise<s
 }
 
 /** 访问网址：每一跳重定向都检查是不是内网地址；allowPrivate 由调用方在用户授权后传入 */
-export async function safeFetch(url: string, opts: { allowPrivate?: boolean; signal?: AbortSignal; headers?: Record<string, string> } = {}): Promise<Response> {
+export async function safeFetch(url: string, opts: {
+  allowPrivate?: boolean;
+  signal?: AbortSignal;
+  headers?: Record<string, string>;
+  method?: string;
+  body?: BodyInit | null;
+} = {}): Promise<Response> {
   let current = url;
+  const method = (opts.method ?? "GET").toUpperCase();
   for (let hop = 0; hop < 6; hop++) {
     const u = new URL(current);
     if (!/^https?:$/.test(u.protocol)) throw new Error("URL 需以 http(s):// 开头");
     if (!opts.allowPrivate && (await isPrivateHost(u.hostname))) throw new PrivateAddressError(u.host);
-    const res = await fetch(current, { headers: { "User-Agent": UA, ...opts.headers }, signal: opts.signal ?? AbortSignal.timeout(20_000), redirect: "manual" });
+    // 仅首跳带 body；重定向按常见客户端行为改 GET 且不重放 body
+    const res = await fetch(current, {
+      method: hop === 0 ? method : "GET",
+      body: hop === 0 ? opts.body ?? undefined : undefined,
+      headers: { "User-Agent": UA, ...opts.headers },
+      signal: opts.signal ?? AbortSignal.timeout(20_000),
+      redirect: "manual",
+    });
     const loc = res.status >= 300 && res.status < 400 ? res.headers.get("location") : null;
     if (!loc) return res;
     current = new URL(loc, current).toString();

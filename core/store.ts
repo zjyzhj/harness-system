@@ -252,7 +252,7 @@ export class Store {
     return () => this.messageListeners.delete(fn);
   }
 
-  addMessage(m: ChatMessage) {
+  addMessage(m: ChatMessage): ChatMessage {
     const sid = m.sessionId;
     const now = Date.now();
     if (!this.sessions[sid]) {
@@ -270,6 +270,7 @@ export class Store {
     for (const fn of this.messageListeners) {
       try { fn(msg); } catch {}
     }
+    return msg;
   }
 
   /** 消息分页：返回最新 window（或 beforeId 之前的更旧窗口），附带 hasMore */
@@ -359,8 +360,8 @@ export class Store {
     }
   }
 
-  /** 改一条已存的消息（如问题卡片记下用户的选择），整份 jsonl 重写 */
-  updateMessage(sessionId: string, id: number, mutate: (m: ChatMessage) => ChatMessage): ChatMessage | null {
+  /** 改一条已存的消息（如问题卡片记下用户的选择），整份 jsonl 重写。notify 时当成新消息推给界面 */
+  updateMessage(sessionId: string, id: number, mutate: (m: ChatMessage) => ChatMessage, notify = false): ChatMessage | null {
     const list = this.listMessages(sessionId);
     const idx = list.findIndex((m) => (m as any).id === id);
     if (idx < 0) return null;
@@ -368,6 +369,11 @@ export class Store {
     const kept = list.map((m, i) => (i === idx ? next : m));
     this.messagesBySession[sessionId] = kept;
     this.rewriteSession(sessionId, kept);
+    if (notify) {
+      for (const fn of this.messageListeners) {
+        try { fn(next); } catch {}
+      }
+    }
     return next;
   }
 

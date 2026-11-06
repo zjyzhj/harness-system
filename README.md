@@ -8,8 +8,8 @@ macOS 本地优先的 AI 智能体指挥中心：一句话创建 bot、主控统
 
 - **一句话建 bot** — 名称、角色、模型、性格一次成型
 - **主控面板** — Grok Bot 风格暗色对话台，统一指挥所有智能体
-- **桌面宠物** — Live2D / 精灵换装、主动搭话、进化与导演编排
-- **多 bot 协作** — 群组广播、编排流水线、消息总线互通
+- **桌面宠物** — Live2D / 精灵换装、主动搭话、进化与一句话导演
+- **多 bot 协作** — 群聊 @ / 接力、bot.ask 交接、消息总线与本机网关
 - **系统能力** — 经同意的通知、剪贴板、文件、截屏与电脑操控
 - **灵境（实验）** — 私密 Presence：文本对话 + 参考音频音色还原
 
@@ -32,7 +32,7 @@ bun run dist  # 打 macOS arm64 包（dmg）
 |------|------|
 | 运行时 | 工具循环、MCP、记忆、技能（SKILL.md）、演示→技能、定时任务、上下文预算 |
 | 宠物 | Live2D 样本模型、换装、XP/进化、主动搭话、互访、一句话导演 |
-| 协作 | 群组、编排器、HTTP Gateway、富内容互通 |
+| 协作 | 群聊 @ / bot.ask、HTTP Gateway、富内容互通 |
 | 安全 | 同意中心、审计日志、密钥安全存储、命令白名单 |
 | 分发 | electron-builder 打包（见 `package.json` → `build`） |
 
@@ -40,7 +40,7 @@ bun run dist  # 打 macOS arm64 包（dmg）
 
 ```
 Electron 壳 (app/) ──IPC──▶ core/（纯 TypeScript）
-                              ├─ BotRuntime / Orchestrator   ← Bot 完整设计（不含桌宠）
+                              ├─ BotRuntime                  ← Bot 完整设计（不含桌宠）
                               ├─ Memory / Skills / Scheduler / MCP
                               ├─ Realm（灵境 Presence + TTS）
                               ├─ Store / Migration / SecretStore

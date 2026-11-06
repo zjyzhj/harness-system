@@ -253,7 +253,10 @@ async function openRealm(id) {
   realmPresence = p;
   currentBot = null;
   currentGroup = null;
+  $("#coding-term")?.classList.add("hidden");
+  if (typeof paintCodingDock === "function") paintCodingDock();
   currentSession = null;
+  if (typeof renderRelayBar === "function") renderRelayBar();
   realmSessionId = (await api.realm.sessions(id))[0]?.id || null;
   $("#empty-state")?.classList.add("hidden");
   $("#empty-state") && ($("#empty-state").style.display = "none");
@@ -454,8 +457,6 @@ function leaveRealm(opts) {
     $("#chat-title").innerHTML = "";
     $("#chat-bar")?.classList.add("hidden");
     $("#messages").innerHTML = "";
-    $("#empty-state")?.classList.remove("hidden");
-    $("#empty-state") && ($("#empty-state").style.display = "");
     $("#input").placeholder = "给 bot 发消息，@bot名 可让 bot 互相通信…";
     // 没有选中 bot 时清空右栏，避免继续显示 Presence 或旧 bot
     const panel = $("#details");
@@ -463,6 +464,7 @@ function leaveRealm(opts) {
       panel.innerHTML = `<button class="icon-btn d-close" title="关闭">✕</button><div class="d-empty" style="padding:24px">选一个 bot 或灵境 Presence 查看详情</div>`;
       panel.querySelector(".d-close").onclick = () => toggleDetails(false);
     }
+    if (!currentBot && !currentGroup && typeof renderEmptyState === "function") renderEmptyState();
   } else {
     $("#input").placeholder = "给 bot 发消息，@bot名 可让 bot 互相通信…";
   }

@@ -3,19 +3,24 @@ import { join, relative, resolve, sep } from "node:path";
 import { readJsonSafe, writeJsonAtomic } from "./atomic-fs";
 
 /**
- * G5 授权中心 — 对标 macOS TCC 心智：默认 deny，显式 allow。
- * - 组级能力：notify/clipboard/fs/bash:read/bash:dev/bash:net/bash:io/gui/screen/apple
- * - Grant 支持 once（用一次即失效）/ ttl（到期失效）/ 长期
- * - 危险操作 requiresStrongConsent（调用方二次确认）
- * - 命令规则：按命令名记住「总是允许 / 禁止」，可只对某个 bot 或所有 bot（"*"）
- * - 信任模式：某个 bot 的命令直接执行（禁止规则和危险命令确认仍然生效）
- * - 持久化 consent.json + command-rules.json
+ * G5 授权中心 — 对标 Grok Ask / Auto / Always-approve。
+ * - Ask：未授权都问
+ * - Auto：Shell / 开终端 / 派 CLI 自动过；危险命令仍强确认；禁止规则仍生效
+ * - Always：工具默认全过（含危险命令）；禁止规则仍生效
+ * - 命令规则：按命令名 allow/deny；目录前缀信任（cli.agent / term.open）
+ * - 持久化 consent.json + command-rules.json（兼容旧 trusted[]）
  */
+export type PermissionMode = "ask" | "auto" | "always";
+
 export type Cap =
   | "notify" | "clipboard" | "fs" | "fs:send"
   | "bash:read" | "bash:dev" | "bash:net" | "bash:io" | "bash:other"
   | "gui" | "screen" | "apple" | "net:local" | "skill:shared"
   | "cli:agent"
+  | "term:open"
+  | "mcp:manage"
+  | "webhook:out"
+  | "system:observe"
   | `mcp:${string}`;
 
 export interface Grant {
@@ -39,8 +44,8 @@ export interface ConsentRequest {
   /** 为什么要单独确认，显示在卡片上 */
   reasons?: string[];
   /**
-   * G10：Coding CLI 派工目录。有值时卡片多「总是允许此目录」；
-   * 选 allow-command 时按此前缀记住，二次同前缀可免弹窗（仍可要求危险确认文案）。
+   * 目录前缀授权（cli.agent / term.open）。有值时卡片多「总是允许此目录」；
+   * 选 allow-command 时按此前缀记住，二次同前缀可免弹窗。
    */
   rememberPath?: string;
 }
@@ -51,6 +56,9 @@ export interface CliAgentPathGrant {
   prefix: string;
   createdAt: number;
 }
+
+/** 与 CliAgentPathGrant 同形：term.open 的目录信任 */
+export type TermOpenPathGrant = CliAgentPathGrant;
 
 export type ConsentDecision = "allow" | "allow-once" | "allow-command" | "deny";
 
@@ -84,6 +92,10 @@ export const CAP_LABELS: Record<Cap, string> = {
   "net:local": "访问本机 / 局域网地址",
   "skill:shared": "修改共享技能",
   "cli:agent": "派本机 Coding CLI 改工程",
+  "term:open": "在工程目录打开终端",
+  "mcp:manage": "安装 / 移除 MCP server",
+  "webhook:out": "出站 Webhook（登记 / POST）",
+  "system:observe": "系统观察（进程 / 磁盘 / 活动账本）",
 };
 
 export function capLabel(cap: string): string {
@@ -95,8 +107,10 @@ export class ConsentCenter {
   private file: string;
   private rulesFile: string;
   private rules: CommandRule[] = [];
-  private trusted = new Set<string>();
+  /** botId → 权限模式；缺省 ask。旧版 trusted[] 加载时迁成 auto */
+  private modes = new Map<string, PermissionMode>();
   private cliPaths: CliAgentPathGrant[] = [];
+  private termPaths: TermOpenPathGrant[] = [];
 
   constructor(private home: string) {
     this.file = join(home, "consent.json");
@@ -107,16 +121,41 @@ export class ConsentCenter {
   private load() {
     const grants = readJsonSafe<Grant[]>(this.file, []);
     if (Array.isArray(grants)) for (const g of grants) if (g?.botId && g.cap) this.grants.set(`${g.botId}:${g.cap}`, g);
-    const raw = readJsonSafe<{ rules?: CommandRule[]; trusted?: string[]; cliAgentPaths?: CliAgentPathGrant[] }>(this.rulesFile, {});
+    const raw = readJsonSafe<{
+      rules?: CommandRule[];
+      trusted?: string[];
+      modes?: Record<string, string>;
+      cliAgentPaths?: CliAgentPathGrant[];
+      termOpenPaths?: TermOpenPathGrant[];
+    }>(this.rulesFile, {});
     this.rules = (Array.isArray(raw.rules) ? raw.rules : []).filter((r) => r?.command && r.botId && (r.decision === "allow" || r.decision === "deny"));
-    this.trusted = new Set(Array.isArray(raw.trusted) ? raw.trusted : []);
+    this.modes = new Map();
+    if (raw.modes && typeof raw.modes === "object") {
+      for (const [id, m] of Object.entries(raw.modes)) {
+        if (m === "ask" || m === "auto" || m === "always") this.modes.set(id, m);
+      }
+    }
+    // 旧 trusted[] → auto（已有 modes 条目的不覆盖）
+    for (const id of Array.isArray(raw.trusted) ? raw.trusted : []) {
+      if (id && !this.modes.has(id)) this.modes.set(id, "auto");
+    }
     this.cliPaths = (Array.isArray(raw.cliAgentPaths) ? raw.cliAgentPaths : []).filter((p) => p?.botId && p?.prefix);
+    this.termPaths = (Array.isArray(raw.termOpenPaths) ? raw.termOpenPaths : []).filter((p) => p?.botId && p?.prefix);
   }
   private persist() {
     writeJsonAtomic(this.file, [...this.grants.values()]);
   }
   private persistRules() {
-    writeJsonAtomic(this.rulesFile, { rules: this.rules, trusted: [...this.trusted], cliAgentPaths: this.cliPaths });
+    const modes: Record<string, PermissionMode> = {};
+    for (const [id, m] of this.modes) if (m !== "ask") modes[id] = m;
+    writeJsonAtomic(this.rulesFile, {
+      rules: this.rules,
+      // 兼容旧读法：auto|always 都算「信任过」
+      trusted: Object.keys(modes),
+      modes,
+      cliAgentPaths: this.cliPaths,
+      termOpenPaths: this.termPaths,
+    });
   }
 
   /** 主动授权 */
@@ -193,18 +232,36 @@ export class ConsentCenter {
     return botId ? this.rules.filter((r) => r.botId === botId || r.botId === "*") : [...this.rules];
   }
 
-  isTrusted(botId: string): boolean {
-    return this.trusted.has(botId);
+  permissionMode(botId: string): PermissionMode {
+    return this.modes.get(botId) ?? "ask";
   }
 
-  setTrusted(botId: string, on: boolean) {
-    if (on) this.trusted.add(botId);
-    else this.trusted.delete(botId);
+  setPermissionMode(botId: string, mode: PermissionMode) {
+    if (mode === "ask") this.modes.delete(botId);
+    else this.modes.set(botId, mode);
     this.persistRules();
   }
 
+  /** Auto 或 Always：Shell / 终端 / Coding CLI 可跳过常规询问 */
+  isTrusted(botId: string): boolean {
+    const m = this.permissionMode(botId);
+    return m === "auto" || m === "always";
+  }
+
+  /** 兼容旧 API：开 → Auto，关 → Ask */
+  setTrusted(botId: string, on: boolean) {
+    this.setPermissionMode(botId, on ? "auto" : "ask");
+  }
+
   trustedBots(): string[] {
-    return [...this.trusted];
+    return [...this.modes.entries()].filter(([, m]) => m === "auto" || m === "always").map(([id]) => id);
+  }
+
+  /** 各 bot 的模式表（Ask 不出现） */
+  permissionModes(): Record<string, PermissionMode> {
+    const out: Record<string, PermissionMode> = {};
+    for (const [id, m] of this.modes) if (m !== "ask") out[id] = m;
+    return out;
   }
 
   // ---- G10：cli.agent 目录前缀信任 ----
@@ -260,8 +317,37 @@ export class ConsentCenter {
     return botId ? this.cliPaths.filter((p) => p.botId === botId) : [...this.cliPaths];
   }
 
+  hasTermOpenPath(botId: string, cwd: string): boolean {
+    const real = this.normalizePrefix(cwd);
+    return this.termPaths.some(
+      (p) => p.botId === botId && (real === p.prefix || real.startsWith(p.prefix + sep)),
+    );
+  }
+
+  grantTermOpenPath(botId: string, cwd: string): TermOpenPathGrant {
+    const prefix = this.normalizePrefix(cwd);
+    this.termPaths = this.termPaths.filter((p) => !(p.botId === botId && p.prefix === prefix));
+    const g: TermOpenPathGrant = { botId, prefix, createdAt: Date.now() };
+    this.termPaths.push(g);
+    this.persistRules();
+    return g;
+  }
+
+  revokeTermOpenPath(botId: string, cwd?: string) {
+    if (!cwd) this.termPaths = this.termPaths.filter((p) => p.botId !== botId);
+    else {
+      const prefix = this.normalizePrefix(cwd);
+      this.termPaths = this.termPaths.filter((p) => !(p.botId === botId && (p.prefix === prefix || prefix.startsWith(p.prefix + sep) || p.prefix.startsWith(prefix + sep))));
+    }
+    this.persistRules();
+  }
+
+  listTermOpenPaths(botId?: string): TermOpenPathGrant[] {
+    return botId ? this.termPaths.filter((p) => p.botId === botId) : [...this.termPaths];
+  }
+
   /**
-   * cli.agent 专用：已信任前缀则直接放行；否则弹窗，可选「总是允许此目录」。
+   * cli.agent / term.open：已信任前缀则直接放行；否则弹窗，可选「总是允许此目录」。
    * 不用整 cap 的长期 grant（避免一次批准任意路径）。
    */
   /** 层级太浅（如 /tmp、/Users/name）不能记成长期前缀，否则等于放开一大片盘 */
@@ -278,6 +364,7 @@ export class ConsentCenter {
     const prefix = this.normalizePrefix(cwd);
     // 已信任前缀：放行但仍标记 viaPathGrant，调用方须写一条可见摘要（避免完全静默）
     if (this.hasCliAgentPath(botId, prefix)) return { granted: true, viaPathGrant: true };
+    if (this.isTrusted(botId)) return { granted: true }; // Auto / Always
     if (!this.decider) return { granted: false };
     const decision = await this.decider({
       botId,
@@ -297,12 +384,40 @@ export class ConsentCenter {
     return { granted: true };
   }
 
+  /** term.open：打开 shell 终端。已有终端不等于已批准派 Coding CLI。 */
+  async requestTermOpen(
+    botId: string,
+    cwd: string,
+    description: string,
+    opts?: { reasons?: string[] },
+  ): Promise<{ granted: boolean; remembered?: boolean; viaPathGrant?: boolean; shallow?: boolean }> {
+    const prefix = this.normalizePrefix(cwd);
+    if (this.hasTermOpenPath(botId, prefix)) return { granted: true, viaPathGrant: true };
+    if (this.isTrusted(botId)) return { granted: true }; // Auto / Always
+    if (!this.decider) return { granted: false };
+    const decision = await this.decider({
+      botId,
+      cap: "term:open",
+      description,
+      rememberPath: this.isShallowPrefix(prefix) ? undefined : prefix,
+      reasons: opts?.reasons,
+    });
+    if (decision === "deny") return { granted: false };
+    if (decision === "allow-command") {
+      if (this.isShallowPrefix(prefix)) return { granted: true, shallow: true };
+      this.grantTermOpenPath(botId, prefix);
+      return { granted: true, remembered: true };
+    }
+    return { granted: true };
+  }
+
   /**
    * 请求授权：有 grant → 消耗 once 并返回 true；无 → 调 decider 弹窗。
-   * 危险操作不走已有授权，每次都要确认，也不会被记成长期。
+   * Always 模式直接放行；Ask/Auto 下危险/onceOnly 不走已有长期授权。
    */
   async request(botId: string, cap: Cap, description: string, opts?: { requiresStrongConsent?: boolean; onceOnly?: boolean; reasons?: string[] }): Promise<{ granted: boolean }> {
     this.expire();
+    if (this.permissionMode(botId) === "always") return { granted: true };
     const strong = !!opts?.requiresStrongConsent;
     const once = strong || !!opts?.onceOnly;
     const g = this.grants.get(`${botId}:${cap}`);
@@ -322,6 +437,11 @@ export class ConsentCenter {
     botId: string, command: string, description: string,
     opts?: { cap?: Cap; requiresStrongConsent?: boolean; onceOnly?: boolean; reasons?: string[] },
   ): Promise<{ granted: boolean }> {
+    const mode = this.permissionMode(botId);
+    // Always：含危险命令一并放行（调用方已拦 deny 规则）
+    if (mode === "always") return { granted: true };
+    // Auto：非危险直接放行；危险仍走强确认
+    if (mode === "auto" && !opts?.requiresStrongConsent) return { granted: true };
     const strong = !!opts?.requiresStrongConsent;
     const once = strong || !!opts?.onceOnly;
     if (!once && this.commandRule(botId, command) === "allow") return { granted: true };

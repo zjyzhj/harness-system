@@ -106,12 +106,18 @@ export class DemoSkillEngine {
     const name = (opts?.name || session.title || guessName(session)).trim().slice(0, 60);
     const description = (opts?.description || guessDescription(session, name)).trim().slice(0, 200);
     const body = buildBody(session, name);
+    // 先停录；落盘失败可用 reopen 恢复
     this.active.delete(botId);
     return {
       ok: true,
       session,
       draft: { name, description, body, steps: session.steps.length, sessionId: session.id },
     };
+  }
+
+  /** 技能落盘失败时恢复录制会话（继续补步或重试 finish） */
+  reopen(botId: string, session: DemoSession): void {
+    this.active.set(botId, session);
   }
 
   /** 稳定前缀：一行录制状态 */

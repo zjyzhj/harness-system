@@ -36,9 +36,17 @@ export class SkillRegistry {
     return [...this.skills.values()];
   }
 
-  /** 某个 bot 能用的技能：共享技能 + 它自己的私有技能 */
+  /** 某个 bot 能用的技能：共享技能 + 它自己的私有技能（不论是否对该 bot 关闭） */
   visibleTo(botId?: string): Skill[] {
     return this.list().filter((s) => !s.owner || s.owner === botId);
+  }
+
+  /** 对该 bot 实际可用：全局 enabled，且不在 bot.disabledSkills */
+  enabledFor(bot: { id: string; disabledSkills?: string[] }, skill: Skill): boolean {
+    if (!skill.enabled) return false;
+    if (skill.owner && skill.owner !== bot.id) return false;
+    if (!skill.owner && (bot.disabledSkills ?? []).includes(skill.key)) return false;
+    return true;
   }
 
   /** 新建或更新技能（表单式）：key 不给则按名称生成 */
@@ -95,10 +103,11 @@ export class SkillRegistry {
     return key;
   }
 
-  /** 给 LLM 的工具描述（渐进披露：只有 description + requires）；传 botId 时只列它能用的 */
-  toolDescriptions(botId?: string): string {
-    return (botId === undefined ? this.list() : this.visibleTo(botId))
-      .filter((s) => s.enabled)
+  /** 给 LLM 的工具描述（渐进披露：只有 description + requires）；传 bot 时尊重 disabledSkills */
+  toolDescriptions(botId?: string, bot?: { id: string; disabledSkills?: string[] }): string {
+    const list = botId === undefined ? this.list() : this.visibleTo(botId);
+    return list
+      .filter((s) => (bot ? this.enabledFor(bot, s) : s.enabled))
       .map((s) => `- ${s.key}: ${s.description}${s.requires?.length ? `（依赖: ${s.requires.join(", ")}）` : ""}`)
       .join("\n");
   }
@@ -232,7 +241,7 @@ description: 把用户需求分到合适的 bot 或阶段。用户说「分诊 /
 
 1. 用一句话复述需求与约束。
 2. 列出候选负责人（团队成员）及理由；必要时 ui.ask 让用户选。
-3. 简单任务用 bot.ask；3 步以上或要后台跑用 plan.start。
+3. 简单任务用 bot.ask；需要多人同场用群聊 @ / 交接。
 4. 回执：谁负责、下一步是什么、何时更新。
 `,
   "research-write": `---
@@ -244,6 +253,6 @@ description: 先调研再成文。用户说「调研后写报告 / 竞品分析�
 1. 明确主题、受众、篇幅；缺信息用 ui.form。
 2. 用 web.search / web.fetch（或委派调研 bot）收集要点与来源。
 3. 列出提纲，确认后写成完整文稿，引用用 [n] 并附来源。
-4. 可用 plan.start：调研 bot → 写作 bot 接力；不要假装云端并行屏幕。
+4. 可 bot.ask 调研 bot → 写作 bot 接力，或在群里 @ 交接；不要假装云端并行屏幕。
 `,
 };

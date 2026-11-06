@@ -30,6 +30,15 @@ describe("cli-agent 路径与提示", () => {
     expect(() => resolveAgentCwd("relative/proj")).toThrow(/绝对路径/);
   });
 
+  test("波浪号展开成家目录下的工程", () => {
+    const home = mkdtempSync(join(tmpdir(), "home-"));
+    const proj = join(home, "Desktop", "elon-super-factory");
+    mkdirSync(proj, { recursive: true });
+    expect(resolveAgentCwd("~/Desktop/elon-super-factory", { home })).toBe(realpathSync(proj));
+    expect(() => resolveAgentCwd("~", { home })).toThrow(/家目录/);
+    expect(() => resolveAgentCwd("~someone/proj", { home })).toThrow(/绝对路径/);
+  });
+
   test("接受普通工程目录", () => {
     const dir = mkdtempSync(join(tmpdir(), "proj-"));
     writeFileSync(join(dir, "a.txt"), "x");
@@ -60,7 +69,23 @@ describe("cli-agent 路径与提示", () => {
 
     const cl = agentCliArgs("claude", "fix", "/repo");
     expect(cl).toContain("--dangerously-skip-permissions");
+    expect(cl).toContain("--settings");
+    const settingsIdx = cl.indexOf("--settings");
+    const settings = JSON.parse(cl[settingsIdx + 1]!);
+    expect(settings.sandbox?.enabled).toBe(false);
     expect(cl.join(" ")).not.toContain('--tools ""');
+  });
+
+  test("聊天 cursor 不用 --mode ask，避免拒调 Harness 工具", async () => {
+    const { streamCliArgs, cliArgs } = await import("../core/adapters/cli");
+    const stream = streamCliArgs("cursor", "hi");
+    expect(stream.join(" ")).not.toContain("--mode");
+    expect(stream).toContain("--sandbox");
+    expect(stream).toContain("enabled");
+    expect(stream).toContain("--workspace");
+    const once = cliArgs("cursor", "hi");
+    expect(once.join(" ")).not.toContain("--mode");
+    expect(once).toContain("--sandbox");
   });
 
   test("提示含任务与 cwd，不含密钥字样模板", () => {

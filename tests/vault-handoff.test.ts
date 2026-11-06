@@ -7,8 +7,6 @@ import { ConnectorStore } from "../core/connectors";
 import { Vault } from "../core/vault";
 import { SecretStore } from "../core/secret-store";
 import { EnvStore } from "../core/env-store";
-import { Orchestrator } from "../core/orchestrator";
-import { Store } from "../core/store";
 import { uiTool } from "../core/runtime/tool-helpers";
 import { BUILTIN_SKILL_TEMPLATES } from "../core/skill-registry";
 import { MAX_ATTACH_COPY_BYTES } from "../core/attachments";
@@ -46,24 +44,25 @@ describe("Vault + contacts + connectors", () => {
     expect(vault.catalog().webhooks).toBe(1);
     expect(vault.catalog().mcp[0].name).toBe("demo-mcp");
   });
-});
 
-describe("Orchestrator handOff", () => {
-  test("移交阶段负责人", () => {
-    const home = mkdtempSync(join(tmpdir(), "harness-hand-"));
-    const store = new Store(home);
-    store.saveBot({ id: "a", name: "甲", role: "r", persona: "", providerId: "", petEnabled: false, createdAt: 1 });
-    store.saveBot({ id: "b", name: "乙", role: "r", persona: "", providerId: "", petEnabled: false, createdAt: 1 });
-    const orch = new Orchestrator({ store }, home);
-    const plan = orch.create({
-      ownerBotId: "user",
-      title: "接力",
-      stages: [{ botId: "a", prompt: "第一步调研" }],
+  test("connectors.postWebhook 真发 POST（禁内网）", async () => {
+    const home = mkdtempSync(join(tmpdir(), "harness-wh-"));
+    const connectors = new ConnectorStore(home);
+    const srv = Bun.serve({
+      port: 0,
+      fetch: async (req) => {
+        const j = await req.json();
+        return Response.json({ ok: true, got: j });
+      },
     });
-    const r = orch.handOff({ planId: plan.id, toBotId: "b", note: "乙接着做" });
-    expect(r.stage.ownerBotId).toBe("b");
-    expect(r.stage.handOffNote).toBe("乙接着做");
-    expect(orch.currentOwner(r.plan)).toBe("b");
+    connectors.upsertWebhook({ name: "测", url: `http://127.0.0.1:${srv.port}/hook` });
+    const denied = await connectors.postWebhook("测", { hello: 1 });
+    expect(denied.ok).toBe(false);
+    if (!denied.ok) expect(denied.error).toMatch(/本机|局域网/);
+    const ok = await connectors.postWebhook("测", { hello: 1 }, { allowPrivate: true });
+    expect(ok.ok).toBe(true);
+    if (ok.ok) expect(ok.status).toBe(200);
+    srv.stop(true);
   });
 });
 

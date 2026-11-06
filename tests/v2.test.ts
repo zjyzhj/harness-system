@@ -45,6 +45,22 @@ describe("migration-v2", () => {
     expect(existsSync(join(home, "out.json"))).toBe(true);
   });
 
+  test("旧包里的 plans 跳过不导入；导出不再带 plans", async () => {
+    const payload = migration.exportPayload();
+    expect(payload.plans).toBeUndefined();
+    payload.plans = [
+      { id: "p1", title: "旧编排", stages: [] },
+      { id: "p2", title: "另一条", stages: [] },
+    ];
+    const store2 = new Store(join(home, "h2-plans"));
+    const mig2 = new MigrationV2(store2, join(home, "h2-plans", "assets"), new MemorySystem(join(home, "h2-plans")), new SkillRegistry(join(home, "h2-plans", "skills")), new Scheduler(join(home, "h2-plans")));
+    const r = mig2.importFromPayload(payload);
+    expect(r.importedPlans).toBe(0);
+    expect(r.skippedPlans).toBe(2);
+    expect(mig2.exportPayload().plans).toBeUndefined();
+    store2.close();
+  });
+
   test("全量导入还原记忆/技能/任务", async () => {
     const store2 = new Store(join(home, "h2"));
     const mem2 = new MemorySystem(join(home, "h2"));

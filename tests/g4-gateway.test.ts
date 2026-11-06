@@ -58,4 +58,25 @@ describe("G4 gateway", () => {
     // ping 可用
     expect(await t.ping()).toBe(true);
   });
+
+  test("/bots/msg 每 token 限流 → 429", async () => {
+    const home2 = mkdtempSync(join(tmpdir(), "harness-g4msg-"));
+    const store2 = new Store(home2);
+    const bus2 = new MessageBus(store2);
+    store2.saveBot({ id: "t", name: "t", role: "", persona: "", providerId: "default", petEnabled: false, createdAt: Date.now() });
+    bus2.register("t", async () => "ok");
+    const tok = "msg-limit-token-abcdefgh";
+    const g = new GatewayServer(0, tok, bus2, { msgPerTokenPerMin: 2, msgPerIpPerMin: 100 });
+    const p = await g.start();
+    const post = () => fetch(`http://127.0.0.1:${p}/bots/msg`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${tok}` },
+      body: JSON.stringify({ from: "a", to: "t", text: "x", timestamp: Date.now() }),
+    });
+    expect((await post()).status).toBe(200);
+    expect((await post()).status).toBe(200);
+    const limited = await post();
+    expect(limited.status).toBe(429);
+    await g.stop();
+  });
 });

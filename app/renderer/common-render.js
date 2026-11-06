@@ -11,15 +11,91 @@ function esc(s) {
   return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
 
+/** 输入框自适应高度；程序化改 value 不会触发 input，必须手动调一次，否则长文只露出末尾一行 */
+function fitComposerInput() {
+  const el = typeof document !== "undefined" ? document.getElementById("input") : null;
+  if (!el) return;
+  el.style.height = "auto";
+  el.style.height = `${Math.min(el.scrollHeight, 160)}px`;
+}
+
+/** 写入主输入框并刷新高度；focus/caret 可选 */
+function setComposerInput(text, { focus = false, caret } = {}) {
+  const el = typeof document !== "undefined" ? document.getElementById("input") : null;
+  if (!el) return;
+  el.value = text ?? "";
+  fitComposerInput();
+  if (!focus) return;
+  el.focus();
+  if (caret === "start") el.setSelectionRange(0, 0);
+  else if (caret === "end") el.setSelectionRange(el.value.length, el.value.length);
+}
+
+/** 5 段 cron → 人话（例行 / 定时任务共用） */
+function describeCron(cron) {
+  const WEEK = ["日", "一", "二", "三", "四", "五", "六"];
+  const [mi, h, d, mo, w] = String(cron || "").trim().split(/\s+/);
+  if (!mi) return String(cron || "");
+  const t = /^\d+$/.test(h) && /^\d+$/.test(mi) ? `${h.padStart(2, "0")}:${mi.padStart(2, "0")}` : null;
+  if (mi === "*" && h === "*" && d === "*" && mo === "*" && w === "*") return "每分钟";
+  if (/^\*\/\d+$/.test(mi) && h === "*" && d === "*" && w === "*") return `每 ${mi.slice(2)} 分钟`;
+  if (/^\d+$/.test(mi) && h === "*" && d === "*" && w === "*") return `每小时第 ${mi} 分`;
+  if (t && d === "*" && mo === "*" && w === "*") return `每天 ${t}`;
+  if (t && d === "*" && mo === "*" && w === "1-5") return `工作日 ${t}`;
+  if (t && d === "*" && mo === "*" && /^\d$/.test(w)) return `每周${WEEK[Number(w) % 7]} ${t}`;
+  if (t && /^\d+$/.test(d) && mo === "*" && w === "*") return `每月 ${d} 日 ${t}`;
+  return String(cron);
+}
+
+function routineWhen(t) {
+  const short = (ts) => {
+    if (!ts) return "";
+    if (typeof fmtTime === "function") return fmtTime(ts);
+    const d = new Date(ts);
+    return `${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+  };
+  if (t.schedule === false && t.webhookToken) return t.enabled === false ? "Webhook · 已暂停" : "当 Webhook 触发时";
+  if (t.kind === "once") {
+    if (!t.enabled && t.lastRunAt) return "已触发";
+    return t.nextRunAt ? `一次性 · ${short(t.nextRunAt)}` : "一次性";
+  }
+  const when = describeCron(t.cron);
+  const tz = t.timezone ? ` · ${t.timezone}` : "";
+  return t.enabled && t.nextRunAt ? `${when}${tz} · 下次 ${short(t.nextRunAt)}` : `${when}${tz}`;
+}
+
+/** 例行创建/编辑用的时区选项（空 = 本机） */
+const ROUTINE_TZ_OPTS = [
+  ["", "本机时区"],
+  ["Asia/Shanghai", "中国 (上海)"],
+  ["Asia/Tokyo", "日本 (东京)"],
+  ["America/New_York", "美东"],
+  ["America/Los_Angeles", "美西"],
+  ["Europe/London", "伦敦"],
+  ["UTC", "UTC"],
+];
+function timezoneSelectHtml(id, value) {
+  const v = value || "";
+  const known = ROUTINE_TZ_OPTS.some(([z]) => z === v);
+  const extra = !known && v ? `<option value="${esc(v)}" selected>${esc(v)}</option>` : "";
+  return `<select id="${esc(id)}" class="skin-select">${ROUTINE_TZ_OPTS.map(([z, l]) => `<option value="${esc(z)}" ${z === v ? "selected" : ""}>${esc(l)}</option>`).join("")}${extra}</select>`;
+}
+
+function stripBoardLine(text) {
+  // stripBareToolJson 在 chat-blocks.js；历史消息若曾落盘裸 JSON，展示时也剥掉
+  const base = typeof stripBareToolJson === "function" ? stripBareToolJson(text) : String(text ?? "");
+  return base.replace(/^【(?:已定|交给)】[^\n]*\n?/gm, "").replace(/\n{3,}/g, "\n\n");
+}
+
 /** 内容块列表 → HTML（text/code/image/tool_call/file/thinking） */
 function renderBlocks(blocks) {
-  if (!Array.isArray(blocks)) return renderMarkdown(esc(String(blocks ?? "")));
+  if (!Array.isArray(blocks)) return renderMarkdown(esc(stripBoardLine(String(blocks ?? ""))));
   return blocks.map(renderBlock).join("");
 }
 
 function renderBlock(b) {
   switch (b.type) {
-    case "text": return renderMarkdown(esc(b.text ?? ""));
+    case "text": return renderMarkdown(esc(stripBoardLine(b.text ?? "")));
     case "code": return `<pre class="code-block"><code${b.lang ? ` class="lang-${esc(b.lang)}"` : ""}>${esc(b.code)}</code></pre>`;
     case "image": {
       const src = b.dataUrl || (b.url || (b.path ? fileUrl(b.path) : ""));
@@ -93,11 +169,17 @@ function renderMarkdown(src) {
   if (!src) return "";
   const lines = src.split(/\n/);
   let out = "", i = 0, inCode = false, codeBuf = [], codeLang = "";
+  // app:type/id ；也认模型常写的 app:tasks / app:task（无斜杠）
+  const appRef = (label, type, id) => {
+    const t = type === "tasks" ? "task" : type;
+    return refHtml(t, id ?? "", label);
+  };
   const inline = (t) => t
     .replace(/`([^`]+)`/g, "<code>$1</code>")
     .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
     .replace(/\*([^*]+)\*/g, "<em>$1</em>")
-    .replace(/\[([^\]]+)\]\(app:([a-z]+)\/([^)]+)\)/g, (_, label, type, id) => refHtml(type, id, label))
+    .replace(/\[([^\]]+)\]\(app:([a-z]+)\/([^)]+)\)/g, (_, label, type, id) => appRef(label, type, id))
+    .replace(/\[([^\]]+)\]\(app:(tasks?|settings|skills?|memory|vault|gateway|share|webhooks?|mcp|models?|voice|image|access|notifications|instructions|projects?)\)/g, (_, label, type) => appRef(label, type, type === "tasks" || type === "task" ? "" : type))
     .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
   let list = null;
   const closeList = () => { if (list) { out += `</${list}>`; list = null; } };
@@ -109,7 +191,13 @@ function renderMarkdown(src) {
     if (/^```/.test(line)) {
       closeList();
       if (!inCode) { inCode = true; codeBuf = []; codeLang = line.slice(3).trim(); }
-      else { inCode = false; out += `<pre class="code-block"><code${codeLang ? ` class="lang-${codeLang}"` : ""}>${codeBuf.join("\n")}</code></pre>`; }
+      else {
+        inCode = false;
+        // 空代码块不渲染（流式撤回 / 裸 ``` 残留会变成灰色空气泡+横向滚动条）
+        if (codeBuf.some((l) => l.trim())) {
+          out += `<pre class="code-block"><code${codeLang ? ` class="lang-${codeLang}"` : ""}>${codeBuf.join("\n")}</code></pre>`;
+        }
+      }
       i++; continue;
     }
     if (inCode) { codeBuf.push(line); i++; continue; }
@@ -138,7 +226,12 @@ function renderMarkdown(src) {
     i++;
   }
   closeList();
-  if (inCode) out += `<pre class="code-block"><code>${codeBuf.join("\n")}</code></pre>`;
+  // 未闭合围栏：有内容才画出，避免半截 ``` 把后文「吃掉」后只剩空气泡
+  if (inCode && codeBuf.some((l) => l.trim())) {
+    out += `<pre class="code-block"><code>${codeBuf.join("\n")}</code></pre>`;
+  } else if (inCode && codeBuf.length) {
+    out += codeBuf.map((l) => l.trim() ? `<p>${inline(l)}</p>` : "<br/>").join("");
+  }
   return out;
 }
 

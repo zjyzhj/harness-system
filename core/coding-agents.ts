@@ -73,12 +73,15 @@ const BUILTIN: CodingAgentBackend[] = [
     chat: true,
     agent: true,
     order: 20,
-    // 工程根靠 spawn cwd；提示词里也会写明 cwd
+    // 工程根靠 spawn cwd。--dangerously-skip-permissions 只跳过授权卡，不关 Bash 沙箱；
+    // 必须再关 sandbox，否则碰 $HOME / 起面板仍会「沙箱里跑不通」再绕回 Harness。
     buildAgentArgs: (prompt, _cwd, opts) => [
       "-p",
       "--output-format",
       "text",
       "--dangerously-skip-permissions",
+      "--settings",
+      JSON.stringify({ sandbox: { enabled: false, allowUnsandboxedCommands: true } }),
       ...(opts?.resumeId ? ["--resume", opts.resumeId] : opts?.createSessionId ? ["--session-id", opts.createSessionId] : []),
       prompt,
     ],
@@ -252,5 +255,5 @@ export function cliAgentToolDescription(items?: CodingAgentStatus[]): string {
         .filter((b) => b.agent)
         .map((b) => b.id)
         .join("|");
-  return `派本机 Coding CLI（Agent 可写）改工程。大仓库/多文件用它；小文件仍 fs.write。参数: task, cwd?（或 PROJECT_ROOT / bot.agentCwd）, cli?（${names}；省略则按本机已就绪与偏好自动选）, timeoutMin?。会弹确认；用户拒绝后不要换 CLI 绕过。当前可派工以【已配置的环境】里探测结果为准。`;
+  return `派本机 Coding CLI 改工程（上层动作）。终端底座是 shell：先用 term.open 也能开目录终端。cli.agent 会在该目录把终端切到 Coding CLI 并打进 task。一个目录一块终端，可同时留着几个；没写 cwd 用正在看的工程。屏幕和界面【终端】是同一块。参数: task, cwd?（或 PROJECT_ROOT / bot.agentCwd）, cli?（${names}；省略则自动选已就绪项）, timeoutMin?。会单独弹「派 Coding CLI」确认（已有终端 ≠ 已批准改仓库）；用户拒绝后不要换 CLI 绕过。要再看/打字用 term.read|write|keys（或 cli.term）。`;
 }

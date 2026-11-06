@@ -11,9 +11,15 @@ const api = {
   bots: {
     list: () => ipcRenderer.invoke("bots:list"),
     previews: () => ipcRenderer.invoke("bots:previews"),
-    create: (text: string, opts?: { name?: string; avatar?: { shape: string; color: string } }) => ipcRenderer.invoke("bots:create", text, opts),
+    draft: (text: string) => ipcRenderer.invoke("bots:draft", text) as Promise<{ name: string; role: string; persona: string; systemPrompt?: string; model?: string }>,
+    create: (text: string, opts?: { name?: string; role?: string; persona?: string; systemPrompt?: string; avatar?: { shape: string; color: string } }) => ipcRenderer.invoke("bots:create", text, opts),
     remove: (id: string) => ipcRenderer.invoke("bots:delete", id),
-    update: (id: string, patch: { name?: string; role?: string; persona?: string; providerId?: string; isMaster?: boolean; order?: number; avatar?: { shape: string; color: string }; reasoning?: string; agentCwd?: string | null; agentCli?: string | null; agentResume?: "auto" | "always" | "once" | null }) => ipcRenderer.invoke("bots:update", id, patch),
+    update: (id: string, patch: {
+      name?: string; role?: string; persona?: string; providerId?: string; isMaster?: boolean; order?: number;
+      pinned?: boolean; hidden?: boolean; section?: string | null; disabledSkills?: string[] | null;
+      avatar?: { shape: string; color: string }; reasoning?: string; agentCwd?: string | null; dropAgentCwd?: string | null;
+      agentCli?: string | null; agentResume?: "auto" | "always" | "once" | null;
+    }) => ipcRenderer.invoke("bots:update", id, patch),
     setPet: (id: string, enabled: boolean) => ipcRenderer.invoke("bots:setPet", id, enabled),
     setSkin: (id: string, skinId: string) => ipcRenderer.invoke("bots:setSkin", id, skinId),
     duplicate: (id: string) => ipcRenderer.invoke("bots:duplicate", id),
@@ -53,26 +59,20 @@ const api = {
   },
   groups: {
     list: (botId?: string) => ipcRenderer.invoke("groups:list", botId),
-    create: (name: string, members: string[]) => ipcRenderer.invoke("groups:create", name, members),
+    create: (name: string, members: string[], opts?: { settings?: { goal?: string; relay?: boolean; maxTurns?: number; moderator?: string }; starterId?: string }) =>
+      ipcRenderer.invoke("groups:create", name, members, opts),
     join: (groupId: string, botId: string) => ipcRenderer.invoke("groups:join", groupId, botId),
     leave: (groupId: string, botId: string) => ipcRenderer.invoke("groups:leave", groupId, botId),
     remove: (groupId: string) => ipcRenderer.invoke("groups:remove", groupId),
     broadcast: (groupId: string, fromId: string, text: string) => ipcRenderer.invoke("groups:broadcast", groupId, fromId, text),
     chat: (groupId: string, content: unknown, sessionId?: string) => ipcRenderer.invoke("groups:chat", groupId, content, sessionId),
+    gaze: (groupId: string, sessionId: string | null) => ipcRenderer.invoke("groups:gaze", groupId, sessionId),
+    peek: (sessionId: string) => ipcRenderer.invoke("groups:peek", sessionId),
+    board: (sessionId: string) => ipcRenderer.invoke("groups:board", sessionId),
     interject: (groupId: string, sessionId: string, content: unknown) => ipcRenderer.invoke("groups:interject", groupId, sessionId, content),
     update: (groupId: string, patch: unknown) => ipcRenderer.invoke("groups:update", groupId, patch),
     taskDone: (sessionId: string, msgId: number, index: number, done: boolean) => ipcRenderer.invoke("groups:taskDone", sessionId, msgId, index, done),
     dispatch: (groupId: string, sessionId: string, msgId: number, indexes: number[]) => ipcRenderer.invoke("groups:dispatch", groupId, sessionId, msgId, indexes),
-  },
-  plans: {
-    create: (input: any) => ipcRenderer.invoke("plans:create", input),
-    createFromText: (text: string, ownerBotId?: string) => ipcRenderer.invoke("plans:createFromText", text, ownerBotId),
-    list: (botId?: string) => ipcRenderer.invoke("plans:list", botId),
-    run: (planId: string) => ipcRenderer.invoke("plans:run", planId),
-    cancel: (planId: string) => ipcRenderer.invoke("plans:cancel", planId),
-    remove: (planId: string) => ipcRenderer.invoke("plans:delete", planId),
-    handOff: (input: { planId?: string; match?: string; toBotId: string; note?: string; stageId?: string }) =>
-      ipcRenderer.invoke("plans:handOff", input),
   },
   consent: {
     list: (botId?: string) => ipcRenderer.invoke("consent:list", botId),
@@ -84,8 +84,24 @@ const api = {
     setRule: (botId: string, command: string, decision: string) => ipcRenderer.invoke("consent:setRule", botId, command, decision),
     removeRule: (botId: string, command: string) => ipcRenderer.invoke("consent:removeRule", botId, command),
     setTrusted: (botId: string, on: boolean) => ipcRenderer.invoke("consent:setTrusted", botId, on),
+    setMode: (botId: string, mode: "ask" | "auto" | "always") => ipcRenderer.invoke("consent:setMode", botId, mode),
+    mode: (botId: string) => ipcRenderer.invoke("consent:mode", botId) as Promise<"ask" | "auto" | "always">,
     cliPaths: (botId?: string) => ipcRenderer.invoke("consent:cliPaths", botId),
     revokeCliPath: (botId: string, cwd?: string) => ipcRenderer.invoke("consent:revokeCliPath", botId, cwd),
+    termPaths: (botId?: string) => ipcRenderer.invoke("consent:termPaths", botId),
+    revokeTermPath: (botId: string, cwd?: string) => ipcRenderer.invoke("consent:revokeTermPath", botId, cwd),
+    overview: (botId: string) => ipcRenderer.invoke("consent:overview", botId),
+  },
+  coding: {
+    presence: (botId: string) => ipcRenderer.invoke("coding:presence", botId),
+    list: (botId: string) => ipcRenderer.invoke("coding:list", botId),
+    focus: (botId: string, cwd: string) => ipcRenderer.invoke("coding:focus", botId, cwd),
+    open: (botId: string, cwd: string) => ipcRenderer.invoke("coding:open", botId, cwd),
+    replay: (botId: string, cwd?: string) => ipcRenderer.invoke("coding:replay", botId, cwd),
+    resize: (botId: string, cols: number, rows: number, cwd?: string) => ipcRenderer.invoke("coding:resize", botId, cols, rows, cwd),
+    stop: (botId: string, cwd?: string) => ipcRenderer.invoke("coding:stop", botId, cwd),
+    write: (botId: string, data: string, cwd?: string) => ipcRenderer.invoke("coding:write", botId, data, cwd),
+    pickDir: () => ipcRenderer.invoke("coding:pickDir"),
   },
   audit: {
     list: (opts?: any) => ipcRenderer.invoke("audit:list", opts),
@@ -103,10 +119,13 @@ const api = {
     writeFile: (path: string, content: string) => ipcRenderer.invoke("system:writeFile", path, content),
     tcc: () => ipcRenderer.invoke("system:tcc"),
     openPrefs: (pane: string) => ipcRenderer.invoke("system:openPrefs", pane),
+    revealElectronApp: () => ipcRenderer.invoke("system:revealElectronApp"),
     notifyState: () => ipcRenderer.invoke("system:notifyState"),
     notifyRecheck: () => ipcRenderer.invoke("system:notifyRecheck"),
     notifyMute: () => ipcRenderer.invoke("system:notifyMute"),
     pickFile: (opts: { save?: boolean; defaultPath?: string; title?: string }) => ipcRenderer.invoke("system:pickFile", opts),
+    appInfo: () => ipcRenderer.invoke("system:appInfo") as Promise<{ version: string; channel: string; schema: number; update: { available: boolean; message: string } }>,
+    checkUpdate: () => ipcRenderer.invoke("system:checkUpdate") as Promise<{ available: boolean; message: string }>,
   },
   providers: {
     list: () => ipcRenderer.invoke("providers:list"),
@@ -116,7 +135,7 @@ const api = {
     update: (id: string, patch: any) => ipcRenderer.invoke("providers:update", id, patch),
     remove: (id: string) => ipcRenderer.invoke("providers:delete", id),
     setDefault: (id: string) => ipcRenderer.invoke("providers:setDefault", id),
-    capabilities: () => ipcRenderer.invoke("providers:capabilities"),
+    capabilities: (force?: boolean) => ipcRenderer.invoke("providers:capabilities", !!force),
   },
   window: {
     openSession: (sessionId?: string) => ipcRenderer.invoke("window:openSession", sessionId),
@@ -215,6 +234,8 @@ const api = {
     list: (botId: string) => ipcRenderer.invoke("memory:list", botId),
     add: (botId: string, entry: any) => ipcRenderer.invoke("memory:add", botId, entry),
     remove: (botId: string, id: string) => ipcRenderer.invoke("memory:delete", botId, id),
+    import: (botId: string, payload: string | Array<{ kind?: string; content: string }>, opts?: { namespace?: string }) =>
+      ipcRenderer.invoke("memory:import", botId, payload, opts),
     search: (botId: string, q: string) => ipcRenderer.invoke("memory:search", botId, q),
     stats: (botId: string) => ipcRenderer.invoke("memory:stats", botId),
     retrieve: (botId: string, q: string) => ipcRenderer.invoke("memory:retrieve", botId, q),
@@ -233,6 +254,8 @@ const api = {
     remove: (key: string) => ipcRenderer.invoke("skills:delete", key),
     forBot: (botId: string) => ipcRenderer.invoke("skills:forBot", botId),
     save: (input: any) => ipcRenderer.invoke("skills:save", input),
+    templates: () => ipcRenderer.invoke("skills:templates"),
+    installTemplate: (key: string, botId?: string) => ipcRenderer.invoke("skills:installTemplate", key, botId),
   },
   status: {
     list: () => ipcRenderer.invoke("status:list"),
@@ -246,6 +269,15 @@ const api = {
     servers: () => ipcRenderer.invoke("mcp:servers"),
     serversAll: () => ipcRenderer.invoke("mcp:serversAll"),
     saveServers: (servers: unknown[]) => ipcRenderer.invoke("mcp:saveServers", servers),
+  },
+  systemObserve: {
+    status: () => ipcRenderer.invoke("systemObserve:status"),
+  },
+  systemWatch: {
+    get: (botId) => ipcRenderer.invoke("systemWatch:get", botId),
+    set: (botId, patch) => ipcRenderer.invoke("systemWatch:set", botId, patch),
+    status: (botId) => ipcRenderer.invoke("systemWatch:status", botId),
+    installedApps: () => ipcRenderer.invoke("systemWatch:installedApps"),
   },
   computerUse: {
     status: () => ipcRenderer.invoke("computerUse:status"),
@@ -290,9 +322,42 @@ const api = {
   tasks: {
     list: (botId?: string) => ipcRenderer.invoke("tasks:list", botId),
     create: (input: any) => ipcRenderer.invoke("tasks:create", input),
+    update: (id: string, patch: any) => ipcRenderer.invoke("tasks:update", id, patch),
     remove: (id: string) => ipcRenderer.invoke("tasks:delete", id),
     setEnabled: (id: string, enabled: boolean) => ipcRenderer.invoke("tasks:setEnabled", id, enabled),
     runNow: (id: string) => ipcRenderer.invoke("tasks:runNow", id),
+    ensureWebhook: (id: string) => ipcRenderer.invoke("tasks:ensureWebhook", id),
+    rotateWebhook: (id: string) => ipcRenderer.invoke("tasks:rotateWebhook", id),
+    clearWebhook: (id: string) => ipcRenderer.invoke("tasks:clearWebhook", id),
+  },
+  demo: {
+    status: (botId: string) => ipcRenderer.invoke("demo:status", botId),
+    start: (botId: string, opts?: { title?: string; sessionId?: string }) => ipcRenderer.invoke("demo:start", botId, opts),
+    cancel: (botId: string) => ipcRenderer.invoke("demo:cancel", botId),
+    finish: (botId: string, opts?: { name?: string; description?: string; cron?: string; in?: string | number; testNow?: boolean; webhook?: boolean }) =>
+      ipcRenderer.invoke("demo:finish", botId, opts),
+  },
+  connect: {
+    cards: () => ipcRenderer.invoke("connect:cards"),
+    gateway: () => ipcRenderer.invoke("connect:gateway"),
+    setGateway: (input: { enabled: boolean; port?: number; host?: string; allowRemote?: boolean }) =>
+      ipcRenderer.invoke("connect:setGateway", input),
+    probeGateway: () => ipcRenderer.invoke("connect:probeGateway"),
+    gatewayMsgToken: () => ipcRenderer.invoke("connect:gatewayMsgToken"),
+    rotateGatewayMsgToken: () => ipcRenderer.invoke("connect:rotateGatewayMsgToken"),
+    shareBridge: () => ipcRenderer.invoke("connect:shareBridge"),
+    saveShareBridge: (input: { base: string; putKey?: string; ttlDays?: number }) =>
+      ipcRenderer.invoke("connect:saveShareBridge", input),
+    clearShareBridge: () => ipcRenderer.invoke("connect:clearShareBridge"),
+    probeShareBridge: () => ipcRenderer.invoke("connect:probeShareBridge"),
+    cloudflare: () => ipcRenderer.invoke("connect:cloudflare"),
+    saveCloudflare: (input: { apiToken?: string; accountId?: string }) =>
+      ipcRenderer.invoke("connect:saveCloudflare", input),
+    clearCloudflare: () => ipcRenderer.invoke("connect:clearCloudflare"),
+    provisionShareBridge: (input?: { apiToken?: string; accountId?: string; subdomain?: string; ttlDays?: number }) =>
+      ipcRenderer.invoke("connect:provisionShareBridge", input),
+    listShareLinks: () => ipcRenderer.invoke("connect:listShareLinks"),
+    deleteShareLink: (id: string) => ipcRenderer.invoke("connect:deleteShareLink", id),
   },
 };
 
@@ -312,6 +377,11 @@ const onChatStream = (cb: (chunk: StreamBlock) => void) => {
 };
 
 /** 宠物请求打开主面板会话（聚焦 + 跳转） */
+const onBotCreated = (cb: (ev: { botId: string; sessionId: string }) => void) => {
+  const listener = (_: unknown, ev: { botId: string; sessionId: string }) => cb(ev);
+  ipcRenderer.on("bot:created", listener);
+  return () => ipcRenderer.removeListener("bot:created", listener);
+};
 const onOpenSession = (cb: (sessionId: string | null) => void) => {
   const listener = (_e: IpcRendererEvent, sid: string | null) => cb(sid);
   ipcRenderer.on("window:open-session", listener);
@@ -357,10 +427,12 @@ const on = (channel: string) => (cb: (p: any) => void) => {
   return () => ipcRenderer.removeListener(channel, listener);
 };
 contextBridge.exposeInMainWorld("harness", {
-  ...api, onPetEvent, onChatStream, onOpenSession, onPetCursor, onB2bStream, onNewMessage, onStatus, onAppChanged,
+  ...api, onPetEvent, onChatStream, onOpenSession, onBotCreated, onPetCursor, onB2bStream, onNewMessage, onStatus, onAppChanged,
   onConsentRequest: on("consent:request"), onConsentResolved: on("consent:resolved"), onGroupProgress: on("group:progress"), onNotifyState: on("notify:state"),
-  onSuggestions: on("chat:suggestions"), onPlanUpdate: on("plans:update"), onFileChanged: on("files:changed"), onImportLink: on("bots:importLink"),
+  onSuggestions: on("chat:suggestions"), onFileChanged: on("files:changed"), onImportLink: on("bots:importLink"),
   onOpenAbout: on("app:openAbout"),
+  onCodingScreen: on("coding:screen"),
+  onCodingBytes: on("coding:bytes"),
 });
 export type { StreamBlock };
 export type HarnessApi = typeof api;

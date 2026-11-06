@@ -3,13 +3,13 @@
  * Tray(菜单栏) + 主控窗口 + 宠物窗口(无边框透明)
  * 核心逻辑全部在 core/（纯 TS），这里只做宿主桥接。
  */
-import { app, BrowserWindow, Tray, Menu, ipcMain, dialog, clipboard, Notification, screen, nativeImage, shell, safeStorage } from "electron";
+import { app, BrowserWindow, Tray, Menu, ipcMain, dialog, clipboard, Notification, screen, nativeImage, shell, safeStorage, systemPreferences } from "electron";
 import { SecretStore } from "../core/secret-store";
 import { EnvStore } from "../core/env-store";
-import { GroupSessionRunner, type GroupProgress, type GroupSessionHooks } from "../core/group-session";
+import { GroupSessionRunner, pickGroupSession, type GroupProgress, type GroupSessionHooks } from "../core/group-session";
 import { join, resolve, extname } from "node:path";
 import { randomBytes, randomUUID } from "node:crypto";
-import { writeFileSync, mkdirSync, readFileSync, existsSync, statSync, openSync, readSync, closeSync, readdirSync, watch } from "node:fs";
+import { writeFileSync, mkdirSync, readFileSync, existsSync, statSync, openSync, readSync, closeSync, readdirSync, watch, realpathSync } from "node:fs";
 import { createUsageBook } from "./host/usage";
 import { createSemanticRecall, type EmbeddingConfig } from "./host/semantic";
 import { EVAL_MODE, prepareEvalHome, runEvalMode } from "./host/eval-mode";
@@ -21,6 +21,10 @@ const APP_ROOT = app.getAppPath();
 const DIST_DIR = join(APP_ROOT, "dist");
 import { Store } from "../core/store";
 import { AgentRegistry } from "../core/agent-registry";
+import { seedBotWelcome } from "../core/bot-onboard";
+import { seedGroupWelcome } from "../core/group-onboard";
+import { detectChoiceOffer } from "../core/choice-offer";
+import { gatewayBindAllowed, isLoopbackHost } from "../core/bot-access";
 import { MessageBus } from "../core/message-bus";
 import { ProviderCenter } from "../core/provider-center";
 import { PersonaGenerator, parseAppearancePick, type AppearancePick } from "../core/persona";
@@ -36,20 +40,37 @@ import { MemorySystem, memoRewriteMessages } from "../core/memory-system";
 import { SkillRegistry, BUILTIN_SKILL_TEMPLATES } from "../core/skill-registry";
 import { Scheduler } from "../core/scheduler";
 import { GroupRegistry } from "../core/group-registry";
-import { Orchestrator, planFromText } from "../core/orchestrator";
 import { FileLogger } from "../core/logger";
+import { SCHEMA_VERSION, ensureSchema } from "../core/schema";
 import { ProactiveEngine, collectSignals } from "../core/proactive";
 import { GatewayServer } from "../core/gateway-server";
+import {
+  buildInboundExtraSystem,
+  buildInboundUserText,
+  InboundDedupe,
+  parseInboundWebhookBody,
+  claimInboundEvent,
+  sortInboundEventsByPriority,
+  type InboundPriority,
+} from "../core/inbound-webhook";
+import { pickRoutineTranscriptSessionId } from "../core/routine-session";
 import { PetSkinRegistry } from "../core/pet-skin";
 import { ConsentCenter, capLabel as capLabelOf, type ConsentDecision } from "../core/consent-center";
 import { CodingThreadStore } from "../core/coding-thread";
+import { CodingPresence, dropCodingDir, gazeCodingDir, type CodingPresenceView } from "../core/coding-presence";
+import { appendCodingActivity } from "../core/coding-activity";
+import { codingCliIdentity, resolveAppIdentity, type AppIdentity } from "../core/app-identity";
+import { formatObserveText, observeDiskAsync, observeFrontmostAsync, observeProcessesAsync, observeSystem, type ProcessHit } from "../core/system-observe";
+import { listInstalledApps, readBotWatch, watchKeywords, writeBotWatch, type BotSystemWatch } from "../core/system-watch";
+import { CliAgentPathError, resolveAgentCwd } from "../core/cli-agent";
 import { AuditLog } from "../core/audit-log";
 import { SystemAccess } from "../core/system-access";
 import { BotRuntime } from "../core/bot-runtime";
 import { attachPetEntertainment, type PetHost } from "../core/pet";
 import { DemoSkillEngine } from "../core/demo-skill";
 import { ContactStore } from "../core/contacts";
-import { ConnectorStore } from "../core/connectors";
+import { ConnectorStore, CONNECT_INSTALL_CARDS } from "../core/connectors";
+import { parseRunAt } from "../core/runtime/tool-helpers";
 import { Vault } from "../core/vault";
 import { OfflinePersona } from "../core/offline-persona";
 import { ToolExecutor } from "../core/tool-executor";
@@ -80,7 +101,7 @@ import {
 } from "../core/pet-effects";
 import { RECOMMENDED_PETDEX, fetchPetdexManifest, installPetdex, petdexSkinId, searchPetdex } from "../core/petdex";
 import { OpenAICompatImageGen } from "../core/adapters/image-gen";
-import { AgentStatus, contentText, type Bot, type ContentBlock, type Session } from "../core/types";
+import { AgentStatus, contentText, type Bot, type ContentBlock, type ScheduledTask, type Session } from "../core/types";
 import { defaultAvatar, withDefaultAvatar } from "../core/avatar";
 import type { ImageGenConfig } from "../core/image-tool";
 import { ProjectRegistry, instructionsPrompt, type GlobalInstructions } from "../core/projects";
@@ -99,6 +120,28 @@ import {
   onboardGreeting,
   type NeedsDiff,
 } from "../core/bot-share-needs";
+import {
+  ackCloudInboundEvents,
+  clearShareBridgeCreds,
+  cloudInboundWebhookUrl,
+  deleteShareBridgeLink,
+  listShareBridgeLinks,
+  probeShareBridge,
+  pullCloudInboundEvents,
+  putHarnessShortLink,
+  registerCloudInboundTokens,
+  resolveTemplateInput,
+  saveShareBridgeCreds,
+  shareBridgeCreds,
+  shareBridgeStatus,
+  unregisterCloudInboundTokens,
+} from "../core/share-bridge";
+import {
+  clearCloudflareCreds,
+  cloudflareCredsStatus,
+  provisionShareBridge,
+  saveCloudflareCreds,
+} from "../core/share-bridge-provision";
 
 if (EVAL_MODE) prepareEvalHome(process.env.HARNESS_HOME || join(app.getPath("userData"), "..", "harness-bot"), (dir) => app.setPath("userData", dir));
 
@@ -109,6 +152,16 @@ if (!EVAL_MODE && !app.requestSingleInstanceLock()) {
 }
 /** 最近一条带会话的系统通知：osascript 兜底点不了 onClick，靠 activate 打开主面板 */
 let pendingNotifySession: string | null = null;
+/** 入站投递（whenReady 里挂上；网关 / 云轮询共用） */
+let deliverInboundWebhook: ((task: ScheduledTask, parsed: ReturnType<typeof parseInboundWebhookBody>) => Promise<void>) | null = null;
+type InboundJob = {
+  task: ScheduledTask;
+  parsed: ReturnType<typeof parseInboundWebhookBody>;
+  source: "gateway" | "cloud";
+  eventId?: string;
+  kvKey?: string;
+};
+let enqueueInboundJob: ((job: InboundJob) => void) | null = null;
 
 function focusMainPanel(sessionId?: string | null) {
   const sid = sessionId ?? pendingNotifySession;
@@ -121,16 +174,27 @@ function focusMainPanel(sessionId?: string | null) {
   if (mainWin.isMinimized()) mainWin.restore();
   mainWin.show();
   mainWin.focus();
+  // Dock / activate 常带着上次通知的 sessionId；渲染端会对「已在看的会话」直接跳过，避免 clear→空白→重绘
   if (sid) mainWin.webContents.send("window:open-session", sid);
 }
 
 app.on("second-instance", () => focusMainPanel());
 
 const home = process.env.HARNESS_HOME || join(app.getPath("userData"), "..", "harness-bot");
+const schemaBoot = ensureSchema(home);
 const logger = new FileLogger(home);
 logger.captureConsole();
-process.on("uncaughtException", (e) => console.error("[harness] 未捕获的异常", e));
-process.on("unhandledRejection", (r) => console.error("[harness] 未处理的 Promise 拒绝", r));
+if (schemaBoot.created || schemaBoot.from !== schemaBoot.to) {
+  logger.write("info", `[schema] ${schemaBoot.created ? "创建" : "升级"} ${schemaBoot.from} → ${schemaBoot.to}`);
+}
+process.on("uncaughtException", (e) => {
+  logger.write("error", "[harness] 未捕获的异常", e);
+  console.error("[harness] 未捕获的异常", e);
+});
+process.on("unhandledRejection", (r) => {
+  logger.write("error", "[harness] 未处理的 Promise 拒绝", r);
+  console.error("[harness] 未处理的 Promise 拒绝", r);
+});
 app.on("child-process-gone", (_e, d) => { if (d.reason !== "clean-exit") console.error(`[harness] 子进程退出：${d.type} ${d.reason}`); });
 const store = new Store(home);
 const assetsDir = join(home, "assets");
@@ -167,11 +231,173 @@ if (skills.list().length === 0) {
 const scheduler = new Scheduler(home);
 const groups = new GroupRegistry(home);
 bus.setGroups(groups);
-const orchestrator = new Orchestrator({ store, groups, providers }, home);
-const migration = new MigrationV2(store, assetsDir, memory, skills, scheduler, groups, orchestrator);
+
+/** 本机 HTTP 网关（例行入站）；Connect 设置页可热启停 */
+type GatewayCfg = { port?: number; token?: string; host?: string; allowRemote?: boolean; requireHmac?: boolean };
+let gatewayServer: GatewayServer | null = null;
+const readGatewayCfg = (): GatewayCfg | undefined =>
+  (store.readConfig() as { gateway?: GatewayCfg }).gateway;
+function maskToken(tok: string): string {
+  if (!tok) return "";
+  if (tok.length <= 8) return "••••";
+  return `${tok.slice(0, 4)}…${tok.slice(-4)}`;
+}
+
+function gatewaySnapshot() {
+  const gw = readGatewayCfg();
+  if (!gw?.port) {
+    return {
+      enabled: false as const,
+      running: false,
+      configured: false,
+      host: "127.0.0.1",
+      port: 8787,
+      allowRemote: false,
+      requireHmac: false,
+      loopback: true,
+      hasMsgToken: false,
+      msgTokenHint: "",
+    };
+  }
+  const bind = gatewayBindAllowed(gw);
+  const host = bind.ok ? bind.host : (gw.host ?? "127.0.0.1");
+  const token = gw.token && gw.token.length >= 16 ? gw.token : "";
+  return {
+    enabled: bind.ok && !!gatewayServer,
+    running: !!gatewayServer,
+    configured: true,
+    host,
+    port: gw.port,
+    allowRemote: !!gw.allowRemote,
+    requireHmac: !!gw.requireHmac,
+    loopback: isLoopbackHost(host),
+    remoteBlocked: !bind.ok,
+    routinesBase: bind.ok && gatewayServer ? `http://${host}:${gw.port}/routines` : undefined,
+    botsMsgUrl: bind.ok && gatewayServer ? `http://${host}:${gw.port}/bots/msg` : undefined,
+    hasMsgToken: !!token,
+    msgTokenHint: maskToken(token),
+    warning: bind.ok ? undefined : bind.reason,
+    guide: "例行：面板 🪝 复制能力 URL。跨机 bot：用下方 Bearer 调 POST /bots/msg。令牌等同密码。"
+      + (gw.requireHmac ? " 已强制要求 X-Harness-Signature。" : ""),
+  };
+}
+
+async function rotateGatewayMsgToken() {
+  const gw = readGatewayCfg();
+  if (!gw?.port) return { ok: false as const, error: "请先启用入站网关", info: gatewaySnapshot() };
+  gw.token = randomBytes(24).toString("hex");
+  store.writeConfig({ ...store.readConfig(), gateway: gw });
+  const started = await startGatewayFromConfig();
+  return {
+    ok: started.ok,
+    error: started.error,
+    info: started.info ?? gatewaySnapshot(),
+    token: gw.token,
+  };
+}
+
+function copyGatewayMsgToken(): { ok: boolean; token?: string; error?: string; info: ReturnType<typeof gatewaySnapshot> } {
+  const gw = readGatewayCfg();
+  if (!gw?.port || !gw.token || gw.token.length < 16) {
+    return { ok: false, error: "网关未启用或尚无令牌", info: gatewaySnapshot() };
+  }
+  return { ok: true, token: gw.token, info: gatewaySnapshot() };
+}
+async function stopGateway() {
+  if (!gatewayServer) return;
+  try { await gatewayServer.stop(); } catch { /* ignore */ }
+  gatewayServer = null;
+}
+async function startGatewayFromConfig(): Promise<{ ok: boolean; error?: string; info?: ReturnType<typeof gatewaySnapshot> }> {
+  await stopGateway();
+  const gw = readGatewayCfg();
+  if (!gw?.port) return { ok: true, info: gatewaySnapshot() };
+  if (!gw.token || gw.token.length < 16 || gw.token === "harness-default-token") {
+    gw.token = randomBytes(24).toString("hex");
+    store.writeConfig({ ...store.readConfig(), gateway: gw });
+  }
+  const bind = gatewayBindAllowed(gw);
+  if (!bind.ok) {
+    console.error(`[harness] ${bind.reason}`);
+    return { ok: false, error: bind.reason, info: gatewaySnapshot() };
+  }
+  const host = bind.host;
+  if (!bind.loopback) {
+    console.warn(`[harness] 网关 host=${host} 非本机回环（已显式 allowRemote）：POST /routines/:token 为能力 URL（无 Bearer），勿把令牌发到不可信渠道`);
+  }
+  const server = new GatewayServer(gw.port, gw.token, bus, { host, requireHmac: !!gw.requireHmac });
+  server.onRoutine = async (token, body, meta) => {
+    const task = scheduler.findByWebhookToken(token);
+    if (!task) return { ok: false, error: "not found" };
+    if (!task.enabled) return { ok: false, error: "routine paused" };
+    const parsed = parseInboundWebhookBody(body, { priority: meta?.priorityHeader });
+    // 快速受理：入队；真正注入由 inbound pump（会话串行 + urgent 插队）
+    if (!enqueueInboundJob) return { ok: false, error: "runtime not ready" };
+    enqueueInboundJob({ task, parsed, source: "gateway" });
+    return {
+      ok: true,
+      accepted: true,
+      taskId: task.id,
+      name: task.name,
+      priority: parsed.priority,
+    };
+  };
+  try {
+    const port = await server.start();
+    gatewayServer = server;
+    console.log(`[harness] 网关已启动 ${host}:${port} 🕸（例行 POST /routines/:token）`);
+    return { ok: true, info: gatewaySnapshot() };
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.log("[harness] 网关启动失败:", msg);
+    return { ok: false, error: msg, info: gatewaySnapshot() };
+  }
+}
+async function applyGatewaySettings(input: {
+  enabled: boolean;
+  port?: number;
+  host?: string;
+  allowRemote?: boolean;
+  requireHmac?: boolean;
+}) {
+  const prev = readGatewayCfg() ?? {};
+  if (!input.enabled) {
+    store.writeConfig({ ...store.readConfig(), gateway: undefined });
+    await stopGateway();
+    return { ok: true as const, info: gatewaySnapshot() };
+  }
+  const port = Math.max(1, Math.min(65535, Number(input.port ?? prev.port ?? 8787) || 8787));
+  const host = String(input.host ?? prev.host ?? "127.0.0.1").trim() || "127.0.0.1";
+  const allowRemote = input.allowRemote === true;
+  const requireHmac = input.requireHmac === true;
+  if (!isLoopbackHost(host) && !allowRemote) {
+    return {
+      ok: false as const,
+      error: "绑定非本机地址时必须勾选「允许远程访问」。默认只监听 127.0.0.1 更安全。",
+      info: gatewaySnapshot(),
+    };
+  }
+  const gw: GatewayCfg = {
+    port,
+    host,
+    allowRemote: allowRemote || undefined,
+    requireHmac: requireHmac || undefined,
+    token: prev.token && prev.token.length >= 16 ? prev.token : randomBytes(24).toString("hex"),
+  };
+  store.writeConfig({ ...store.readConfig(), gateway: gw });
+  const started = await startGatewayFromConfig();
+  if (!started.ok) return { ok: false as const, error: started.error, info: started.info ?? gatewaySnapshot() };
+  return { ok: true as const, info: started.info ?? gatewaySnapshot() };
+}
+
+const migration = new MigrationV2(store, assetsDir, memory, skills, scheduler, groups);
 const workspace = join(home, "workspace");
 const consent = new ConsentCenter(home);
 const codingThreads = new CodingThreadStore(home);
+const codingPresence = new CodingPresence({
+  home,
+  bridgePath: join(APP_ROOT, "assets", "pty-bridge.py"),
+});
 const audit = new AuditLog(home);
 const systemAccess = new SystemAccess(consent, audit, { workDir: workspace, screenshotDir: join(workspace, "screenshots") });
 const executor = new ToolExecutor({
@@ -199,6 +425,17 @@ const statuses = new Map<string, AgentStatus>();
     }
     return statuses;
   };
+}
+/** 回复结束后：有未答 UI 卡 → waiting；否则 idle（对齐 Grok presence） */
+function settleBotStatus(botId: string, content?: import("../core/types").ContentBlock[], sessionId?: string) {
+  const pending = (content ?? []).some((b) =>
+    (b.type === "choice" && !b.answer) || (b.type === "form" && !b.answer) || (b.type === "secret" && !b.saved),
+  );
+  if (pending) {
+    statuses.set(botId, { botId, state: "waiting", lastRunAt: Date.now(), currentTask: "等待你确认", sessionId });
+  } else {
+    statuses.set(botId, { botId, state: "idle", lastRunAt: Date.now() });
+  }
 }
 /** 进行中的回复：sessionId → 中止控制器（停止生成） */
 const inflight = new Map<string, AbortController>();
@@ -558,44 +795,33 @@ const petHost: PetHost = {
 const demoSkills = new DemoSkillEngine();
 const runtime: BotRuntime = new BotRuntime({
   store, providers, memory, skills, system, systemAccess, executor, offline: new OfflinePersona(), mcp, mcpManage, askBot, tasks: scheduler, notifyCheck,
-  groups, secrets, env, workspaceRoot: workspace, demo: demoSkills, vault, codingThreads,
+  groups, secrets, env, workspaceRoot: workspace, harnessHome: home, demo: demoSkills, vault, connectors, codingThreads, codingPresence,
   groupPost: async (from, name, message, signal) => {
     const all = groups.list();
     const g = all.find((x) => x.name === name) ?? all.find((x) => x.name.includes(name) || name.includes(x.name));
     if (!g) return { ok: false, error: `没有叫「${name}」的群聊。现有群聊：${all.map((x) => x.name).join("、") || "无"}` };
     if (!g.members.includes(from.id)) return { ok: false, error: `你不在群聊「${g.name}」里，发不进去。你所在的群：${groups.list(from.id).map((x) => x.name).join("、") || "无"}` };
-    const sid = `group-${g.id}`;
+    const sid = pickGroupSession(g.id, {
+      gazed: groupGaze.get(g.id),
+      live: groupSessions.liveSession(g.id),
+      sessions: store.listSessions().map((s) => ({ id: s.id, updatedAt: s.updatedAt })),
+    });
+    if (groupSessions.isLive(sid)) {
+      const joined = await groupSessions.speakInto(g.id, from, message, sid);
+      if (!joined.ok) return { ok: false, error: `群聊「${g.name}」这轮接力刚刚结束` };
+      return { ok: true, group: g.name, replies: [], reason: "插进正在进行的接力", joined: true };
+    }
     const ctrl = new AbortController();
     signal?.addEventListener("abort", () => ctrl.abort(), { once: true });
     inflight.set(sid, ctrl);
     try {
       const r = await groupSessions.post(g.id, from, message, groupHooks(sid, ctrl));
-      return { ok: true, group: r.groupName, replies: r.replies, reason: r.reasonText };
+      return { ok: true, group: r.groupName, replies: r.replies, reason: r.reasonText, joined: r.joined };
     } finally {
       if (inflight.get(sid) === ctrl) inflight.delete(sid);
     }
   },
-  plans: {
-    start: (req) => startPlanFor(req),
-    list: () => orchestrator.list().map((p) => {
-      const ownerId = orchestrator.currentOwner(p);
-      return { id: p.id, title: p.title, status: p.status, result: p.result, currentOwner: ownerId ? (store.getBot(ownerId)?.name ?? ownerId) : undefined };
-    }),
-    cancel: cancelPlanByTitle,
-    handOff: (req) => {
-      const toName = String(req.to ?? "").trim();
-      const toBot = store.listBots().find((b) => b.name === toName || b.id === toName);
-      if (!toBot) throw new Error(`找不到 bot「${toName}」`);
-      const { plan, stage } = orchestrator.handOff({
-        match: req.plan,
-        stageId: req.stageId,
-        toBotId: toBot.id,
-        note: req.note,
-      });
-      return { plan: plan.title, stage: stage.prompt.slice(0, 40), owner: toBot.name, note: stage.handOffNote };
-    },
-  },
-  appFacts: () => ({ plans: orchestrator.list().map((x) => ({ title: x.title, status: x.status })), projects: projects.list().map((x) => ({ name: x.name })) }), consent, audit,
+  appFacts: () => ({ projects: projects.list().map((x) => ({ name: x.name })) }), consent, audit,
   imageConfig: () => {
     const c = store.readConfig().imageGen as ImageGenConfig | undefined;
     if (!c?.baseUrl || !c.model) return null;
@@ -604,6 +830,13 @@ const runtime: BotRuntime = new BotRuntime({
   onAppChanged: (what) => {
     if (what === "bots") registerAll();
     if (mainWin && !mainWin.isDestroyed()) mainWin.webContents.send("app:changed", what);
+  },
+  onBotCreated: ({ botId, sessionId }) => {
+    registerAll();
+    if (mainWin && !mainWin.isDestroyed()) {
+      mainWin.webContents.send("app:changed", "bots");
+      mainWin.webContents.send("bot:created", { botId, sessionId });
+    }
   },
   onUsage: (u) => usage.record(u),
   recall: (bot, query, excludeSession) => semantic.recall(bot, query, excludeSession),
@@ -627,6 +860,10 @@ ipcMain.handle("embedding:status", () => semantic.status());
 
 const projects = new ProjectRegistry(home);
 migration.attachExtras({ env, secrets, projects, consent });
+const groupGaze = new Map<string, string>();
+function forgetGaze(sessionId: string) {
+  for (const [gid, sid] of groupGaze) if (sid === sessionId) groupGaze.delete(gid);
+}
 const groupSessions: GroupSessionRunner = new GroupSessionRunner({ store, groups, runtime, providers });
 /** 全局自定义指令 + 会话所属项目的指令和资料 */
 function instructionsFor(sessionId?: string, projectId?: string | null): string {
@@ -657,42 +894,79 @@ const activeSession = new Map<string, string>();
 const pendingConsent = new Map<string, (d: ConsentDecision) => void>();
 /** 单聊的用户消息在回复结束时才落盘：期间的授权记录先攒着，回复写完再补上，保证顺序 */
 const consentNotes = new Map<string, string[]>();
+/** shell 解析不出命令名时 head 记为 "$()"，不能原文展示给用户 */
+const opaqueConsentCmd = (cmd?: string) => {
+  const c = String(cmd ?? "").trim();
+  return !c || c === "$()";
+};
+/** 授权结果条里写什么动作：优先可读命令名，其次 description 里的原文，最后能力名 */
+const consentActionLabel = (req: { command?: string; description?: string }, capLabel: string) => {
+  if (!opaqueConsentCmd(req.command)) return `执行 ${String(req.command).trim()}`;
+  const desc = String(req.description ?? "").replace(/^执行命令:\s*/i, "").trim().replace(/\s+/g, " ");
+  if (desc) return `执行 ${desc.length > 100 ? `${desc.slice(0, 100)}…` : desc}`;
+  return `使用「${capLabel}」`;
+};
+const pushConsentNote = (sid: string, note: string) => {
+  const held = consentNotes.get(sid);
+  if (held) {
+    if (held.at(-1) !== note) held.push(note);
+    return;
+  }
+  const last = store.listMessages(sid).at(-1);
+  if (last?.kind === "event" && last.content === note) return;
+  store.addMessage({ sessionId: sid, from: "system", to: "user", role: "assistant", content: note, kind: "event", createdAt: Date.now() });
+};
 const flushConsentNotes = (sid: string) => {
-  for (const content of consentNotes.get(sid) ?? []) store.addMessage({ sessionId: sid, from: "system", to: "user", role: "assistant", content, kind: "event", createdAt: Date.now() });
+  const notes = consentNotes.get(sid) ?? [];
   consentNotes.delete(sid);
+  const uniq: string[] = [];
+  for (const n of notes) if (uniq.at(-1) !== n) uniq.push(n);
+  let last = store.listMessages(sid).at(-1);
+  for (const content of uniq) {
+    if (last?.kind === "event" && last.content === content) continue;
+    last = store.addMessage({ sessionId: sid, from: "system", to: "user", role: "assistant", content, kind: "event", createdAt: Date.now() });
+  }
 };
 const sendUi = (channel: string, payload: unknown) => { if (mainWin && !mainWin.isDestroyed()) mainWin.webContents.send(channel, payload); };
 ipcMain.handle("consent:respond", (_e, id: string, decision: ConsentDecision) => { pendingConsent.get(id)?.(decision); });
 
 /** bot 间会话：同一对 bot 固定复用一个会话，被问方能接着之前的问答 */
 const isB2bSession = (sid: string) => sid.startsWith("b2b-");
+/** 同一 b2b 会话串行：并行 handleStream 会抢同一 live 草稿，正文拼成两遍、偶发整轮失败 */
+const b2bChain = new Map<string, Promise<unknown>>();
 
 async function askBot(from: Bot, target: string, message: string, depth: number, parentSessionId?: string, signal?: AbortSignal): Promise<string> {
   const all = store.listBots().filter((b) => b.id !== from.id);
   const to = all.find((b) => b.name === target) ?? all.find((b) => b.name.includes(target) || target.includes(b.name));
   if (!to) return `找不到名为「${target}」的 bot。现有成员：${all.map((b) => b.name).join("、")}`;
   const sid = `b2b-${from.id}-${to.id}`;
-  statuses.set(to.id, { botId: to.id, state: "running", lastRunAt: Date.now(), currentTask: `${from.name} 的提问` });
-  const parentActive = parentSessionId ?? activeSession.get(from.id);
-  if (parentActive) activeSession.set(to.id, parentActive);
-  try {
-    const r = await runtime.handleStream(
-      { bot: to, from: from.id, text: message, sessionId: sid, history: store.listMessages(sid).slice(-200) },
-      {
-        depth,
-        extraSystem: instructionsFor(parentActive),
-        signal: signal ?? (parentSessionId ? inflight.get(parentSessionId)?.signal : undefined),
-        onBlock: (block) => {
-          if (parentSessionId && mainWin && !mainWin.isDestroyed()) mainWin.webContents.send("chat:b2b", { parentSessionId, botId: to.id, block });
+  const prev = b2bChain.get(sid) ?? Promise.resolve();
+  const job = (async () => {
+    await prev.catch(() => {});
+    statuses.set(to.id, { botId: to.id, state: "running", lastRunAt: Date.now(), currentTask: `${from.name} 的提问` });
+    const parentActive = parentSessionId ?? activeSession.get(from.id);
+    if (parentActive) activeSession.set(to.id, parentActive);
+    try {
+      const r = await runtime.handleStream(
+        { bot: to, from: from.id, text: message, sessionId: sid, history: store.listMessages(sid).slice(-200) },
+        {
+          depth,
+          extraSystem: instructionsFor(parentActive),
+          signal: signal ?? (parentSessionId ? inflight.get(parentSessionId)?.signal : undefined),
+          onBlock: (block) => {
+            if (parentSessionId && mainWin && !mainWin.isDestroyed()) mainWin.webContents.send("chat:b2b", { parentSessionId, botId: to.id, block });
+          },
         },
-      },
-    );
-    pushPetEvent(to.id, { type: "reply", text: r.text.slice(0, 120) });
-    return `${to.name} 回复：${r.text}`;
-  } finally {
-    if (parentActive && activeSession.get(to.id) === parentActive) activeSession.delete(to.id);
-    statuses.set(to.id, { botId: to.id, state: "idle", lastRunAt: Date.now() });
-  }
+      );
+      pushPetEvent(to.id, { type: "reply", text: r.text.slice(0, 120) });
+      return `${to.name} 回复：${r.text}`;
+    } finally {
+      if (parentActive && activeSession.get(to.id) === parentActive) activeSession.delete(to.id);
+      statuses.set(to.id, { botId: to.id, state: "idle", lastRunAt: Date.now() });
+    }
+  })();
+  b2bChain.set(sid, job.then(() => {}, () => {}));
+  return job;
 }
 
 /** 冷启动：用最近一次用户消息时间；没有则视为「刚活跃」，避免 idle 闸门 fail-open */
@@ -766,7 +1040,6 @@ const proactive = new ProactiveEngine(home, {
   collect: () => collectSignals({
     sessions: store.listSessions(),
     messages: (sid) => store.listMessages(sid),
-    plans: orchestrator.list(),
     tasks: scheduler.list(),
     masterId: store.listBots().find((b) => b.isMaster)?.id,
     nameOf: (id) => store.getBot(id)?.name ?? id,
@@ -828,7 +1101,6 @@ const companion = new CompanionEngine(home, {
     const signals = collectSignals({
       sessions: store.listSessions(bot.id),
       messages: (id) => store.listMessages(id),
-      plans: orchestrator.list(),
       tasks: scheduler.list().filter((t) => t.botId === bot.id),
       masterId: bot.id,
       nameOf: (id) => store.getBot(id)?.name ?? id,
@@ -1412,6 +1684,7 @@ function attention() {
 /** 窗口不在前台时，bot 的新回复（含定时任务）弹系统通知，点一下跳到那个会话 */
 const lastNotified = new Map<string, number>();
 function notifyReply(m: import("../core/types").ChatMessage) {
+  if (m.meta?.partial) return;
   if (m.role !== "assistant" || m.kind === "bot-to-bot" || m.kind === "event" || isB2bSession(m.sessionId) || m.sessionId.startsWith("group-")) return;
   // 定时提醒到点：窗口在前台也要弹
   if (!m.meta?.scheduled && mainWin && !mainWin.isDestroyed() && mainWin.isFocused()) return;
@@ -1607,7 +1880,7 @@ async function defaultHandler(from: any, to: any, text: string, ctx: any): Promi
       { bot, from: from.id || "user", text, sessionId: ctx.sessionId, history: store.listMessages(ctx.sessionId).slice(-200) },
       { skipUserRecord: true, extraSystem: instructionsFor(ctx.sessionId) },
     );
-    statuses.set(bot.id, { botId: bot.id, state: "idle", lastRunAt: Date.now() });
+    settleBotStatus(bot.id, r.content, ctx.sessionId);
     if (bot.petEnabled) {
       const xp = grantPetXp(bot.id, 10);
       pushPetEvent(bot.id, { type: "reply", text: r.text.slice(0, 120), rich: r.content, model: bot.model || providers.get(bot.providerId)?.model || providers.getDefault()?.model, xp });
@@ -1754,23 +2027,26 @@ function pushPetEvent(botId: string, event: {
 }
 
 // G5：macOS 辅助功能 / 屏幕录制 TCC 权限检测
+// 必须查 Electron 本进程（AXIsProcessTrusted），不能用子进程 osascript——那会误报未授权。
+// 注意：系统设置里同名「Electron」可能是另一份签名；开发态本进程常是 Apple Development 重签的 com.github.Electron。
+const ELECTRON_APP_PATH = process.platform === "darwin"
+  ? join(process.execPath, "..", "..", "..") // .../Electron.app/Contents/MacOS/Electron → Electron.app
+  : "";
 function tccStatus() {
-  return {
-    accessibility: (() => {
-      try {
-        const { execFileSync } = require("node:child_process");
-        const out = execFileSync("osascript", ["-e", "tell application \"System Events\" to return UI elements enabled"], { timeout: 8000 }).toString();
-        return out.trim() === "true";
-      } catch { return false; }
-    })(),
-    screen: (() => {
-      try {
-        const { execFileSync } = require("node:child_process");
-        execFileSync("screencapture", ["-x", "/dev/null"], { timeout: 5000 });
-        return true;
-      } catch { return false; }
-    })(),
-  };
+  if (process.platform !== "darwin") {
+    return { accessibility: false, screen: false, electronAppPath: "", hint: undefined as string | undefined };
+  }
+  const accessibility = systemPreferences.isTrustedAccessibilityClient(false);
+  const screen = systemPreferences.getMediaAccessStatus("screen") === "granted";
+  let hint: string | undefined;
+  if (!accessibility) {
+    // 必须以 execPath 判断：app.getAppPath() 在开发态常是项目目录，外置盘项目会误报。
+    const electronOnExternal = /^\/Volumes\//.test(process.execPath);
+    hint = electronOnExternal
+      ? "当前 Electron 在外置盘上，macOS 辅助功能经常勾了也不认。请复制到 /Applications 或 ~/Library/Application Support/harness-bot/runtime/ 后再启动，删掉旧条目，用「+」添加这份，打开开关并完全退出再开。"
+      : `系统列表开着也可能不是当前这份（重签后 CDHash 会变）。请删掉「Harness-Electron / Electron」，用「+」添加：${ELECTRON_APP_PATH || "当前 Electron.app"}，打开开关后完全退出再开。`;
+  }
+  return { accessibility, screen, electronAppPath: ELECTRON_APP_PATH, hint };
 }
 
 function createMainWindow() {
@@ -2021,7 +2297,6 @@ app.whenReady().then(() => {
   setTimeout(() => {
     try {
       const n = store.offloadInlineImages();
-      prunePlanSessions();
       if (n) console.log(`[harness] ${n} 个会话里的内嵌图片已改存为文件`);
     } catch (e) { console.error("[harness] 整理会话失败", e); }
   }, 3000);
@@ -2034,32 +2309,6 @@ app.whenReady().then(() => {
     for (const b of store.listBots().filter((x) => x.petEnabled)) createPetWindow(b.id);
     updateTrayIcon();
   }
-
-  // G4：编排器阶段执行器（走 bot 运行时）
-  orchestrator.stageRunner = async (stage, _prev, ctx) => {
-    const bot = store.getBot(stage.botId);
-    if (!bot) throw new Error(`阶段 bot 不存在: ${stage.botId}`);
-    prunePlanSessions(stage.id);
-    const sid = `plan-${Date.now()}-${stage.id}`;
-    ctx.onActivity("思考中");
-    const r = await runtime.handleStream({ bot, from: "orchestrator", text: stage.prompt, sessionId: sid }, {
-      signal: ctx.signal,
-      unattended: true,
-      onBlock: (b) => {
-        if (b.type === "text") ctx.onText(b.text);
-        else if (b.type === "tool_call" && b.status === "running") ctx.onActivity(`调用 ${b.tool}`);
-      },
-    });
-    if (ctx.signal.aborted) throw new Error("已取消");
-    if (!r.text.trim()) throw new Error(`${bot.name} 没有给出产出`);
-    return r.text;
-  };
-  /** 实时产出逐字推送太密，合并成每 250ms 一次 */
-  const planPush = new Map<string, ReturnType<typeof setTimeout>>();
-  orchestrator.onChange = (plan) => {
-    if (planPush.has(plan.id)) return;
-    planPush.set(plan.id, setTimeout(() => { planPush.delete(plan.id); sendUi("plans:update", plan); }, 250));
-  };
 
   // G5：授权请求以卡片形式出现在 bot 正在干活的会话里（没有窗口时退回系统弹窗）
   consent.decider = async (req) => {
@@ -2089,67 +2338,421 @@ app.whenReady().then(() => {
       sendUi("consent:request", { id, botId: req.botId, botName: name, cap: req.cap, capLabel, description: req.description, danger: strong, command: req.command, onceOnly: !!req.onceOnly, rememberPath: req.rememberPath, reasons: req.reasons ?? [], sessionId });
     });
     if (sessionId) {
+      const action = consentActionLabel(req, capLabel);
       const note = decision === "allow-command"
         ? (req.rememberPath
-          ? `🔐 你允许 ${name} 以后在目录「${req.rememberPath}」直接派 Coding CLI`
-          : `🔐 你允许 ${name} 以后直接执行 ${req.command}`)
-        : `🔐 你${decision === "allow-once" ? "批准了一次" : decision === "allow" ? "长期批准了" : "拒绝了"} ${name} ${req.command ? `执行 ${req.command}` : `使用「${capLabel}」`}`;
-      const held = consentNotes.get(sessionId);
-      if (held) held.push(note);
-      else store.addMessage({ sessionId, from: "system", to: "user", role: "assistant", content: note, kind: "event", createdAt: Date.now() });
+          ? `🔐 你允许 ${name} 以后在目录「${req.rememberPath}」${req.cap === "term:open" ? "直接打开终端" : "直接派 Coding CLI"}`
+          : opaqueConsentCmd(req.command)
+            ? `🔐 你允许 ${name} 以后直接${action}`
+            : `🔐 你允许 ${name} 以后直接执行 ${String(req.command).trim()}`)
+        : `🔐 你${decision === "allow-once" ? "批准了一次" : decision === "allow" ? "长期批准了" : "拒绝了"} ${name} ${action}`;
+      pushConsentNote(sessionId, note);
     }
     sendUi("consent:resolved", { id, decision });
     return decision;
   };
 
-  // G4：HTTP 网关（config.gateway 开启时）
-  if (!EVAL_MODE) void (async () => {
+  if (!EVAL_MODE) void startGatewayFromConfig();
+
+  /** 云端入站：短链桥 POST /w/:token → 本机轮询入队（pull 与执行解耦，urgent 可插队） */
+  let inboundPollBusy = false;
+  const inboundDedupe = new InboundDedupe();
+  /** 已接过、尚未记入 dedupe 的云端事件。pull 不删队列，不占上这个集合就会在 bot 回复期间被下一次轮询再开一轮 */
+  const inboundQueued = new Set<string>();
+  const pendingInboundAcks = new Set<string>();
+  const inboundJobQ: InboundJob[] = [];
+  let inboundPumpBusy = false;
+  /** 每会话入站串行，避免两个 normal 同时过 waitSessionIdle */
+  const sessionInboundTail = new Map<string, Promise<void>>();
+
+  async function flushInboundAcks(creds: NonNullable<ReturnType<typeof shareBridgeCreds>>) {
+    if (!pendingInboundAcks.size) return;
+    const keys = [...pendingInboundAcks];
     try {
-      const cfg = store.readConfig() as { gateway?: { port?: number; token?: string; host?: string } };
-      const gw = cfg.gateway;
-      if (gw?.port) {
-        if (!gw.token || gw.token.length < 16 || gw.token === "harness-default-token") {
-          gw.token = randomBytes(24).toString("hex");
-          store.writeConfig({ ...store.readConfig(), gateway: gw });
-        }
-        const server = new GatewayServer(gw.port, gw.token, bus, { host: gw.host });
-        const port = await server.start();
-        console.log(`[harness] 网关已启动 ${gw.host ?? "127.0.0.1"}:${port} 🕸（token 见 config.json）`);
-      }
+      await ackCloudInboundEvents(keys, creds);
+      for (const k of keys) pendingInboundAcks.delete(k);
     } catch (e) {
-      console.log("[harness] 网关启动失败（忽略）:", e instanceof Error ? e.message : e);
+      console.warn("[harness] cloud inbound ack failed:", e instanceof Error ? e.message : e);
     }
-  })();
+  }
+
+  function resolveInboundSession(task: ScheduledTask): string {
+    const pinned = task.sessionId;
+    if (pinned && store.getSession(pinned) && !pinned.startsWith("group-") && !isB2bSession(pinned)) return pinned;
+    const gazed = activeSession.get(task.botId);
+    if (gazed && store.getSession(gazed) && !gazed.startsWith("group-") && !isB2bSession(gazed)) return gazed;
+    const sid = `wh-${task.id}`;
+    store.ensureSession(sid, task.botId, task.name || "Webhook");
+    return sid;
+  }
+
+  async function withSessionInboundChain<T>(sessionId: string, fn: () => Promise<T>): Promise<T> {
+    const prev = sessionInboundTail.get(sessionId) ?? Promise.resolve();
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    const held = prev.then(() => gate);
+    sessionInboundTail.set(sessionId, held.then(() => undefined, () => undefined));
+    await prev;
+    try {
+      return await fn();
+    } finally {
+      release();
+      if (sessionInboundTail.get(sessionId) === held.then(() => undefined, () => undefined)) {
+        /* keep map tidy only when no successor — skip; GC via overwrite */
+      }
+    }
+  }
+
+  enqueueInboundJob = (job) => {
+    const claim = claimInboundEvent(job.eventId, { done: inboundDedupe, queued: inboundQueued });
+    if (claim === "done") {
+      if (job.kvKey) {
+        pendingInboundAcks.add(job.kvKey);
+        const c = shareBridgeCreds();
+        if (c) void flushInboundAcks(c);
+      }
+      return;
+    }
+    if (claim === "queued") return;
+    if (job.parsed.priority === "urgent") {
+      const i = inboundJobQ.findIndex((j) => j.parsed.priority !== "urgent");
+      if (i < 0) inboundJobQ.push(job);
+      else inboundJobQ.splice(i, 0, job);
+    } else {
+      inboundJobQ.push(job);
+    }
+    void pumpInboundJobs();
+  };
+
+  async function pumpInboundJobs() {
+    if (inboundPumpBusy) return;
+    inboundPumpBusy = true;
+    try {
+      while (inboundJobQ.length) {
+        inboundJobQ.sort((a, b) => {
+          const au = a.parsed.priority === "urgent" ? 0 : 1;
+          const bu = b.parsed.priority === "urgent" ? 0 : 1;
+          return au - bu;
+        });
+        const job = inboundJobQ.shift()!;
+        if (job.eventId && inboundDedupe.has(job.eventId)) {
+          inboundQueued.delete(job.eventId);
+          if (job.kvKey) pendingInboundAcks.add(job.kvKey);
+          continue;
+        }
+        try {
+          if (!deliverInboundWebhook) throw new Error("runtime not ready");
+          await deliverInboundWebhook(job.task, job.parsed);
+          if (job.eventId) {
+            inboundDedupe.add(job.eventId);
+            inboundQueued.delete(job.eventId);
+          }
+        } catch (e) {
+          console.error("[harness] inbound deliver failed:", e instanceof Error ? e.message : e);
+          try {
+            const sid = resolveInboundSession(job.task);
+            const bot = store.getBot(job.task.botId);
+            store.addMessage({
+              sessionId: sid,
+              from: bot?.id || "system",
+              to: "user",
+              role: "assistant",
+              content: `❌ 入站 Webhook「${job.task.name}」投递失败：${e instanceof Error ? e.message : String(e)}`,
+              kind: "event",
+              createdAt: Date.now(),
+              meta: { webhook: true },
+            });
+          } catch { /* ignore */ }
+          if (job.eventId) {
+            inboundDedupe.add(job.eventId);
+            inboundQueued.delete(job.eventId);
+          }
+        } finally {
+          if (job.kvKey) {
+            pendingInboundAcks.add(job.kvKey);
+            const creds = shareBridgeCreds();
+            if (creds) await flushInboundAcks(creds);
+          }
+        }
+      }
+    } finally {
+      inboundPumpBusy = false;
+      if (inboundJobQ.length) void pumpInboundJobs();
+    }
+  }
+
+  async function pollCloudInboundOnce() {
+    if (inboundPollBusy) return;
+    const creds = shareBridgeCreds();
+    if (!creds) return;
+    // 只拉启用中的令牌，避免暂停例行占满 pull 窗口
+    const tokens = scheduler.list()
+      .filter((t) => t.enabled && t.webhookToken && t.webhookToken.length >= 8)
+      .map((t) => t.webhookToken!);
+    if (!tokens.length && !pendingInboundAcks.size) return;
+    inboundPollBusy = true;
+    try {
+      await flushInboundAcks(creds);
+      if (!tokens.length) return;
+      const items = sortInboundEventsByPriority(await pullCloudInboundEvents(tokens, creds));
+      for (const ev of items) {
+        if (ev.id && (inboundDedupe.has(ev.id) || inboundQueued.has(ev.id))) {
+          if (inboundDedupe.has(ev.id) && ev.kvKey) pendingInboundAcks.add(ev.kvKey);
+          continue;
+        }
+        const task = scheduler.findByWebhookToken(ev.token);
+        if (!task || !task.enabled) {
+          // 令牌作废或不该拉到：ack 丢掉；暂停例行本不在 tokens 里
+          if (ev.kvKey) pendingInboundAcks.add(ev.kvKey);
+          if (ev.id) inboundDedupe.add(ev.id);
+          continue;
+        }
+        const parsed = parseInboundWebhookBody(ev.body, { priority: ev.priority });
+        enqueueInboundJob!({
+          task,
+          parsed,
+          source: "cloud",
+          eventId: ev.id,
+          kvKey: ev.kvKey,
+        });
+      }
+      await flushInboundAcks(creds);
+    } catch (e) {
+      if (Math.random() < 0.05) console.warn("[harness] cloud inbound poll:", e instanceof Error ? e.message : e);
+    } finally {
+      inboundPollBusy = false;
+    }
+  }
+
+  async function syncCloudInboundRegistrations() {
+    const creds = shareBridgeCreds();
+    if (!creds) return;
+    const tokens = scheduler.list()
+      .map((t) => t.webhookToken)
+      .filter((t): t is string => !!t && t.length >= 8);
+    if (!tokens.length) return;
+    try {
+      await registerCloudInboundTokens(tokens, creds);
+    } catch (e) {
+      console.warn("[harness] cloud inbound register:", e instanceof Error ? e.message : e);
+    }
+  }
+
+  /** 入站 Webhook：解析 message 注入用户会话；普通等空闲，紧急打断本会话 */
+  async function waitSessionIdle(sessionId: string, timeoutMs: number): Promise<boolean> {
+    const start = Date.now();
+    while (inflight.has(sessionId)) {
+      if (Date.now() - start > timeoutMs) return false;
+      await new Promise((r) => setTimeout(r, 200));
+    }
+    return true;
+  }
+
+  deliverInboundWebhook = async function runInboundWebhook(
+    task: ScheduledTask,
+    parsed: ReturnType<typeof parseInboundWebhookBody>,
+  ) {
+    const bot = store.getBot(task.botId);
+    if (!bot) throw new Error(`例行所属 bot 已删除（${task.botId}）`);
+    const priority: InboundPriority = parsed.priority;
+    const sid = resolveInboundSession(task);
+    store.ensureSession(sid, bot.id, task.name || "Webhook");
+
+    await withSessionInboundChain(sid, async () => {
+      if (priority === "urgent") {
+        const mine = inflight.get(sid);
+        if (mine) mine.abort();
+        await new Promise((r) => setTimeout(r, 50));
+        void deliverNotification({
+          title: parsed.title || `🚨 ${bot.name}`,
+          body: "正在处理紧急 Webhook…",
+          sessionId: sid,
+        });
+        focusMainPanel(sid);
+      } else {
+        const ok = await waitSessionIdle(sid, 120_000);
+        if (!ok) {
+          store.addMessage({
+            sessionId: sid,
+            from: "system",
+            to: "user",
+            role: "assistant",
+            content: `⚠️ 入站 Webhook「${task.name}」在等待当前回复时超时，已放弃本轮（普通优先级不会打断）。紧急任务请带 \`"priority":"urgent"\` 或头 \`X-Harness-Priority: urgent\`。`,
+            kind: "event",
+            createdAt: Date.now(),
+            meta: { webhook: true, priority: "normal" },
+          });
+          return;
+        }
+      }
+
+      const { userText, usedMessage } = buildInboundUserText(parsed, task.prompt ?? task.name);
+      const extra = buildInboundExtraSystem(parsed, task.prompt ?? "", usedMessage);
+      // from=webhook：UI 左侧入站卡（不是用户绿泡）；role=user：模型仍当作用户当面请求
+      store.addMessage({
+        sessionId: sid,
+        from: "webhook",
+        to: bot.id,
+        role: "user",
+        content: userText,
+        kind: "chat",
+        createdAt: Date.now(),
+        meta: { webhook: true, priority },
+      });
+      const ctrl = new AbortController();
+      const prev = inflight.get(sid);
+      if (prev && prev !== ctrl) prev.abort();
+      inflight.set(sid, ctrl);
+      activeSession.set(bot.id, sid);
+      statuses.set(bot.id, {
+        botId: bot.id,
+        state: "running",
+        lastRunAt: Date.now(),
+        currentTask: `🪝 ${priority === "urgent" ? "紧急 · " : ""}${userText.slice(0, 48)}`,
+        sessionId: sid,
+      });
+
+      try {
+        const timeout = AbortSignal.timeout(15 * 60_000);
+        const onTimeout = () => ctrl.abort();
+        timeout.addEventListener("abort", onTimeout, { once: true });
+        const r = await runtime.handle(
+          { bot, from: "user", text: userText, sessionId: sid, history: store.listMessages(sid).slice(-200) },
+          {
+            signal: ctrl.signal,
+            skipUserRecord: true,
+            extraSystem: `${extra}\n\n${instructionsFor(sid)}`,
+            meta: { webhook: true, priority },
+          },
+        );
+        statuses.set(bot.id, { botId: bot.id, state: "idle", lastRunAt: Date.now() });
+        attention();
+        const preview = (r.text || userText).replace(/```tool[\s\S]*?```/g, "").trim().slice(0, 120);
+        if (priority === "urgent") {
+          void deliverNotification({
+            title: parsed.title || `🚨 ${bot.name}`,
+            body: preview || "紧急 Webhook 已完成",
+            sessionId: sid,
+          });
+          pushPetEvent(bot.id, {
+            type: "task-done",
+            title: parsed.title || `紧急 · ${task.name}`,
+            text: preview,
+            rich: r.content,
+            sessionId: sid,
+          });
+        } else {
+          pushPetEvent(bot.id, {
+            type: "task-done",
+            title: task.name,
+            text: preview,
+            rich: r.content,
+            sessionId: sid,
+          });
+        }
+      } catch (e) {
+        const err = e instanceof Error ? e.message : String(e);
+        if (!/abort|停止/i.test(err)) {
+          statuses.set(bot.id, { botId: bot.id, state: "error", lastError: err });
+          store.addMessage({
+            sessionId: sid,
+            from: bot.id,
+            to: "user",
+            role: "assistant",
+            content: `❌ 入站 Webhook 处理失败：${err}`,
+            kind: "chat",
+            createdAt: Date.now(),
+            meta: { webhook: true, priority },
+          });
+          if (priority === "urgent") {
+            void deliverNotification({ title: `${bot.name} · Webhook 失败`, body: err.slice(0, 120), sessionId: sid });
+          }
+        }
+      } finally {
+        if (activeSession.get(bot.id) === sid) activeSession.delete(bot.id);
+        if (inflight.get(sid) === ctrl) inflight.delete(sid);
+      }
+    });
+  };
+
+  if (!EVAL_MODE) {
+    void syncCloudInboundRegistrations();
+    setInterval(() => { void pollCloudInboundOnce(); }, 2500);
+    setTimeout(() => { void pollCloudInboundOnce(); }, 1500);
+    setInterval(() => { void syncCloudInboundRegistrations(); }, 6 * 60 * 60_000);
+  }
+
+  /** 例行结果写入该 bot 可见单聊（Grok Routines in transcript）；执行历史仍在 sched-* */
+  function resolveRoutineTranscript(task: ScheduledTask): string {
+    const picked = pickRoutineTranscriptSessionId({
+      pinned: task.sessionId,
+      gazed: activeSession.get(task.botId),
+      sessionExists: (id) => !!store.getSession(id),
+      recentSessions: store.listSessionsPage({ botId: task.botId, limit: 20 }).sessions,
+    });
+    if (picked) return picked;
+    const sid = `s-routine-${task.botId}`;
+    store.ensureSession(sid, task.botId, "例行");
+    return sid;
+  }
 
   // 定时任务：到期时唤醒对应 bot（走运行时）
   scheduler.onRun = async (task) => {
     const bot = store.getBot(task.botId);
-    if (!bot) return;
+    if (!bot) throw new Error(`例行所属 bot 已删除（${task.botId}）`);
     // 同一个任务每次运行都记在同一个会话里，不会每跑一次多一个会话
     const sid = `sched-${task.id}`;
-    // 在单聊里设的任务：结果直接发回那个会话（系统通知可能被 macOS 拦掉，聊天里一定看得到）
-    const replySid = task.sessionId && !task.sessionId.startsWith("group-") && !isB2bSession(task.sessionId) && store.getSession(task.sessionId) ? task.sessionId : null;
+    // 结果一定进该 bot 对话（钉死会话 / 注视会话 / 最近单聊 / 兜底「例行」会话）
+    const replySid = resolveRoutineTranscript(task);
     try {
       statuses.set(task.botId, { botId: task.botId, state: "running", lastRunAt: Date.now(), currentTask: `⏰ ${task.name}` });
       const limit = AbortSignal.timeout(15 * 60_000);
-      const text = (task.prompt ?? task.name) + (replySid ? "\n\n（这是你之前替用户设的定时任务，现在到点了。你的回复会直接显示在和用户的聊天里：直接对用户说要提醒的内容或任务结果，不要说「我来发通知」之类的过程话，也不用调用 notify，系统会自动弹通知。）" : "");
+      const text = `${task.prompt ?? task.name}\n\n（这是例行「${task.name}」，现在到点了。你的回复会直接显示在和用户的聊天里：直接对用户说要提醒的内容或任务结果，不要说「我来发通知」之类的过程话，也不用调用 notify，系统会自动弹通知。）`;
       const r = await runtime.handle(
         { bot, from: "scheduler", text, sessionId: sid, history: store.listMessages(sid).slice(-20) },
         { signal: limit, unattended: true },
       );
       if (limit.aborted) throw new Error("运行超过 15 分钟，已停止");
       statuses.set(task.botId, { botId: task.botId, state: "idle", lastRunAt: Date.now() });
-      if (replySid) {
-        const reply = r.text.replace(/```tool[\s\S]*?```/g, "").trim() || task.name;
-        store.addMessage({ sessionId: replySid, from: bot.id, to: "user", role: "assistant", content: [{ type: "text", text: reply.startsWith("⏰") ? reply : `⏰ ${reply}` }], kind: "chat", createdAt: Date.now(), meta: { scheduled: task.name } });
-        attention();
-      } else void system.notify(`⏰ ${bot.name} 定时任务`, task.name);
+      const reply = r.text.replace(/```tool[\s\S]*?```/g, "").trim() || task.name;
+      store.addMessage({
+        sessionId: replySid,
+        from: "system",
+        to: "user",
+        role: "assistant",
+        content: `⏰ 例行「${task.name}」已跑完`,
+        kind: "event",
+        createdAt: Date.now(),
+        meta: { scheduled: task.name },
+      });
+      store.addMessage({
+        sessionId: replySid,
+        from: bot.id,
+        to: "user",
+        role: "assistant",
+        content: [{ type: "text", text: reply }],
+        kind: "chat",
+        createdAt: Date.now(),
+        meta: { scheduled: task.name },
+      });
+      attention();
       const xp = bot.petEnabled ? grantPetXp(task.botId, 20) : undefined;
-      pushPetEvent(task.botId, { type: "task-done", title: task.name, text: r.text.slice(0, 120), rich: r.content, sessionId: sid, model: bot.model || providers.get(bot.providerId)?.model || providers.getDefault()?.model, xp });
+      pushPetEvent(task.botId, { type: "task-done", title: task.name, text: r.text.slice(0, 120), rich: r.content, sessionId: replySid, model: bot.model || providers.get(bot.providerId)?.model || providers.getDefault()?.model, xp });
     } catch (e) {
       const err = e instanceof Error ? e.message : String(e);
       statuses.set(task.botId, { botId: task.botId, state: "error", lastError: err });
-      pushPetEvent(task.botId, { type: "task-error", title: task.name, text: err.slice(0, 120), sessionId: sid });
+      store.addMessage({
+        sessionId: replySid,
+        from: "system",
+        to: "user",
+        role: "assistant",
+        content: `❌ 例行「${task.name}」失败：${err.slice(0, 200)}`,
+        kind: "event",
+        createdAt: Date.now(),
+        meta: { scheduled: task.name },
+      });
+      attention();
+      pushPetEvent(task.botId, { type: "task-error", title: task.name, text: err.slice(0, 120), sessionId: replySid });
       throw e;
     }
   };
@@ -2207,18 +2810,32 @@ ipcMain.handle("bots:previews", () => {
   }
   return out;
 });
-ipcMain.handle("bots:create", async (_e, text: string, opts?: { name?: string; avatar?: Bot["avatar"] }) => {
+ipcMain.handle("bots:draft", async (_e, text: string) => registry.draftFromText(text));
+ipcMain.handle("bots:create", async (_e, text: string, opts?: { name?: string; role?: string; persona?: string; systemPrompt?: string; avatar?: Bot["avatar"] }) => {
   let bot = await registry.createBotFromText(text, { defaultProviderId: providers.getDefault()?.id });
   const taken = new Set(store.listBots().filter((b) => b.id !== bot.id).map((b) => b.name));
   let name = opts?.name?.trim() || bot.name;
   for (let i = 2; taken.has(name); i++) name = `${(opts?.name?.trim() || bot.name)} ${i}`;
-  if (name !== bot.name || opts?.avatar) bot = registry.updateBot(bot.id, { ...(name !== bot.name ? { name } : {}), ...(opts?.avatar ? { avatar: opts.avatar } : {}) }) ?? bot;
+  const patch: Partial<Bot> = {};
+  if (name !== bot.name) patch.name = name;
+  if (opts?.avatar) patch.avatar = opts.avatar;
+  if (opts?.role?.trim()) patch.role = opts.role.trim();
+  if (opts?.persona?.trim()) patch.persona = opts.persona.trim();
+  if (opts?.systemPrompt?.trim()) patch.systemPrompt = opts.systemPrompt.trim();
+  if (Object.keys(patch).length) bot = registry.updateBot(bot.id, patch) ?? bot;
   bus.register(bot.id, defaultHandler);
+  const welcomeSessionId = seedBotWelcome(store, bot);
   // 默认出台：创建完就现身，不用再开关「打开宠物」
   if (bot.petEnabled && !EVAL_MODE) createPetWindow(bot.id);
-  return bot;
+  if (mainWin && !mainWin.isDestroyed()) mainWin.webContents.send("bot:created", { botId: bot.id, sessionId: welcomeSessionId });
+  return { ...bot, welcomeSessionId };
 });
-ipcMain.handle("bots:update", (_e, id: string, patch: { name?: string; role?: string; persona?: string; providerId?: string; isMaster?: boolean; order?: number; avatar?: Bot["avatar"]; reasoning?: Bot["reasoning"]; agentCwd?: string | null; agentCli?: Bot["agentCli"] | null; agentResume?: Bot["agentResume"] | null }) => {
+ipcMain.handle("bots:update", (_e, id: string, patch: {
+  name?: string; role?: string; persona?: string; providerId?: string; isMaster?: boolean; order?: number;
+  pinned?: boolean; hidden?: boolean; section?: string | null; disabledSkills?: string[] | null;
+  avatar?: Bot["avatar"]; reasoning?: Bot["reasoning"]; agentCwd?: string | null; dropAgentCwd?: string | null;
+  agentCli?: Bot["agentCli"] | null; agentResume?: Bot["agentResume"] | null;
+}) => {
   const bot = store.getBot(id);
   if (!bot) throw new Error("bot 不存在");
   if (patch.isMaster) {
@@ -2237,11 +2854,36 @@ ipcMain.handle("bots:update", (_e, id: string, patch: { name?: string; role?: st
   if (patch.providerId !== undefined) next.providerId = patch.providerId;
   if (patch.isMaster !== undefined) next.isMaster = patch.isMaster;
   if (patch.order !== undefined) next.order = patch.order;
+  if (patch.pinned !== undefined) {
+    if (patch.pinned) next.pinned = true;
+    else delete next.pinned;
+  }
+  if (patch.hidden !== undefined) {
+    if (patch.hidden) next.hidden = true;
+    else delete next.hidden;
+  }
+  if (patch.section !== undefined) {
+    const s = typeof patch.section === "string" ? patch.section.trim() : "";
+    if (s) next.section = s;
+    else delete next.section;
+  }
+  if (patch.disabledSkills !== undefined) {
+    const keys = Array.isArray(patch.disabledSkills) ? [...new Set(patch.disabledSkills.map(String).filter(Boolean))] : [];
+    if (keys.length) next.disabledSkills = keys;
+    else delete next.disabledSkills;
+  }
   if (patch.reasoning && ["auto", "always", "off"].includes(patch.reasoning)) next.reasoning = patch.reasoning;
   if (patch.avatar) { next.avatar = patch.avatar; delete next.avatarPath; }
-  if (patch.agentCwd !== undefined) {
-    if (patch.agentCwd === null || !String(patch.agentCwd).trim()) delete next.agentCwd;
-    else next.agentCwd = String(patch.agentCwd).trim();
+  if (typeof patch.dropAgentCwd === "string" && patch.dropAgentCwd.trim()) {
+    const dropped = dropCodingDir(next, patch.dropAgentCwd);
+    if (dropped.agentCwd) next.agentCwd = dropped.agentCwd;
+    else delete next.agentCwd;
+    if (dropped.agentDirs?.length) next.agentDirs = dropped.agentDirs;
+    else delete next.agentDirs;
+  } else if (typeof patch.agentCwd === "string" && patch.agentCwd.trim()) {
+    const gazed = gazeCodingDir(next, patch.agentCwd);
+    next.agentCwd = gazed.agentCwd;
+    next.agentDirs = gazed.agentDirs;
   }
   if (patch.agentCli !== undefined) {
     if (!patch.agentCli) delete next.agentCli;
@@ -2289,7 +2931,8 @@ function needsForBot(bot: Bot) {
       env: env.visibleTo(bot.id),
       mcp: mcpManage.list().map((m) => ({ id: m.id, name: m.name })),
     },
-    ownedSecrets: secrets.list(bot.id).filter((s) => s.botId === bot.id),
+    // 账号级保险库：botId 已不作 ACL；用 savedBy 归因「谁收录」进分享 needs
+    ownedSecrets: secrets.list(bot.id).filter((s) => s.savedBy === bot.id).map((s) => ({ name: s.name, label: s.label, note: s.note })),
     ownedEnv: env.visibleTo(bot.id).filter((e) => e.botId === bot.id),
   });
 }
@@ -2342,14 +2985,29 @@ ipcMain.handle("bots:duplicate", (_e, id: string) => {
   return createFromTemplate(t, `${t.name} 副本`, { onboard: false });
 });
 /** 分享链接复制到剪贴板，同时在「下载」里存一份 .harnessbot 文件（链接太长发不出去时发文件） */
-ipcMain.handle("bots:share", (_e, id: string) => {
+ipcMain.handle("bots:share", async (_e, id: string) => {
   const t = botTemplate(id, 192);
   const link = templateLink(t);
   const file = join(app.getPath("downloads"), `${t.name.replace(/[\\/:*?"<>|]/g, "_")}.${TEMPLATE_EXT}`);
   writeFileSync(file, JSON.stringify(t, null, 2), "utf8");
-  clipboard.writeText(link);
+  let shortUrl: string | undefined;
+  let shortError: string | undefined;
+  if (shareBridgeCreds()) {
+    try {
+      const short = await putHarnessShortLink(link, { name: t.name, role: t.role });
+      shortUrl = short.url;
+      clipboard.writeText(short.url);
+    } catch (e) {
+      shortError = e instanceof Error ? e.message : String(e);
+      clipboard.writeText(link);
+    }
+  } else {
+    clipboard.writeText(link);
+  }
   return {
     link,
+    shortUrl,
+    shortError,
     file,
     skills: t.skills.length,
     chars: link.length,
@@ -2363,7 +3021,7 @@ ipcMain.handle("bots:share", (_e, id: string) => {
     },
   };
 });
-ipcMain.handle("bots:parseTemplate", (_e, input: string) => parseTemplate(input));
+ipcMain.handle("bots:parseTemplate", async (_e, input: string) => parseTemplate(await resolveTemplateInput(input)));
 ipcMain.handle("bots:diffNeeds", (_e, needs: unknown): NeedsDiff => {
   const t = normalizeTemplate({ v: 2, name: "_", role: "", persona: "", skills: [], needs });
   return diffNeeds(t.needs, localNeedsReady());
@@ -2627,7 +3285,7 @@ ipcMain.handle("chat:sendStream", async (_e, botId: string, content: string | im
       { onBlock: push, signal: ctrl.signal, think: !!opts?.think, extraSystem: instructionsFor(sid, projectId) },
     );
     if (opts?.projectId !== undefined) store.setSessionProject(sid, projectId);
-    statuses.set(botId, { botId, state: "idle", lastRunAt: Date.now() });
+    settleBotStatus(botId, r.content, sid);
     if (!ctrl.signal.aborted) void suggestFollowUps(sid, botId, text, r.text);
     if (bot.petEnabled) {
       const xp = grantPetXp(botId, 10);
@@ -2639,8 +3297,14 @@ ipcMain.handle("chat:sendStream", async (_e, botId: string, content: string | im
   } catch (e) {
     statuses.set(botId, { botId, state: "error", lastRunAt: Date.now(), lastError: e instanceof Error ? e.message : String(e) });
     const err = e instanceof Error ? e.message : String(e);
-    store.addMessage({ sessionId: sid, from: "user", to: botId, role: "user", content: content as any, kind: "chat", createdAt: Date.now() });
-    store.addMessage({ sessionId: sid, from: botId, to: "user", role: "assistant", content: `❌ 回复失败：${err}`, kind: "chat", createdAt: Date.now() });
+    const liveTerm = codingPresence.snapshot(botId);
+    const termNote = liveTerm && liveTerm.phase !== "exited"
+      ? `\n编码终端还开着（${liveTerm.cwd}），这轮只是对话断了，终端没有关掉。`
+      : "";
+    if (!runtime.failLive(botId, sid, `❌ 回复失败：${err}${termNote}`)) {
+      store.addMessage({ sessionId: sid, from: "user", to: botId, role: "user", content: content as any, kind: "chat", createdAt: Date.now() });
+      store.addMessage({ sessionId: sid, from: botId, to: "user", role: "assistant", content: `❌ 回复失败：${err}${termNote}`, kind: "chat", createdAt: Date.now() });
+    }
     throw e;
   } finally {
     flushConsentNotes(sid);
@@ -2650,25 +3314,44 @@ ipcMain.handle("chat:sendStream", async (_e, botId: string, content: string | im
 });
 ipcMain.handle("chat:cancel", (_e, sessionId: string) => { inflight.get(sessionId)?.abort(); });
 
-/** 回复结束后补 3 个追问建议，挂在这条回复的 meta 上 */
+/** 回复结束后挂软选项 / 追问建议。优先用正文里已写清的方案列表，避免和硬卡重复 */
 async function suggestFollowUps(sid: string, botId: string, question: string, answer: string) {
   if ((store.readConfig().prefs as { suggestions?: boolean } | undefined)?.suggestions === false) return;
+  if (sid.startsWith("group-") || sid.startsWith("b2b-")) return;
   const reply = answer.replace(/```tool[\s\S]*?```/g, "").trim();
   if (reply.length < 12 || reply.startsWith("❌") || reply.includes("（已停止生成）")) return;
   const msg = store.listMessages(sid).findLast((m) => m.from === botId && m.role === "assistant");
-  if (!msg?.id || (Array.isArray(msg.content) && msg.content.some((b) => b.type === "choice" || b.type === "secret"))) return;
+  if (!msg?.id || (Array.isArray(msg.content) && msg.content.some((b) => b.type === "choice" || b.type === "secret" || b.type === "form"))) return;
+  // runtime 层 2 已写入方案芯片：只补推 UI，不再用模型另造追问盖掉
+  const existing = msg.meta?.suggestions?.filter(Boolean) ?? [];
+  if (existing.length >= 2) {
+    sendUi("chat:suggestions", { sessionId: sid, msgId: msg.id, suggestions: existing.slice(0, 4) });
+    return;
+  }
+  const offer = detectChoiceOffer(reply);
+  if (offer?.kind === "soft") {
+    const suggestions = offer.options;
+    store.updateMessage(sid, msg.id, (m) => ({ ...m, meta: { ...m.meta, suggestions } }));
+    sendUi("chat:suggestions", { sessionId: sid, msgId: msg.id, suggestions });
+    return;
+  }
+  if (offer?.kind === "hard") return; // 应已走 ui.ask；勿再挂软条干扰
   const bound = providers.get(store.getBot(botId)?.providerId ?? "");
   const p = bound?.kind === "openai-compat" ? bound : providers.list().find((x) => x.kind === "openai-compat" && x.isDefault) ?? providers.list().find((x) => x.kind === "openai-compat");
-  if (!p) return;
+  if (!p) return; // CLI-only：无兼容端点时宁可不造追问，避免乱猜
   try {
     const r = await providers.complete(p, {
-      system: "根据这轮对话，站在用户角度写 3 个最可能的下一步追问，每个不超过 22 个字，具体、不重复、不要客套。用对话的语言。只输出 JSON 字符串数组。",
+      system: "根据这轮对话，站在用户角度写 3 个最可能的下一步追问，每个不超过 22 个字，具体、不重复、不要客套。用对话的语言。只输出 JSON 字符串数组。不要复述回答里已经列过的方案选项。",
       user: `用户：${question.slice(0, 1500)}\n\n回答：${reply.slice(0, 3000)}`,
       temperature: 0.6,
     });
     const arr = JSON.parse(r.text.match(/\[[\s\S]*\]/)?.[0] ?? "[]");
     const suggestions = (Array.isArray(arr) ? arr : []).map((s) => String(s).trim()).filter(Boolean).slice(0, 3);
     if (!suggestions.length) return;
+    // 仍以最新消息为准，避免异步到达时盖掉用户已点选后的新回复
+    const latest = store.listMessages(sid).findLast((m) => m.from === botId && m.role === "assistant");
+    if (!latest?.id || latest.id !== msg.id) return;
+    if (latest.meta?.suggestions?.length) return;
     store.updateMessage(sid, msg.id, (m) => ({ ...m, meta: { ...m.meta, suggestions } }));
     sendUi("chat:suggestions", { sessionId: sid, msgId: msg.id, suggestions });
   } catch {
@@ -2779,9 +3462,13 @@ ipcMain.handle("pet:trial", async (_e, kind?: string) => {
 
 registerShareIpc({ appRoot: APP_ROOT, store, groups });
 
-/* ================= 群聊（编排在 core/group-session，这里只做宿主桥接） ================= */
+/* ================= 群聊（逻辑在 core/group-session，这里只做宿主桥接） ================= */
 ipcMain.handle("groups:chat", async (_e, groupId: string, content: string | ContentBlock[], sessionId?: string) => {
   const sid = sessionId || `group-${groupId}`;
+  if (groupSessions.isLive(sid)) {
+    const joined = await groupSessions.interject(groupId, sid, content);
+    return { ok: joined.ok, sessionId: sid, joined: true, turns: 0, rounds: 0, reason: joined.ok ? "插进正在进行的接力" : "这段对话没有正在进行的接力" };
+  }
   const ctrl = new AbortController();
   inflight.set(sid, ctrl);
   try {
@@ -2803,6 +3490,12 @@ ipcMain.handle("groups:chat", async (_e, groupId: string, content: string | Cont
 
 ipcMain.handle("groups:interject", (_e, groupId: string, sessionId: string, content: string | ContentBlock[]) =>
   groupSessions.interject(groupId, sessionId, content));
+ipcMain.handle("groups:gaze", (_e, groupId: string, sessionId: string | null) => {
+  if (sessionId) groupGaze.set(groupId, sessionId);
+  else groupGaze.delete(groupId);
+});
+ipcMain.handle("groups:peek", (_e, sessionId: string) => groupSessions.peek(sessionId));
+ipcMain.handle("groups:board", (_e, sessionId: string) => groupSessions.boardOf(sessionId));
 
 ipcMain.handle("groups:update", (_e, groupId: string, patch: { name?: string; members?: string[]; settings?: import("../core/group-registry").GroupSettings }) => groups.update(groupId, patch));
 
@@ -2813,6 +3506,7 @@ ipcMain.handle("groups:taskDone", (_e, sessionId: string, msgId: number, index: 
   })));
 
 ipcMain.handle("groups:dispatch", async (_e, groupId: string, sessionId: string, msgId: number, indexes: number[]) => {
+  if (groupSessions.isLive(sessionId)) return { ok: false as const, error: "这段对话还在接力，等它结束再执行分派" };
   const ctrl = new AbortController();
   inflight.set(sessionId, ctrl);
   try {
@@ -2829,90 +3523,173 @@ ipcMain.handle("bus:send", async (_e, fromId: string, toId: string, text: string
 });
 // G4：群组
 ipcMain.handle("groups:list", (_e, botId?: string) => groups.list(botId));
-ipcMain.handle("groups:create", (_e, name: string, members: string[]) => {
-  const g = groups.create(name, "user", members);
-  return g;
+ipcMain.handle("groups:create", (_e, name: string, members: string[], opts?: { settings?: import("../core/group-registry").GroupSettings; starterId?: string }) => {
+  let g = groups.create(name, "user", members);
+  if (opts?.settings) g = groups.update(g.id, { settings: opts.settings }) ?? g;
+  const names = g.members.map((id) => store.getBot(id)?.name).filter((n): n is string => !!n);
+  const welcomeSessionId = seedGroupWelcome(store, g, names, { starterId: opts?.starterId });
+  return { ...g, welcomeSessionId };
 });
 ipcMain.handle("groups:join", (_e, groupId: string, botId: string) => groups.join(groupId, botId));
 ipcMain.handle("groups:leave", (_e, groupId: string, botId: string) => groups.leave(groupId, botId));
-ipcMain.handle("groups:remove", (_e, groupId: string) => groups.remove(groupId));
+ipcMain.handle("groups:remove", (_e, groupId: string) => {
+  groupGaze.delete(groupId);
+  return groups.remove(groupId);
+});
 ipcMain.handle("groups:broadcast", async (_e, groupId: string, fromId: string, text: string) => {
   const from = store.getBot(fromId);
   if (!from) throw new Error("发起 bot 不存在");
   return bus.broadcast(groupId, from, text);
 });
-// G4：编排
-ipcMain.handle("plans:create", (_e, input: { ownerBotId: string; title: string; stages: Array<{ botId: string; prompt: string; mode?: string }> }) =>
-  orchestrator.create({ ownerBotId: input.ownerBotId, title: input.title, stages: input.stages.map((s) => ({ botId: s.botId, prompt: s.prompt, mode: s.mode === "fan" ? "fan" as const : "seq" as const })) }));
-/**
- * 编排阶段的会话只是运行记录：每个阶段只留最近一次，计划删掉后一并清掉。
- * 用户在里面说过话的会话不动。stageId 给定时清掉这个阶段的全部旧记录（马上要重跑）。
- */
-function prunePlanSessions(stageId?: string) {
-  const live = new Set(orchestrator.list().flatMap((p) => p.stages.map((s) => s.id)));
-  const byStage = new Map<string, Session[]>();
-  for (const s of store.listSessions()) {
-    const m = s.id.match(/^plan-\d+-(.+)$/);
-    if (!m) continue;
-    byStage.set(m[1], [...(byStage.get(m[1]) ?? []), s]);
-  }
-  const hasUser = (sid: string) => store.listMessages(sid).some((m) => m.from === "user");
-  for (const [sid, list] of byStage) {
-    const sorted = list.sort((a, b) => b.updatedAt - a.updatedAt);
-    const drop = !live.has(sid) || sid === stageId ? sorted : sorted.slice(1);
-    for (const s of drop) if (!hasUser(s.id)) store.deleteSession(s.id);
-  }
-}
-
-/** bot 在聊天里发起编排：后台跑，跑完把结果作为它的消息发回发起的会话 */
-async function startPlanFor(req: { requester: Bot; sessionId?: string; task?: string; title?: string; stages?: Array<{ bot: string; prompt: string; mode?: string }> }) {
-  const bots = store.listBots();
-  let stages: Array<{ botId: string; prompt: string; mode?: "seq" | "fan" }>;
-  if (req.stages?.length) {
-    const unknown = req.stages.filter((x) => !bots.some((b) => b.name === x.bot)).map((x) => x.bot);
-    if (unknown.length) throw new Error(`找不到 bot：${unknown.join("、")}。现有：${bots.map((b) => b.name).join("、")}`);
-    stages = req.stages.map((x) => ({ botId: bots.find((b) => b.name === x.bot)!.id, prompt: x.prompt, mode: x.mode === "fan" ? "fan" : "seq" }));
-  } else {
-    const p = providers.getDefault();
-    stages = await planFromText(req.task!, bots, p ? { provider: p as any, complete: (prov: any, r: any) => providers.complete(prov, r) } : undefined);
-  }
-  if (!stages.length) throw new Error("没解析出可用的阶段");
-  const title = (req.title || req.task || stages.map((x) => bots.find((b) => b.id === x.botId)?.name ?? "?").join(" → ")).slice(0, 40);
-  const plan = orchestrator.create({ ownerBotId: "user", title, stages });
-  sendUi("plans:update", plan);
-  void orchestrator.run(plan.id).then((done) => {
-    if (!req.sessionId) return;
-    const ok = done.status === "done";
-    const head = ok ? `🧩 编排「${done.title}」跑完了` : done.result === "（已取消）" ? `🧩 编排「${done.title}」已停止` : `🧩 编排「${done.title}」没跑完`;
-    store.addMessage({
-      sessionId: req.sessionId, from: req.requester.id, to: "user", role: "assistant", kind: "chat", createdAt: Date.now(),
-      content: [{ type: "text", text: `${head}，详情见 [编排](app:settings/plans)。\n\n${done.result ?? ""}` }],
-    });
-  }).catch(() => { /* run 内部已兜底成 error 状态 */ });
-  return { title, steps: stages.map((x) => `${bots.find((b) => b.id === x.botId)?.name ?? x.botId}：${x.prompt.slice(0, 60)}`) };
-}
-function cancelPlanByTitle(match: string): string | null {
-  const running = orchestrator.list().filter((x) => x.status === "running");
-  const hit = running.find((x) => x.id === match || x.title === match) ?? running.find((x) => match && x.title.includes(match)) ?? (running.length === 1 && !match ? running[0] : undefined);
-  if (!hit) return null;
-  orchestrator.cancel(hit.id);
-  return hit.title;
-}
-
-ipcMain.handle("plans:createFromText", async (_e, text: string, ownerBotId = "user") => {
-  const p = providers.getDefault();
-  const complete = p ? (prov: any, req: any) => providers.complete(prov, req) : undefined;
-  const stages = await planFromText(text, store.listBots(), p ? { provider: p as any, complete } : undefined);
-  if (!stages.length) throw new Error("没解析出可用 bot 阶段");
-  return orchestrator.create({ ownerBotId, title: text.slice(0, 30), stages });
-});
-ipcMain.handle("plans:list", (_e, botId?: string) => botId ? orchestrator.listForBot(botId) : orchestrator.list());
-ipcMain.handle("plans:run", async (_e, planId: string) => { const plan = orchestrator.list().find((x) => x.id === planId); if (!plan) throw new Error("计划不存在"); return orchestrator.run(plan.id); });
-ipcMain.handle("plans:cancel", (_e, planId: string) => orchestrator.cancel(planId));
-ipcMain.handle("plans:delete", (_e, planId: string) => { orchestrator.delete(planId); prunePlanSessions(); });
 // G5：授权 + 审计 + TCC
-registerSecurityIpc({ store, consent, audit, secrets, env });
+registerSecurityIpc({
+  store, consent, audit, secrets, env, scheduler,
+  gatewayInfo: () => gatewaySnapshot(),
+});
 ipcMain.handle("system:tcc", () => tccStatus());
+
+const observeIconCache = new Map<string, string>();
+async function fileIconDataUrl(path?: string | null): Promise<string | undefined> {
+  if (!path || !existsSync(path)) return undefined;
+  const hit = observeIconCache.get(path);
+  if (hit) return hit;
+  try {
+    const img = await app.getFileIcon(path, { size: "normal" });
+    if (img.isEmpty()) return undefined;
+    const url = img.resize({ width: 64, height: 64 }).toDataURL();
+    if (observeIconCache.size > 80) observeIconCache.clear();
+    observeIconCache.set(path, url);
+    return url;
+  } catch {
+    return undefined;
+  }
+}
+async function decorateIdentityIcon(id: AppIdentity): Promise<AppIdentity & { iconDataUrl?: string }> {
+  const iconDataUrl = await fileIconDataUrl(id.iconPath || id.bundlePath);
+  return iconDataUrl ? { ...id, iconDataUrl } : id;
+}
+
+async function decorateProcessList(procs: ProcessHit[], lim = 16): Promise<ProcessHit[]> {
+  const out: ProcessHit[] = [];
+  for (const p of procs.slice(0, lim)) {
+    const id = await decorateIdentityIcon(p.identity);
+    out.push({ ...p, identity: id, iconDataUrl: id.iconDataUrl });
+  }
+  return out;
+}
+
+/** 全局快照（设置页备用）；bot 侧栏用 systemWatch:status */
+ipcMain.handle("systemObserve:status", async () => {
+  const snap = observeSystem(home, { includeCoding: true });
+  const tcc = tccStatus();
+  const servers = ((store.readConfig().mcpServers as Array<{ id?: string; enabled?: boolean }> | undefined) || []);
+  const computerOn = servers.some((s) => s.id === COMPUTER_MCP_ID && s.enabled !== false);
+  if (snap.frontmost.identity) {
+    const id = await decorateIdentityIcon(snap.frontmost.identity);
+    snap.frontmost.identity = id;
+    snap.frontmost.iconDataUrl = id.iconDataUrl;
+  }
+  snap.processes = await decorateProcessList(snap.processes, 12);
+  return {
+    snap,
+    text: formatObserveText(snap),
+    caps: {
+      observe: true,
+      accessibility: !!tcc.accessibility,
+      screen: !!tcc.screen,
+      computerUse: computerOn,
+    },
+    tcc,
+    tools: ["sys.observe", "sys.processes", "sys.disk", "sys.activity", "sys.scan", "sys.purge", "task.create"],
+    hint: "在 bot 详情里勾选要听的 App；这里只看全局权限与磁盘。",
+  };
+});
+
+ipcMain.handle("systemWatch:get", (_e, botId: string) => readBotWatch(store.readConfig(), String(botId || "")));
+ipcMain.handle("systemWatch:set", (_e, botId: string, patch: Partial<BotSystemWatch>) => {
+  const id = String(botId || "");
+  if (!id || !store.getBot(id)) throw new Error("bot 不存在");
+  const all = store.readConfig();
+  const prev = (all.prefs as Record<string, unknown> | undefined) || {};
+  const prefs = writeBotWatch(prev, id, patch || {});
+  store.writeConfig({ ...all, prefs });
+  if (mainWin && !mainWin.isDestroyed()) mainWin.webContents.send("app:changed", "system-watch");
+  return readBotWatch(store.readConfig(), id);
+});
+ipcMain.handle("systemWatch:installedApps", async () => {
+  const rows = listInstalledApps(100);
+  const out = [];
+  for (const r of rows) {
+    const id = await decorateIdentityIcon(r.identity);
+    out.push({ name: r.name, path: r.path, brand: r.brand, mark: r.mark, iconDataUrl: id.iconDataUrl });
+  }
+  return out;
+});
+/** bot 详情：监听名单 + 轻量状态（不刷全机进程）。短缓存，切 bot 时不重复扫 ps / 前台应用 */
+const watchStatusCache = new Map<string, { at: number; pending: Promise<unknown> }>();
+async function buildWatchStatus(botId: string) {
+  const id = String(botId || "");
+  const watch = readBotWatch(store.readConfig(), id);
+  const tcc = tccStatus();
+  const keys = watchKeywords(watch);
+  const [front, diskAll, procs] = await Promise.all([
+    observeFrontmostAsync(),
+    observeDiskAsync(),
+    keys.length ? observeProcessesAsync(keys) : Promise.resolve([] as ProcessHit[]),
+  ]);
+  if (front.identity) {
+    const di = await decorateIdentityIcon(front.identity);
+    front.identity = di;
+    front.iconDataUrl = di.iconDataUrl;
+  }
+  const disk = diskAll.filter((d) => d.mount === "/" || d.mount.includes("Data") || d.mount.startsWith("/Volumes/")).slice(0, 4);
+  const watchedLive = keys.length ? await decorateProcessList(procs, 20) : [];
+  // 名单里的 App：有没有在跑
+  const apps = [];
+  for (const name of watch.apps) {
+    const live = watchedLive.filter((p) => {
+      const hay = `${p.identity?.label || ""} ${p.command}`.toLowerCase();
+      return hay.includes(name.toLowerCase()) || (p.identity?.brand && name.toLowerCase().includes(p.identity.brand));
+    });
+    const sample = live[0];
+    const decorated = sample?.identity ? null : await decorateIdentityIcon(resolveAppIdentity({ command: name, displayHint: name }));
+    const idn = sample?.identity || decorated;
+    apps.push({
+      name,
+      running: live.length > 0,
+      cpu: live.reduce((n, p) => n + (p.cpu || 0), 0),
+      rssMb: Math.round(live.reduce((n, p) => n + (p.rssKb || 0), 0) / 1024),
+      identity: idn,
+      iconDataUrl: sample?.iconDataUrl || decorated?.iconDataUrl,
+    });
+  }
+  const frontName = front.identity?.label || front.name || "";
+  const watchingFront = !!(frontName && watch.apps.some((a) => frontName.toLowerCase().includes(a.toLowerCase()) || a.toLowerCase().includes(frontName.toLowerCase())));
+  return {
+    watch,
+    front,
+    disk,
+    apps,
+    caps: { accessibility: !!tcc.accessibility, screen: !!tcc.screen },
+    summary: !watch.enabled
+      ? "监听已关"
+      : !watch.apps.length
+        ? "未选 App"
+        : `${apps.filter((a) => a.running).length}/${watch.apps.length} 在跑${watchingFront && frontName ? ` · 前台 ${frontName}` : ""}`,
+  };
+}
+ipcMain.handle("systemWatch:status", (_e, botId: string) => {
+  const id = String(botId || "");
+  const hit = watchStatusCache.get(id);
+  if (hit && Date.now() - hit.at < 3000) return hit.pending;
+  const pending = buildWatchStatus(id).catch((err) => {
+    watchStatusCache.delete(id);
+    throw err;
+  });
+  watchStatusCache.set(id, { at: Date.now(), pending });
+  return pending;
+});
+
 const PREF_PANES: Record<string, string> = {
   accessibility: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility",
   screen: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture",
@@ -2947,7 +3724,20 @@ ipcMain.handle("system:notifyMute", () => {
 });
 ipcMain.handle("system:openPrefs", (_e, pane: string) => {
   if (pane === "notifications") notifyProbePending = true; // 用户去系统设置改完回来再测
+  // 辅助功能：先 prompt=true，把「当前这份」Electron 登记进 TCC（避免勾到同名另一份）
+  if (pane === "accessibility" && process.platform === "darwin") {
+    computerPrefsPending = true;
+    try { systemPreferences.isTrustedAccessibilityClient(true); } catch { /* ignore */ }
+  }
+  if (pane === "screen") computerPrefsPending = true;
   return shell.openExternal(PREF_PANES[pane] ?? PREF_PANES.accessibility);
+});
+ipcMain.handle("system:revealElectronApp", () => {
+  if (process.platform !== "darwin" || !ELECTRON_APP_PATH || !existsSync(ELECTRON_APP_PATH)) {
+    return { ok: false, error: "找不到 Electron.app" };
+  }
+  shell.showItemInFolder(ELECTRON_APP_PATH);
+  return { ok: true, path: ELECTRON_APP_PATH };
 });
 ipcMain.handle("system:pickFile", async (_e, opts: { save?: boolean; defaultPath?: string; title?: string }) => {
   const filters = [{ name: "JSON", extensions: ["json"] }];
@@ -2958,6 +3748,21 @@ ipcMain.handle("system:pickFile", async (_e, opts: { save?: boolean; defaultPath
   const r = await dialog.showOpenDialog(mainWin as BrowserWindow, { title: opts.title, defaultPath: opts.defaultPath, filters, properties: ["openFile"] });
   return r.canceled ? null : r.filePaths[0] ?? null;
 });
+/** 关于页 / 更新：版本与渠道；自动更新源尚未配置时明确返回不可用 */
+ipcMain.handle("system:appInfo", () => {
+  const cfg = store.readConfig() as { updateChannel?: string };
+  const channel = cfg.updateChannel === "beta" ? "beta" : "stable";
+  return {
+    version: app.getVersion(),
+    channel,
+    schema: SCHEMA_VERSION,
+    update: { available: false, message: "尚未配置发布源（electron-updater / latest-mac.yml）" },
+  };
+});
+ipcMain.handle("system:checkUpdate", () => ({
+  available: false,
+  message: "尚未配置发布源。打包发布后可在此检查 GitHub Releases / 静态 latest-mac.yml。",
+}));
 ipcMain.handle("providers:list", () => providers.list());
 ipcMain.handle("providers:add", (_e, input: any) => providers.addProvider(input));
 ipcMain.handle("providers:test", (_e, id: string) => providers.test(id));
@@ -2969,7 +3774,7 @@ ipcMain.handle("providers:setDefault", (_e, id: string) => {
   if (!p) throw new Error("provider 不存在");
   store.saveProvider({ ...p, isDefault: true });
 });
-ipcMain.handle("providers:capabilities", () => providers.capabilities());
+ipcMain.handle("providers:capabilities", (_e, force?: boolean) => providers.capabilities(!!force));
 ipcMain.handle("system:notify", (_e, title: string, body: string) => system.notify(title, body));
 ipcMain.handle("system:copy", (_e, text: string) => system.copy(text));
 ipcMain.handle("system:openPath", (_e, path: string) => shell.openPath(path));
@@ -3001,23 +3806,41 @@ ipcMain.handle("pets:save", (_e, p: { botId: string; x: number; y: number; visib
 ipcMain.handle("pets:addXp", (_e, botId: string, n: number) => grantPetXp(botId, n));
 ipcMain.handle("sessions:list", (_e, botId?: string) => store.listSessions(botId));
 ipcMain.handle("sessions:page", (_e, opts?: { botId?: string; archived?: boolean; offset?: number; limit?: number }) => store.listSessionsPage(opts));
-ipcMain.handle("sessions:archive", (_e, sessionId: string, archived: boolean) => store.archiveSession(sessionId, archived));
-ipcMain.handle("sessions:delete", (_e, sessionId: string) => store.deleteSession(sessionId));
+ipcMain.handle("sessions:archive", (_e, sessionId: string, archived: boolean) => {
+  if (archived) forgetGaze(sessionId);
+  return store.archiveSession(sessionId, archived);
+});
+ipcMain.handle("sessions:delete", (_e, sessionId: string) => {
+  forgetGaze(sessionId);
+  return store.deleteSession(sessionId);
+});
 ipcMain.handle("sessions:get", (_e, sessionId: string) => store.getSession(sessionId));
 ipcMain.handle("sessions:rename", (_e, sessionId: string, title: string) => store.renameSession(sessionId, title));
 ipcMain.handle("messages:delete", (_e, sessionId: string, ids: number[]) => store.deleteMessages(sessionId, ids));
 
 /** 问题卡片：记下用户点了哪个选项（卡片变成已答状态） */
-ipcMain.handle("messages:answer", (_e, sessionId: string, id: number, choiceId: string, answer: string) =>
-  store.updateMessage(sessionId, id, (m) => ({
+ipcMain.handle("messages:answer", (_e, sessionId: string, id: number, choiceId: string, answer: string) => {
+  const msg = store.updateMessage(sessionId, id, (m) => ({
     ...m,
     content: Array.isArray(m.content) ? m.content.map((b) => (b.type === "choice" && b.id === choiceId ? { ...b, answer } : b)) : m.content,
-  })));
-ipcMain.handle("messages:formAnswer", (_e, sessionId: string, id: number, formId: string, answer: Record<string, string>) =>
-  store.updateMessage(sessionId, id, (m) => ({
+  }));
+  const botId = store.getSession(sessionId)?.botId;
+  if (botId && statuses.get(botId)?.state === "waiting") {
+    settleBotStatus(botId, Array.isArray(msg?.content) ? msg.content : undefined, sessionId);
+  }
+  return msg;
+});
+ipcMain.handle("messages:formAnswer", (_e, sessionId: string, id: number, formId: string, answer: Record<string, string>) => {
+  const msg = store.updateMessage(sessionId, id, (m) => ({
     ...m,
     content: Array.isArray(m.content) ? m.content.map((b) => (b.type === "form" && b.id === formId ? { ...b, answer } : b)) : m.content,
-  })));
+  }));
+  const botId = store.getSession(sessionId)?.botId;
+  if (botId && statuses.get(botId)?.state === "waiting") {
+    settleBotStatus(botId, Array.isArray(msg?.content) ? msg.content : undefined, sessionId);
+  }
+  return msg;
+});
 
 ipcMain.handle("vault:list", (_e, query?: string) => (query ? vault.search(query) : vault.list()));
 ipcMain.handle("vault:catalog", () => vault.catalog());
@@ -3028,11 +3851,126 @@ ipcMain.handle("connectors:listWebhooks", () => connectors.listWebhooks());
 ipcMain.handle("connectors:upsertWebhook", (_e, input: { id?: string; name: string; url: string; note?: string; headers?: Record<string, string> }) =>
   connectors.upsertWebhook(input));
 ipcMain.handle("connectors:removeWebhook", (_e, id: string) => connectors.removeWebhook(id));
-ipcMain.handle("plans:handOff", (_e, input: { planId?: string; match?: string; toBotId: string; note?: string; stageId?: string }) => {
-  const r = orchestrator.handOff(input);
-  return { plan: r.plan, stage: r.stage, owner: store.getBot(r.stage.ownerBotId ?? r.stage.botId) };
+ipcMain.handle("connect:cards", () => CONNECT_INSTALL_CARDS);
+ipcMain.handle("connect:gateway", () => gatewaySnapshot());
+ipcMain.handle("connect:setGateway", async (_e, input: {
+  enabled: boolean;
+  port?: number;
+  host?: string;
+  allowRemote?: boolean;
+  requireHmac?: boolean;
+}) => applyGatewaySettings(input ?? { enabled: false }));
+ipcMain.handle("connect:probeGateway", async () => {
+  const info = gatewaySnapshot();
+  if (!info.running || !info.port) return { ok: false, error: "网关未在运行", info };
+  try {
+    const host = info.host || "127.0.0.1";
+    const r = await fetch(`http://${host}:${info.port}/health`, { signal: AbortSignal.timeout(3000) });
+    const j = await r.json().catch(() => ({})) as { ok?: boolean };
+    return { ok: r.ok && j.ok !== false, status: r.status, info };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e), info };
+  }
+});
+ipcMain.handle("connect:gatewayMsgToken", () => copyGatewayMsgToken());
+ipcMain.handle("connect:rotateGatewayMsgToken", async () => rotateGatewayMsgToken());
+ipcMain.handle("connect:shareBridge", () => ({
+  ...shareBridgeStatus(),
+  cloudflare: cloudflareCredsStatus(),
+}));
+ipcMain.handle("connect:saveShareBridge", (_e, input: { base: string; putKey?: string; ttlDays?: number }) =>
+  saveShareBridgeCreds(input ?? { base: "" }));
+ipcMain.handle("connect:clearShareBridge", () => clearShareBridgeCreds());
+ipcMain.handle("connect:probeShareBridge", async () => probeShareBridge());
+ipcMain.handle("connect:cloudflare", () => cloudflareCredsStatus());
+ipcMain.handle("connect:saveCloudflare", (_e, input: { apiToken?: string; accountId?: string }) =>
+  saveCloudflareCreds(input ?? {}));
+ipcMain.handle("connect:clearCloudflare", () => clearCloudflareCreds());
+ipcMain.handle("connect:provisionShareBridge", async (_e, input?: { apiToken?: string; accountId?: string; subdomain?: string; ttlDays?: number }) =>
+  provisionShareBridge({
+    appRoot: APP_ROOT,
+    apiToken: input?.apiToken,
+    accountId: input?.accountId,
+    subdomain: input?.subdomain,
+    ttlDays: input?.ttlDays,
+  }));
+ipcMain.handle("connect:listShareLinks", async () => listShareBridgeLinks());
+ipcMain.handle("connect:deleteShareLink", async (_e, id: string) => {
+  await deleteShareBridgeLink(id);
+  return { ok: true };
 });
 
+ipcMain.handle("demo:status", (_e, botId: string) => demoSkills.status(botId));
+ipcMain.handle("demo:start", (_e, botId: string, opts?: { title?: string; sessionId?: string }) => {
+  if (!store.getBot(botId)) throw new Error("bot 不存在");
+  const s = demoSkills.start(botId, opts);
+  if (mainWin && !mainWin.isDestroyed()) mainWin.webContents.send("app:changed", "demo");
+  return s;
+});
+ipcMain.handle("demo:cancel", (_e, botId: string) => {
+  const s = demoSkills.cancel(botId);
+  if (mainWin && !mainWin.isDestroyed()) mainWin.webContents.send("app:changed", "demo");
+  return s;
+});
+ipcMain.handle("demo:finish", async (_e, botId: string, opts?: {
+  name?: string; description?: string; cron?: string; in?: string | number; at?: string; keep?: boolean; testNow?: boolean; webhook?: boolean; prompt?: string; taskName?: string; sessionId?: string;
+}) => {
+  const bot = store.getBot(botId);
+  if (!bot) throw new Error("bot 不存在");
+  const finished = demoSkills.finish(botId, { name: opts?.name, description: opts?.description });
+  if (!finished.ok) throw new Error(finished.error);
+  const { draft, session } = finished;
+  let skill;
+  try {
+    skill = skills.save({ name: draft.name, description: draft.description, body: draft.body, owner: bot.id });
+  } catch (e) {
+    demoSkills.reopen(botId, session);
+    throw e;
+  }
+  if (mainWin && !mainWin.isDestroyed()) mainWin.webContents.send("app:changed", "skills");
+  const link = `[${skill.name}](app:skill/${skill.key})`;
+  let task = null as ReturnType<typeof scheduler.create> | null;
+  const cron = opts?.cron?.trim();
+  const runAt = parseRunAt({ in: opts?.in, at: opts?.at });
+  const taskName = opts?.taskName || `重跑：${skill.name}`;
+  const prompt = opts?.prompt || `请按技能 ${link} 的步骤执行一遍，按当前环境调整路径与参数，完成后汇报结果。`;
+  const wantHook = !!opts?.webhook;
+  if (cron || runAt) {
+    if (runAt) {
+      task = scheduler.create({
+        botId: bot.id, name: taskName, prompt, cron: "* * * * *", kind: "once", alarmAt: runAt,
+        runPrompt: true, notifyPet: false, deleteAfterRun: opts?.keep !== true,
+        sessionId: opts?.sessionId, skillKey: skill.key, source: "demo", webhook: wantHook,
+      });
+    } else if (cron) {
+      task = scheduler.create({
+        botId: bot.id, name: taskName, prompt, cron, sessionId: opts?.sessionId,
+        skillKey: skill.key, source: "demo", webhook: wantHook,
+      });
+    }
+  }
+  // 立刻试跑：不落 once 闹钟，避免与 tick 双触发；有例行则试跑例行，否则直接 onRun
+  if (opts?.testNow) {
+    if (task) void scheduler.runNow(task.id).catch(() => {});
+    else if (scheduler.onRun) {
+      void scheduler.onRun({
+        id: `demo-test-${skill.key}`,
+        botId: bot.id,
+        name: `试跑：${skill.name}`,
+        prompt,
+        cron: "* * * * *",
+        enabled: false,
+        runCount: 0,
+        createdAt: Date.now(),
+        skillKey: skill.key,
+        source: "demo",
+        sessionId: opts?.sessionId,
+      }).catch(() => {});
+    }
+  }
+  if (mainWin && !mainWin.isDestroyed()) mainWin.webContents.send("app:changed", "demo");
+  return { skill, task, steps: draft.steps, webhookReady: !!task?.webhookToken };
+});
 
 /** 导出会话为 Markdown */
 ipcMain.handle("sessions:export", async (_e, sessionId: string) => {
@@ -3148,3 +4086,76 @@ ipcMain.handle("computerUse:setEnabled", async (_e, on: boolean) => {
 });
 
 app.on("window-all-closed", () => {});
+app.on("before-quit", () => {
+  codingPresence.stopAll();
+  runtime.flushInflight();
+});
+/** Coding 终端：仅 open→exited 记一会话，忽略 idle↔busy 抖动 */
+const codingPhaseSeen = new Map<string, CodingPresenceView["phase"]>();
+const codingSessionOpen = new Set<string>();
+codingPresence.setScreenListener((view) => {
+  const key = `${view.botId}\0${view.cwd}\0${view.cli}`;
+  const prev = codingPhaseSeen.get(key);
+  codingPhaseSeen.set(key, view.phase);
+  const alive = view.phase === "starting" || view.phase === "busy" || view.phase === "idle";
+  if (alive && !codingSessionOpen.has(key) && (!prev || prev === "exited")) {
+    codingSessionOpen.add(key);
+    appendCodingActivity(home, {
+      kind: "start",
+      botId: view.botId,
+      cwd: view.cwd,
+      cli: view.cli,
+      program: view.program?.kind === "agent" ? "agent" : "shell",
+      task: view.task,
+    });
+  }
+  if (prev && prev !== "exited" && view.phase === "exited") {
+    codingSessionOpen.delete(key);
+    codingPhaseSeen.delete(key);
+    appendCodingActivity(home, {
+      kind: "end",
+      botId: view.botId,
+      cwd: view.cwd,
+      cli: view.cli,
+      program: view.program?.kind === "agent" ? "agent" : "shell",
+      reason: view.exitReason,
+      durationMs: view.startedAt ? Math.max(0, (view.lastActiveAt || Date.now()) - view.startedAt) : undefined,
+    });
+  }
+  if (mainWin && !mainWin.isDestroyed()) mainWin.webContents.send("coding:screen", view);
+});
+codingPresence.setBytesListener((e) => {
+  if (mainWin && !mainWin.isDestroyed()) mainWin.webContents.send("coding:bytes", e);
+});
+ipcMain.handle("coding:presence", (_e, botId: string) => codingPresence.snapshot(botId) ?? null);
+ipcMain.handle("coding:list", (_e, botId: string) => codingPresence.list(botId));
+ipcMain.handle("coding:focus", (_e, botId: string, cwd: string) => codingPresence.focus(botId, String(cwd ?? "")) ?? null);
+ipcMain.handle("coding:open", (_e, botId: string, cwd: string) => {
+  // 面板「打开」只起 shell；Coding CLI 必须走 cli.agent（带授权），不能经 IPC 旁路
+  const raw = String(cwd ?? "").trim();
+  if (!raw) return { error: "请先选择工程目录，再点打开。" };
+  let dir: string;
+  try {
+    dir = resolveAgentCwd(raw, { harnessHome: home });
+  } catch (e) {
+    return { error: e instanceof CliAgentPathError || e instanceof Error ? e.message : String(e) };
+  }
+  return codingPresence.openShell(botId, dir, { mode: "shell" });
+});
+ipcMain.handle("coding:replay", (_e, botId: string, cwd?: string) => codingPresence.replay(botId, cwd));
+ipcMain.handle("coding:resize", (_e, botId: string, cols: number, rows: number, cwd?: string) => {
+  codingPresence.resize(botId, Number(cols), Number(rows), cwd);
+  return { ok: true as const };
+});
+ipcMain.handle("coding:stop", (_e, botId: string, cwd?: string) => {
+  codingPresence.stop(botId, "你结束了这个终端", cwd);
+  return codingPresence.snapshot(botId);
+});
+ipcMain.handle("coding:write", (_e, botId: string, data: string, cwd?: string) => {
+  return { ok: codingPresence.writeRaw(botId, String(data ?? ""), cwd) };
+});
+ipcMain.handle("coding:pickDir", async () => {
+  const r = await dialog.showOpenDialog(mainWin!, { title: "选择工程目录", properties: ["openDirectory"] });
+  if (r.canceled || !r.filePaths[0]) return null;
+  try { return realpathSync(r.filePaths[0]); } catch { return r.filePaths[0]; }
+});

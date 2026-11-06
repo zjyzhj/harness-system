@@ -93,16 +93,19 @@ export class ToolExecutor {
   }
 
   private async dispatch(tool: string, args: Record<string, unknown>): Promise<string> {
+    const extraRoots = Array.isArray(args.extraRoots) ? args.extraRoots.map(String).filter(Boolean) : [];
     switch (tool) {
-      case "fs.read": return this.fsRead(String(args.path ?? ""), Number(args.offset ?? 0) || 0);
-      case "fs.write": return this.fsWrite(String(args.path ?? ""), String(args.content ?? ""));
-      case "fs.list": return this.fsList(String(args.path ?? "."));
+      case "fs.read": return this.fsRead(String(args.path ?? ""), Number(args.offset ?? 0) || 0, extraRoots);
+      // 读/列不设工程白名单；写仍限 allowedRoots（工作区）。extraRoots 主要给 bash 风险提示
+      case "fs.write": return this.fsWrite(String(args.path ?? ""), String(args.content ?? ""), []);
+      case "fs.list": return this.fsList(String(args.path ?? "."), extraRoots);
       case "bash.run": return this.bashRun(
         String(args.command ?? ""), String(args.botId ?? "user"), String(args.shownCommand ?? args.command ?? ""),
         args.signal instanceof AbortSignal ? args.signal : undefined,
         Array.isArray(args.extraRisks) ? args.extraRisks.map(String) : [],
         args.env && typeof args.env === "object" ? args.env as Record<string, string> : undefined,
         !!args.unattended,
+        extraRoots,
       );
       case "web.fetch": return this.webFetch(String(args.url ?? ""));
       case "notify": return this.notify(String(args.title ?? "通知"), String(args.body ?? ""));
@@ -112,21 +115,40 @@ export class ToolExecutor {
     }
   }
 
+  /** 工作区 + 调用方临时放行的根（bash 风险判断 / 写面仍用） */
+  private rootsWith(extra: string[] = []): string[] {
+    return [...this.opts.allowedRoots, ...extra];
+  }
+
   // ---- 文件 ----
-  /** 按解析符号链接后的真实路径判断是否在白名单内，返回真实路径 */
-  private assertPath(p: string) {
+  /** 展开 ~，得到规范化绝对路径与真实路径（读/列不设工程白名单） */
+  private resolveFsPath(p: string): { abs: string; real: string } {
     const abs = normalize(resolve(p.startsWith("~/") ? join(homedir(), p.slice(2)) : p));
-    const real = realPathLoose(abs);
-    const allowed = this.opts.allowedRoots.some((root) => {
-      const r = realPathLoose(normalize(resolve(root)));
-      return real === r || real.startsWith(r + "/");
+    return { abs, real: realPathLoose(abs) };
+  }
+
+  /** 写：必须落在工作区 allowedRoots（extraRoots 不扩大写面） */
+  private assertWritable(p: string): string {
+    const { abs, real } = this.resolveFsPath(p);
+    const allowed = this.rootsWith([]).some((root) => {
+      try {
+        const r = realPathLoose(normalize(resolve(root.startsWith("~/") ? join(homedir(), root.slice(2)) : root)));
+        return real === r || real.startsWith(r + "/");
+      } catch {
+        return false;
+      }
     });
-    if (!allowed) throw new Error(`路径不在白名单内: ${abs}${real !== abs ? `（实际指向 ${real}）` : ""}（只是要把这些文件/图片给用户看的话，直接用 file.send 交付）`);
+    if (!allowed) {
+      throw new Error(
+        `路径不在可写工作区内: ${abs}${real !== abs ? `（实际指向 ${real}）` : ""}` +
+          `（fs.write 只写 bot 工作区；改用户工程用 cli.agent）`,
+      );
+    }
     return real;
   }
 
-  private fsRead(p: string, offset = 0): string {
-    const abs = this.assertPath(p);
+  private fsRead(p: string, offset = 0, _extraRoots: string[] = []): string {
+    const { real: abs } = this.resolveFsPath(p);
     if (!existsSync(abs)) throw new Error(`文件不存在: ${abs}`);
     const data = readFileSync(abs, "utf8");
     const end = offset + this.opts.maxOutputBytes;
@@ -134,15 +156,15 @@ export class ToolExecutor {
     return end < data.length ? `${part}\n…(共 ${data.length} 字，这里是 ${offset}–${end}，继续读传 offset: ${end})` : part;
   }
 
-  private fsWrite(p: string, content: string): string {
-    const abs = this.assertPath(p);
+  private fsWrite(p: string, content: string, _extraRoots: string[] = []): string {
+    const abs = this.assertWritable(p);
     mkdirSync(join(abs, ".."), { recursive: true });
     writeFileSync(abs, content, "utf8");
     return `已写入 ${abs}（${content.length} 字符）`;
   }
 
-  private fsList(p: string): string {
-    const abs = this.assertPath(p);
+  private fsList(p: string, _extraRoots: string[] = []): string {
+    const { real: abs } = this.resolveFsPath(p);
     if (!existsSync(abs)) throw new Error(`目录不存在: ${abs}`);
     const entries = readdirSync(abs).slice(0, 100);
     return entries.map((e) => {
@@ -155,17 +177,17 @@ export class ToolExecutor {
   /** shown：给用户看 / 写审计的命令（密钥还是 {{secret:X}} 占位符，不是真值） */
   private async bashRun(
     cmd: string, callerBotId = "user", shown = cmd, signal?: AbortSignal, extraRisks: string[] = [],
-    env?: Record<string, string>, unattended = false,
+    env?: Record<string, string>, unattended = false, extraRoots: string[] = [],
   ): Promise<string> {
     if (!cmd.trim()) throw new Error("命令为空");
     if (this.opts.deniedCommands.some((d) => cmd.includes(d))) throw new Error(`命令被安全策略禁止: ${shown.slice(0, 60)}`);
     const first = cmd.trim().split(/\s+/)[0];
     const t0 = Date.now();
-    // 授权顺序：禁止规则 → 危险命令（每次强确认）→ 有风险的写法（每次确认，信任模式也不能跳过）→ 信任模式 → 逐个命令的「总是允许」→ 弹卡片
+    // Ask / Auto / Always：deny 规则永远优先；Always 连危险也放行；Auto 危险仍强确认
     if (Object.keys(this.bashGroups).length && this.consent) {
       const consent = this.consent;
       const a = analyzeCommand(cmd);
-      a.risks.push(...extraRisks, ...pathsOutsideRoots(cmd, this.opts.allowedRoots));
+      a.risks.push(...extraRisks, ...pathsOutsideRoots(cmd, this.rootsWith(extraRoots)));
       const heads = a.heads.filter((h) => !HARMLESS_BUILTINS.has(h));
       if (!a.heads.length) throw new Error("没识别出要执行的命令");
       const denied = a.heads.find((h) => consent.commandRule(callerBotId, h) === "deny");
@@ -179,14 +201,14 @@ export class ToolExecutor {
         const r = await consent.requestCommand(callerBotId, heads[0] ?? a.heads[0], desc, { cap: capOf(heads[0] ?? ""), requiresStrongConsent: true, reasons: a.dangerous });
         audit(capOf(heads[0] ?? ""), r.granted);
         if (!r.granted) throw new Error("用户没有批准这条危险命令，不要换写法重试，直接告诉用户");
+      } else if (!unattended && consent.isTrusted(callerBotId)) {
+        // Auto / Always：有风险写法一并放行
+        audit(capOf(heads[0] ?? ""), true);
       } else if (a.risks.length) {
-        // 信任 / always-allow 都不能跳过：路径越界、$()、重定向写文件等
         if (unattended) throw new Error(`无人值守不能执行有风险的命令（${a.risks[0]}），请用户在场时再试`);
         const r = await consent.requestCommand(callerBotId, heads[0] ?? a.heads[0], desc, { cap: capOf(heads[0] ?? ""), onceOnly: true, reasons: a.risks });
         audit(capOf(heads[0] ?? ""), r.granted);
         if (!r.granted) throw new Error("用户没有批准这条命令，不要换写法重试，直接告诉用户");
-      } else if (!unattended && consent.isTrusted(callerBotId)) {
-        audit(capOf(heads[0] ?? ""), true);
       } else {
         for (const h of heads) {
           if (consent.commandRule(callerBotId, h) === "allow") continue;
@@ -238,7 +260,7 @@ export class ToolExecutor {
   }
 }
 
-/** 命令里出现的绝对 / 家目录路径若落在白名单外，标成风险（信任模式也不能跳过） */
+/** 命令里出现的绝对 / 家目录路径若落在白名单外，标成风险（未信任时每次确认；信任模式可跳过） */
 export function pathsOutsideRoots(cmd: string, roots: string[]): string[] {
   if (!roots.length) return [];
   const realRoots = roots.map((r) => {
@@ -289,23 +311,23 @@ export function runShell(cmd: string, opts: { timeoutMs: number; maxBytes: numbe
 }
 
 /** 内置工具的可调用描述（给模型看） */
-export const BUILTIN_TOOL_DESCRIPTIONS = `- fs.read: 读取白名单内文件内容。参数: path, offset?（从第几个字开始，读长文件的后续部分）
-- fs.write: 写入文件（白名单内）。参数: path, content
-- fs.list: 列出目录内容。参数: path
-- bash.run: 在用户电脑上执行 shell 命令；没被允许过的命令会先弹卡片请用户批准，被拒绝就别换写法重试。参数: command
+export const BUILTIN_TOOL_DESCRIPTIONS = `- fs.read: 读本机文件（任意可读路径，含桌面/下载；~ 可用）。参数: path, offset?（从第几个字开始，读长文件的后续部分）
+- fs.write: 写文件（仅 bot 工作区）。用户工程大改走 cli.agent。参数: path, content
+- fs.list: 列本机目录（任意可读路径；不打开终端面板）。看结构用它，不要先 bash ls。参数: path
+- bash.run: 短命令（授权卡片，不打开终端面板）。只读列目录用 fs.list。被拒绝就别换写法重试。参数: command
 - web.search: 联网搜索，返回带编号的结果（标题 / 网址 / 摘要）。参数: query, limit?（默认 6）
 - web.fetch: 打开网页读正文。参数: url
 - image.generate: 按描述生成图片，直接展示给用户。参数: prompt（画面描述，越具体越好）, n?（1-4）, size?（如 1024x1024）
 - image.edit: 修改一张图片。参数: prompt（要怎么改）, image?（本机图片路径；不传则用对话里最近的一张图）
 - notify: 发送系统通知。参数: title, body
-- file.send: 把你生成或找到的文件/图片交付给用户，在对话里显示为图片相册或可打开的文件卡片。参数: path（绝对路径，可以是目录）或 paths（数组）。产出文件后一定要用它交付，不要只报路径；用户让你发某个目录/文件给他看时直接调用它，不需要先 fs.list，也不受文件白名单限制
+- file.send: 把你生成或找到的文件/图片交付给用户，在对话里显示为图片相册或可打开的文件卡片。参数: path（绝对路径，可以是目录）或 paths（数组）。产出文件后一定要用它交付，不要只报路径；用户让你发某个目录/文件给他看时直接调用它，不需要先 fs.list
 - memory.add: 保存持久记忆。参数: botId, content, kind
 - memory.search: 检索记忆。参数: botId, query
 - memory.update: 改一条已存的记忆 / 规范。参数: match（原文里的几个字）, content, scope?（all = 全局）
 - memory.forget: 删掉一条已存的记忆 / 规范。参数: match, scope?（all = 全局）
 - bot.list: 列出团队里其他 bot。无参数
 - bot.ask: 向团队里另一个 bot 提问并取得回复。参数: to（bot 名）, message
-- task.create: 创建定时任务。周期任务参数: name, prompt, cron（5 段：分 时 日 月 周）；一次性任务参数: name, prompt, at（"HH:mm" 或 "YYYY-MM-DD HH:mm"）或 in（几分钟后），执行后自动删除（keep:true 保留）
+- task.create: 创建例行。纯定时：name, prompt, cron（不要带 webhook）。纯入站：webhook:true（默认不到点跑；要兼定时加 schedule:true）。一次性：at / in。webhook 开通后让用户到例行面板 🪝 复制 URL
 - task.list: 列出你的定时任务。无参数
 - task.delete: 删除定时任务。参数: id 或 name
 - apple.openApp: 打开/激活应用（授权后）。参数: app
@@ -316,12 +338,14 @@ export const BUILTIN_TOOL_DESCRIPTIONS = `- fs.read: 读取白名单内文件内
 - screen.screenshot: 屏幕截图（授权后自动附在本条回复里给用户看，不用再发送）。参数: rect?: {x,y,w,h}
 - ui.ask: 给用户几个选项让他点选（本轮结束等待）。参数: question, options（字符串数组）
 - ui.confirm: 对外/不可逆操作前请用户确认（显示 确认/修改/取消，本轮结束等待）。参数: action（要做什么）, detail?（影响范围等）
-- ui.secret: 请用户在加密输入框里填写密钥（本轮结束等待）。参数: name（英文标识，如 FEISHU_APP_SECRET）, label（给用户看的名称）, note?（用途）, scope?（all = 所有 bot 共用，默认只有你能用）。之后 bash.run 里写 $name，其它工具参数里写 {{secret:name}}（web.search / web.fetch 除外）
+- ui.secret: 请用户在加密输入框里填写密钥（本轮结束等待）。参数: name（英文标识，如 FEISHU_APP_SECRET）, label（给用户看的名称）, note?（用途）。账号级保险库：保存后所有 bot 都能用。之后 bash.run 写 $name，其它工具写 {{secret:name}}（web.search / web.fetch 除外）
+- secret.share: 确认密钥名在账号级保险库（全员可用）。参数: name
+- secret.delete: 删除账号级密钥（影响所有 bot）。参数: name
 - app.updateSelf: 修改你自己的资料。参数: name? / role? / persona? / systemPrompt?
 - app.listModels: 列出可用模型。无参数
 - app.setModel: 切换你自己用的模型。参数: provider（模型名称，或「默认」）
-- app.state: 查看软件现状：所有 bot、群聊（含成员）、定时任务、编排计划、项目、技能、模型的完整清单
-- app.createBot: 新建一个 bot。参数: name, role?, persona?, pet?（true=同时出台桌宠，受用户「允许召唤」开关约束）
+- app.state: 查看软件现状：所有 bot、群聊（含成员）、定时任务、项目、技能、模型的完整清单
+- app.createBot: 新建一个 bot（会刷新侧栏并写入欢迎语）。参数: name, role?, persona?, brief?/about?（一句话职责，AI 会写入人设指令）, pet?（true=同时出台桌宠，受用户「允许召唤」开关约束）
 - pet.list: 桌宠名单。默认上台+自己；all:true 含未上台。参数: all?
 - pet.status: 桌宠状态+智能开关摘要。参数: name?
 - pet.peers / pet.visits: 其他上台伙伴 / 拜访记录
@@ -337,11 +361,8 @@ export const BUILTIN_TOOL_DESCRIPTIONS = `- fs.read: 读取白名单内文件内
 - pet.act: 让桌宠做动作。参数: action（idle/walk/jump/sleep/celebrate/work/think）, hold?
 - pet.say: 桌宠气泡说一句（不跑整轮对话）。参数: text, action?, hold?
 - pet.fx: 叠加特效（不改皮肤）。play 时尽量带 phrase（如「龟派气功」）；没起名会即兴发明。action=play|list|pin|unpin|forget|gc
-- app.createGroup: 建群聊。参数: name, members（其他 bot 名数组，默认包含你自己）
+- app.createGroup: 建群聊（会写入欢迎房与起步建议）。参数: name, members（其他 bot 名数组，默认包含你自己）, goal?（群目标）
 - app.updateGroup: 改群聊成员或名字。参数: group（群名）, add?（要加的 bot 名数组）, remove?（要移出的 bot 名数组）, rename?
-- plan.start: 发起编排，让几个 bot 按阶段接力完成一件事（后台运行，跑完结果自动发回这个会话）。参数: task（一句话：谁先做什么、再交给谁）或 stages（[{bot, prompt, mode?: "seq" | "fan" 并行}]）, title?
-- plan.list: 列出编排计划和状态。无参数
-- plan.cancel: 停止正在运行的编排。参数: plan（标题）
 - skill.list: 列出你能用的技能。无参数
 - skill.get: 查看技能全文。参数: key
 - skill.save: 新建或修改技能（用户让你记住一套做法/规范时用）。参数: key?（修改时给）, name, description（什么时候用）, instructions（完整指令 markdown）, shared?（true=所有 bot 可用，默认只有你）

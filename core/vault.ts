@@ -106,7 +106,7 @@ function secretItem(s: SecretInfo): VaultItem {
     kind: "secret",
     id: s.name,
     title: s.label && s.label !== s.name ? `${s.label}（${s.name}）` : s.name,
-    detail: [s.note, s.botId ? "私有" : "共用"].filter(Boolean).join(" · "),
+    detail: [s.note, "账号级共用"].filter(Boolean).join(" · "),
     meta: { botId: s.botId, savedAt: s.savedAt },
   };
 }

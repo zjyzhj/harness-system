@@ -1,0 +1,8 @@
+name = "harness-share-bridge"
+main = "worker.js"
+compatibility_date = "2026-10-01"
+workers_dev = true
+
+[[kv_namespaces]]
+binding = "SHARE"
+id = "54a8aab6bc964816ba4b271c83f1a594"

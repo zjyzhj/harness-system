@@ -42,6 +42,14 @@ describe("G3 common-render", () => {
     expect(out).toContain("console.log(1)");
   });
 
+  test("空代码围栏不渲染成灰色空气泡", () => {
+    expect(renderMarkdown("```\n```")).toBe("");
+    expect(renderMarkdown("```js\n```")).toBe("");
+    expect(renderMarkdown("前文\n```\n```\n后文")).toContain("前文");
+    expect(renderMarkdown("前文\n```\n```\n后文")).toContain("后文");
+    expect(renderMarkdown("前文\n```\n```\n后文")).not.toContain("code-block");
+  });
+
   test("T3.2d formatBytes 边界", () => {
     expect(formatBytes(500)).toBe("500 B");
     expect(formatBytes(2048)).toBe("2.0 KB");

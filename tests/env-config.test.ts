@@ -79,7 +79,7 @@ describe("bot 记得自己配置过什么", () => {
     const ok = await run([tool("env.set", { key: "feishu_app_id", value: "cli_123", label: "飞书应用 ID", note: "提审通知用" }), "好了"]);
     expect(resultOf(ok)).toContain("FEISHU_APP_ID=cli_123");
     expect(env.envFor("a").FEISHU_APP_ID).toBe("cli_123");
-    expect(env.envFor("b").FEISHU_APP_ID).toBeUndefined();
+    expect(env.envFor("b").FEISHU_APP_ID).toBe("cli_123"); // 默认账号级共用
     const bad = await run([tool("env.set", { key: "FEISHU_APP_SECRET", value: "abc" }), "好"]);
     expect(resultOf(bad)).toContain("ui.secret");
     expect(env.envFor("a").FEISHU_APP_SECRET).toBeUndefined();
@@ -92,7 +92,7 @@ describe("bot 记得自己配置过什么", () => {
     const sys = providers.systems[0];
     expect(sys).toContain("【已配置的环境】");
     expect(sys).toContain("FEISHU_APP_ID=cli_123（飞书应用 ID）：提审通知用");
-    expect(sys).toContain("FEISHU_APP_SECRET（飞书 App Secret）：发提审通知 [所有 bot 共用] · 你在");
+    expect(sys).toContain("FEISHU_APP_SECRET（飞书 App Secret）：发提审通知 [账号级共用] · 你在");
     expect(sys).not.toContain("s3cr3t-value");
     expect(sys).toContain("共有 2 个 bot");
     expect(sys.indexOf("【团队】")).toBeLessThan(sys.indexOf("【交互】"));
@@ -104,27 +104,49 @@ describe("bot 记得自己配置过什么", () => {
   }, 15_000);
 });
 
-describe("密钥分 bot", () => {
-  test("私有密钥只有主人能看到和使用，共用的大家都能用", async () => {
+describe("密钥账号级（对齐 Grok Vault）", () => {
+  test("本机所有 bot 都能看到和使用；旧 botId 不挡访问", async () => {
     secrets.set("A_ONLY", "aaaa-secret", "A 的", { savedBy: "a", botId: "a" });
     secrets.set("SHARED_TOKEN", "shared-secret", "共用");
-    expect(secrets.list("b").map((x) => x.name)).not.toContain("A_ONLY");
+    expect(secrets.list("b").map((x) => x.name)).toContain("A_ONLY");
     expect(secrets.list("b").map((x) => x.name)).toContain("SHARED_TOKEN");
-    expect(secrets.get("A_ONLY", "b")).toBeUndefined();
-    expect(secrets.get("A_ONLY", "a")).toBe("aaaa-secret");
-    expect(secrets.referencedIn("curl -H $A_ONLY $SHARED_TOKEN", "b")).toEqual(["SHARED_TOKEN"]);
-    expect(secrets.fill({ h: "{{secret:A_ONLY}}" }, "b").missing).toEqual(["A_ONLY"]);
+    expect(secrets.get("A_ONLY", "b")).toBe("aaaa-secret");
+    expect(secrets.referencedIn("curl -H $A_ONLY $SHARED_TOKEN", "b").sort()).toEqual(["A_ONLY", "SHARED_TOKEN"]);
+    expect(secrets.fill({ h: "{{secret:A_ONLY}}" }, "b").missing).toEqual([]);
+    expect(secrets.fill({ h: "{{secret:A_ONLY}}" }, "b").denied).toEqual([]);
+    expect(secrets.fill({ h: "{{secret:NOPE}}" }, "b").missing).toEqual(["NOPE"]);
+    expect(secrets.meta("A_ONLY")?.botId).toBeUndefined(); // 写入时已账号级
+    expect(secrets.meta("A_ONLY")?.savedBy).toBe("a");
     await run(["你好"], store.getBot("b")!);
-    expect(providers.systems[0]).not.toContain("A_ONLY");
-    expect(providers.systems[0]).toContain("SHARED_TOKEN（共用） [所有 bot 共用]");
+    expect(providers.systems[0]).toContain("A_ONLY");
+    expect(providers.systems[0]).toContain("SHARED_TOKEN");
+    expect(providers.systems[0]).toContain("账号级共用");
   });
 
-  test("ui.secret 不能占用别人私有的名字；scope:all 生成共用卡片", async () => {
+  test("已有密钥名提示直接用；新卡一律 scope all", async () => {
     const taken = await run([tool("ui.secret", { name: "A_ONLY", label: "x" }), "好"], store.getBot("b")!);
     expect(taken.some((b) => b.type === "secret")).toBe(false);
-    expect(providers.calls).toBe(2);
-    const card = await run([tool("ui.secret", { name: "TEAM_KEY", label: "团队 Key", scope: "all" })]);
+    expect(providers.calls).toBe(2); // 已有 → 不 halt，模型再回一轮
+    const card = await run([tool("ui.secret", { name: "TEAM_KEY", label: "团队 Key" })]);
     expect(card.at(-1)).toMatchObject({ type: "secret", name: "TEAM_KEY", scope: "all" });
+  });
+
+  test("其它 bot 可直接用已存密钥，不必再 share", async () => {
+    const saved = await run([tool("notify", { title: "t", body: "{{secret:A_ONLY}}" }), "好"], store.getBot("b")!);
+    const result = resultOf(saved);
+    expect(result).not.toContain("不归你用");
+    expect(result).not.toContain("密钥未设置");
+  });
+
+  test("secret.share 幂等确认全员可用", async () => {
+    secrets.set("SHARE_ME", "share-secret", "可共用", { savedBy: "a" });
+    const shared = await run([tool("secret.share", { name: "SHARE_ME" }), "好"], store.getBot("a")!);
+    expect(resultOf(shared)).toMatch(/所有 bot 可用|账号级/);
+    expect(secrets.get("SHARE_ME", "b")).toBe("share-secret");
+    const again = await run([tool("secret.share", { name: "SHARE_ME" }), "好"], store.getBot("b")!);
+    expect(resultOf(again)).toMatch(/所有 bot 可用|账号级/);
+    const missing = await run([tool("secret.share", { name: "NO_SUCH" }), "好"], store.getBot("a")!);
+    expect(resultOf(missing)).toContain("没有密钥");
   });
 
   test("用了密钥、改了配置都写审计", async () => {
@@ -133,6 +155,29 @@ describe("密钥分 bot", () => {
     const evs = audit.query({ limit: 50 }) as any[];
     expect(evs.some((e) => e.cap === "config" && e.action === "env.set" && e.args.startsWith("API_BASE="))).toBe(true);
     expect(evs.some((e) => e.cap === "secret" && e.action === "use:notify" && e.args === "SHARED_TOKEN")).toBe(true);
+  });
+
+  test("env.delete 默认只删私有覆盖；删共用需 scope:all", async () => {
+    await run([tool("env.set", { key: "TEAM_URL", value: "https://shared.example" }), "好"], store.getBot("a")!);
+    expect(env.envFor("b").TEAM_URL).toBe("https://shared.example");
+    const refuse = await run([tool("env.delete", { key: "TEAM_URL" }), "好"], store.getBot("b")!);
+    expect(resultOf(refuse)).toContain('scope:"all"');
+    expect(env.envFor("a").TEAM_URL).toBe("https://shared.example");
+    await run([tool("env.set", { key: "TEAM_URL", value: "https://b-only.example", scope: "bot" }), "好"], store.getBot("b")!);
+    expect(env.envFor("b").TEAM_URL).toBe("https://b-only.example");
+    const dropPrivate = await run([tool("env.delete", { key: "TEAM_URL" }), "好"], store.getBot("b")!);
+    expect(resultOf(dropPrivate)).toContain("私有");
+    expect(env.envFor("b").TEAM_URL).toBe("https://shared.example");
+    const dropShared = await run([tool("env.delete", { key: "TEAM_URL", scope: "all" }), "好"], store.getBot("a")!);
+    expect(resultOf(dropShared)).toContain("共用");
+    expect(env.envFor("a").TEAM_URL).toBeUndefined();
+  });
+
+  test("secret.delete 删掉后全员不可用", async () => {
+    secrets.set("TEMP_KEY", "temp-val", "临时");
+    const del = await run([tool("secret.delete", { name: "TEMP_KEY" }), "好"], store.getBot("b")!);
+    expect(resultOf(del)).toContain("已删除");
+    expect(secrets.has("TEMP_KEY")).toBe(false);
   });
 });
 
@@ -173,7 +218,7 @@ describe("迁移补全", () => {
     expect(env2.envFor(newA.id).FEISHU_APP_ID).toBe("cli_123");
     expect(projects2.list().map((x) => x.name)).toEqual(["提审"]);
     expect(consent2.commandRule(newA.id, "cursor")).toBe("allow");
-    expect(r.secretsToReenter.find((x) => x.name === "A_ONLY")?.bot).toBe("运维");
+    expect(r.secretsToReenter.find((x) => x.name === "A_ONLY")?.bot).toBe("运维"); // savedBy 归因
     expect(r.importedProjects).toBe(1);
     store2.close();
     void p;

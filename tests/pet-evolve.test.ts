@@ -18,7 +18,7 @@ function msg(text: string, at: number): ChatMessage {
 }
 
 describe("pet-evolve 自进化", () => {
-  test("用户「以后都」会提议 habit，接受后 apply", () => {
+  test("用户「以后都」会提议 habit，接受后 apply", async () => {
     const home = mkdtempSync(join(tmpdir(), "harness-evolve-"));
     const applied: string[] = [];
     const delivered: string[] = [];
@@ -32,7 +32,7 @@ describe("pet-evolve 自进化", () => {
       deliver: (_id, p) => delivered.push(p.kind),
       apply: (_id, p) => applied.push(p.kind),
     });
-    const p = eng.tick();
+    const p = await eng.tick();
     expect(p?.kind).toBe("habit");
     expect(delivered).toEqual(["habit"]);
     expect(eng.accept(p!.id)?.status).toBe("accepted");
@@ -63,7 +63,7 @@ describe("pet-prefs 进化相关默认", () => {
 });
 
 describe("selfEvolve 闸门", () => {
-  test("enabled=false 时 tick 不提议", () => {
+  test("enabled=false 时 tick 不提议", async () => {
     const home = mkdtempSync(join(tmpdir(), "harness-evolve-gate-"));
     const eng = new PetEvolveEngine(home, {
       bots: () => [bot],
@@ -74,6 +74,6 @@ describe("selfEvolve 闸门", () => {
       deliver: () => {},
       apply: () => {},
     });
-    expect(eng.tick()).toBe(null);
+    expect(await eng.tick()).toBe(null);
   });
 });

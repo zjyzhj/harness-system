@@ -1,4 +1,4 @@
-// 工具菜单与设置页：模型、图片、用量、语义回想、迁移、记忆、技能、定时任务、MCP、群组、编排、系统授权
+// 工具菜单与设置页：模型、图片、用量、语义回想、迁移、记忆、技能、定时任务、MCP、群组、系统授权
 /* ---------- 工具菜单：统一外观的面板 ---------- */
 function sheet({ icon, title, sub = "", body = "", wide = false }) {
   const modal = openModal(`
@@ -12,29 +12,60 @@ function sheet({ icon, title, sub = "", body = "", wide = false }) {
 const botOptions = (selected) => bots.map((b) => `<option value="${esc(b.id)}" ${b.id === selected ? "selected" : ""}>${esc(b.name)}</option>`).join("");
 const errText = (e) => String(e?.message || e).replace(/^Error invoking remote method '[^']+': (Error: )?/, "");
 
-/** 单个 bot 的权限区（详情页 / 更多设置共用）：批准能力、撤销、信任模式、Coding CLI 目录 */
-function botPermSection(botId, grants, caps, trusted, { linkSys = true, cliPaths = [] } = {}) {
+const PERM_MODE_HINT = {
+  ask: "每次操作先问你",
+  auto: "Shell / 终端 / Coding CLI 自动过；危险命令仍要确认",
+  always: "工具默认全过（含危险命令）；禁止规则仍生效",
+};
+
+/** 单个 bot 的权限区：Ask / Auto / Always + 能力批准 + 目录信任 */
+function botPermSection(botId, grants, caps, mode = "ask", { linkSys = true, cliPaths = [], termPaths = [] } = {}) {
   const label = (id) => caps.find((c) => c.id === id)?.label || id;
+  const m = mode === "auto" || mode === "always" ? mode : "ask";
+  const bits = [
+    m === "always" ? "Always 全放行" : m === "auto" ? "Auto 安全自动过" : "Ask 逐次问",
+    grants.length ? `${grants.length} 项能力` : "无单独能力",
+    termPaths.length ? `${termPaths.length} 个终端目录` : "",
+    cliPaths.length ? `${cliPaths.length} 个 CLI 目录` : "",
+  ].filter(Boolean);
   return `
     <div class="d-sec bot-perm" data-bot="${esc(botId)}">
-      <h4>权限</h4>
-      <div class="hint">默认不能动你的电脑；需要时会在会话里请你批准，也可在此预先批准。</div>
+      <h4>权限 <button class="ghost-btn bp-overview" type="button" title="能力 / 命令 / 目录 / Webhook">总览</button></h4>
+      <div class="d-card bp-summary bp-stack">
+        <div class="c-main">
+          <div class="c-title">当前授权</div>
+          <div class="c-sub">${esc(bits.join(" · "))}</div>
+        </div>
+        <button class="ghost-btn bp-overview" type="button">看详情</button>
+      </div>
+      <div class="d-card bp-mode-card bp-stack">
+        <div class="c-main">
+          <div class="c-title">权限模式</div>
+          <div class="c-sub">${esc(PERM_MODE_HINT[m])}</div>
+        </div>
+        <select class="skin-select bp-mode" title="权限模式">
+          <option value="ask" ${m === "ask" ? "selected" : ""}>Ask · 每次询问</option>
+          <option value="auto" ${m === "auto" ? "selected" : ""}>Auto · 安全自动过</option>
+          <option value="always" ${m === "always" ? "selected" : ""}>Always · 全部放行</option>
+        </select>
+      </div>
       ${grants.map((g) => `
-        <div class="d-card"><div class="c-main"><div class="c-title">${esc(label(g.cap))}</div>
+        <div class="d-card bp-stack"><div class="c-main"><div class="c-title">${esc(label(g.cap))}</div>
           <div class="c-sub">${g.once ? "仅一次" : g.expiresAt ? `到 ${esc(fmtTime(g.expiresAt))}` : "长期"}${g.grantedAt ? ` · ${esc(fmtTime(g.grantedAt))}` : ""}</div></div>
-          <button class="ghost-btn danger-text" data-revoke="${esc(g.cap)}">撤销</button></div>`).join("") || `<div class="d-empty">尚未批准任何能力</div>`}
-      ${cliPaths.length ? `<div class="hint" style="margin-top:8px">Coding CLI 已信任目录（同前缀派工可免再问）</div>${cliPaths.map((p) => `
-        <div class="d-card"><div class="c-main"><div class="c-title" title="${esc(p.prefix)}">${esc(p.prefix)}</div>
-          <div class="c-sub">${p.createdAt ? esc(fmtTime(p.createdAt)) : ""}</div></div>
+          <button class="ghost-btn danger-text" data-revoke="${esc(g.cap)}">撤销</button></div>`).join("") || `<div class="d-empty">尚未单独批准任何能力</div>`}
+      ${termPaths.length ? `<div class="hint" style="margin-top:8px">终端已信任目录</div>${termPaths.map((p) => `
+        <div class="d-card bp-stack"><div class="c-main"><div class="c-title" title="${esc(p.prefix)}">${esc(p.prefix)}</div>
+          <div class="c-sub">开终端${p.createdAt ? ` · ${esc(fmtTime(p.createdAt))}` : ""}</div></div>
+          <button class="ghost-btn danger-text" data-revoke-termpath="${esc(p.prefix)}">撤销</button></div>`).join("")}` : ""}
+      ${cliPaths.length ? `<div class="hint" style="margin-top:8px">Coding CLI 已信任目录</div>${cliPaths.map((p) => `
+        <div class="d-card bp-stack"><div class="c-main"><div class="c-title" title="${esc(p.prefix)}">${esc(p.prefix)}</div>
+          <div class="c-sub">派 Coding CLI${p.createdAt ? ` · ${esc(fmtTime(p.createdAt))}` : ""}</div></div>
           <button class="ghost-btn danger-text" data-revoke-clipath="${esc(p.prefix)}">撤销</button></div>`).join("")}` : ""}
       <div class="mx-inline sa-grant bot-perm-grant">
         <select class="skin-select bp-cap">${caps.map((c) => `<option value="${esc(c.id)}">${esc(c.label)}</option>`).join("")}</select>
         <select class="skin-select bp-ttl"><option value="0">长期</option><option value="3600000">1 小时</option><option value="86400000">1 天</option><option value="once">仅一次</option></select>
         <button class="ghost-btn bp-grant">批准</button>
       </div>
-      <div class="d-card"><div class="c-main"><div class="c-title">信任模式</div>
-        <div class="c-sub">${trusted ? "命令直接执行（危险命令仍要确认）" : "每个新命令先问你"}</div></div>
-        <label class="switch" title="信任模式"><input type="checkbox" class="bp-trust" ${trusted ? "checked" : ""}/><span></span></label></div>
       ${linkSys ? `<button class="ghost-btn bp-sysaccess" style="margin-top:4px">命令规则与操作记录…</button>` : ""}
     </div>`;
 }
@@ -49,6 +80,10 @@ function bindBotPerm(root, botId, onChange) {
     await api.consent.revokeCliPath(botId, btn.dataset.revokeClipath);
     onChange?.();
   }));
+  sec.querySelectorAll("[data-revoke-termpath]").forEach((btn) => (btn.onclick = async () => {
+    await api.consent.revokeTermPath(botId, btn.dataset.revokeTermpath);
+    onChange?.();
+  }));
   const grantBtn = sec.querySelector(".bp-grant");
   if (grantBtn) grantBtn.onclick = async () => {
     const ttl = sec.querySelector(".bp-ttl")?.value || "0";
@@ -57,17 +92,149 @@ function bindBotPerm(root, botId, onChange) {
     await api.consent.grant(botId, cap, ttl === "once" ? { once: true } : Number(ttl) ? { ttlMs: Number(ttl) } : undefined);
     onChange?.();
   };
-  const trust = sec.querySelector(".bp-trust");
-  if (trust) trust.onchange = async () => {
-    if (trust.checked && !confirm(`打开信任模式后，${botById(botId)?.name || "这个 bot"} 执行命令不再逐个询问（危险命令除外）。确定吗？`)) {
-      trust.checked = false;
+  const modeSel = sec.querySelector(".bp-mode");
+  if (modeSel) modeSel.onchange = async () => {
+    const next = modeSel.value === "auto" || modeSel.value === "always" ? modeSel.value : "ask";
+    const prev = modeSel.dataset.prev || "ask";
+    if (next === "always" && !confirm(`Always 模式下，${botById(botId)?.name || "这个 bot"} 将可直接执行危险命令（sudo、删目录等），禁止规则仍生效。确定吗？`)) {
+      modeSel.value = prev;
       return;
     }
-    await api.consent.setTrusted(botId, trust.checked);
+    if (next === "auto" && prev === "ask" && !confirm(`Auto 模式下，${botById(botId)?.name || "这个 bot"} 的 Shell / 开终端 / 派 Coding CLI 不再逐个询问（危险命令除外）。确定吗？`)) {
+      modeSel.value = prev;
+      return;
+    }
+    await api.consent.setMode(botId, next);
+    modeSel.dataset.prev = next;
     onChange?.();
   };
+  if (modeSel) modeSel.dataset.prev = modeSel.value;
   const sys = sec.querySelector(".bp-sysaccess");
   if (sys) sys.onclick = () => { closeModal(); sysaccessFlow(); };
+  sec.querySelectorAll(".bp-overview").forEach((btn) => (btn.onclick = () => botAccessFlow(botId)));
+}
+
+/** 「这个 bot 还能干什么」一页总览：模式 / 能力 / 命令 / 目录 / 例行 URL / 网关 */
+async function botAccessFlow(botId) {
+  const bot = botById(botId);
+  if (!bot) return;
+  const modal = sheet({
+    icon: "🛡",
+    title: `${bot.name} · 授权总览`,
+    sub: "累计授权、命令规则、工程目录与例行能力 URL",
+    wide: true,
+  });
+  const body = modal.querySelector(".mx-body");
+  const render = async () => {
+    const ov = await api.consent.overview(botId).catch((e) => ({ error: errText(e) }));
+    if (ov?.error) {
+      body.innerHTML = `<div class="d-empty">${esc(ov.error)}</div>`;
+      return;
+    }
+    const modeName = ov.mode === "always" ? "Always" : ov.mode === "auto" ? "Auto" : "Ask";
+    const hooks = (ov.routines || []).filter((r) => r.hasWebhook);
+    body.innerHTML = `
+      ${ov.warnings?.length ? `<div class="notify-hint">${ov.warnings.map((w) => `<div>⚠ ${esc(w)}</div>`).join("")}</div>` : ""}
+      <div class="d-sec"><h4>还能干什么</h4>
+        <ul class="ba-list">${(ov.canDo || []).map((l) => `<li>${esc(l)}</li>`).join("")}</ul>
+      </div>
+      <div class="d-sec"><h4>权限模式</h4>
+        <div class="d-card"><div class="c-main"><div class="c-title">${esc(modeName)}</div>
+          <div class="c-sub">${esc(ov.modeHint || "")}</div></div>
+          <button class="ghost-btn" id="ba-edit-perm">改权限</button></div>
+      </div>
+      <div class="d-sec"><h4>已批准能力 · ${(ov.grants || []).length}</h4>
+        ${(ov.grants || []).map((g) => `
+          <div class="d-card"><div class="c-main"><div class="c-title">${esc(g.label)}</div>
+            <div class="c-sub">${g.once ? "仅一次" : g.expiresAt ? `到 ${esc(fmtTime(g.expiresAt))}` : "长期"} · ${esc(fmtTime(g.grantedAt))}</div></div>
+            <button class="ghost-btn danger-text" data-ba-revoke="${esc(g.cap)}">撤销</button></div>`).join("")
+          || `<div class="d-empty">无单独批准</div>`}
+      </div>
+      <div class="d-sec"><h4>命令规则</h4>
+        ${(ov.allowCommands || []).length ? `<div class="hint">允许：${esc(ov.allowCommands.join("、"))}</div>` : ""}
+        ${(ov.denyCommands || []).length ? `<div class="hint">禁止：${esc(ov.denyCommands.join("、"))}</div>` : ""}
+        ${!(ov.allowCommands || []).length && !(ov.denyCommands || []).length ? `<div class="d-empty">无命令白名单 / 禁止规则</div>` : ""}
+        <button class="ghost-btn" id="ba-rules" style="margin-top:6px">管理命令规则…</button>
+      </div>
+      <div class="d-sec"><h4>信任目录</h4>
+        ${(ov.termPaths || []).map((p) => `
+          <div class="d-card"><div class="c-main"><div class="c-title" title="${esc(p)}">${esc(p)}</div><div class="c-sub">开终端</div></div>
+            <button class="ghost-btn danger-text" data-ba-term="${esc(p)}">撤销</button></div>`).join("")}
+        ${(ov.cliPaths || []).map((p) => `
+          <div class="d-card"><div class="c-main"><div class="c-title" title="${esc(p)}">${esc(p)}</div><div class="c-sub">派 Coding CLI</div></div>
+            <button class="ghost-btn danger-text" data-ba-cli="${esc(p)}">撤销</button></div>`).join("")}
+        ${!(ov.termPaths || []).length && !(ov.cliPaths || []).length ? `<div class="d-empty">还没有目录信任</div>` : ""}
+      </div>
+      <div class="d-sec"><h4>例行能力 URL · ${hooks.length}</h4>
+        <div class="hint">POST 即可触发；优先用云服务公网链接（例行 🪝）。本机网关仅备用：${ov.gateway?.enabled
+          ? (ov.gateway.loopback ? "本机回环可用" : `监听 ${esc(ov.gateway.host)}`)
+          : ov.gateway?.remoteBlocked
+            ? "未允许远程（Connect → 本机网关）"
+            : "未开启"}。</div>
+        ${hooks.map((r) => `
+          <div class="d-card"><div class="c-main"><div class="c-title">${esc(r.name)}${r.enabled ? "" : " · 已暂停"}</div>
+            <div class="c-sub" style="word-break:break-all">${esc(r.capabilityUrl || r.webhookToken || "")}</div></div>
+            <button class="ghost-btn" data-ba-copy="${esc(r.capabilityUrl || r.webhookToken || "")}">复制</button></div>`).join("")
+          || `<div class="d-empty">没有开通 Webhook 的例行</div>`}
+      </div>
+      <div class="d-sec"><h4>最近操作</h4>
+        ${(ov.recentAudit || []).map((e) => `
+          <div class="hint">${esc(fmtTime(e.at))} · ${e.ok ? "✓" : "✕"} ${esc(e.action)}${e.cap ? ` · ${esc(e.cap)}` : ""}${e.detail ? ` · ${esc(e.detail)}` : ""}</div>`).join("")
+          || `<div class="d-empty">暂无审计记录</div>`}
+      </div>`;
+    body.querySelector("#ba-edit-perm")?.addEventListener("click", () => {
+      closeModal();
+      if (currentBot?.id === botId) toggleDetails(true);
+      else selectBot(bot).then(() => toggleDetails(true));
+    });
+    body.querySelector("#ba-rules")?.addEventListener("click", () => { closeModal(); sysaccessFlow(); });
+    body.querySelectorAll("[data-ba-revoke]").forEach((btn) => (btn.onclick = async () => {
+      await api.consent.revoke(botId, btn.dataset.baRevoke);
+      render();
+      if (currentBot?.id === botId) renderDetails(currentBot);
+    }));
+    body.querySelectorAll("[data-ba-term]").forEach((btn) => (btn.onclick = async () => {
+      await api.consent.revokeTermPath(botId, btn.dataset.baTerm);
+      render();
+      if (currentBot?.id === botId) renderDetails(currentBot);
+    }));
+    body.querySelectorAll("[data-ba-cli]").forEach((btn) => (btn.onclick = async () => {
+      await api.consent.revokeCliPath(botId, btn.dataset.baCli);
+      render();
+      if (currentBot?.id === botId) renderDetails(currentBot);
+    }));
+    body.querySelectorAll("[data-ba-copy]").forEach((btn) => (btn.onclick = async () => {
+      const t = btn.dataset.baCopy;
+      if (!t) return;
+      try {
+        await navigator.clipboard.writeText(t);
+        btn.textContent = "已复制";
+        setTimeout(() => (btn.textContent = "复制"), 1200);
+      } catch { alert(t); }
+    }));
+  };
+  await render();
+}
+
+/** 首启 / 顶条：单独配一个模型，不钻进完整设置页 */
+async function quickProviderFlow(opts = {}) {
+  const providers = await api.providers.list().catch(() => []);
+  const modal = openModal(`
+    <div class="cb-head"><h2>接上模型</h2><button class="cb-x" title="关闭">✕</button></div>
+    <div class="cb-body">
+      <p class="hint" style="margin:0 0 8px">填任意 OpenAI 兼容接口，或选本机已登录的 Claude / Codex / Cursor CLI。保存后就能认真对话。</p>
+      ${providerForm({})}
+    </div>`);
+  modal.classList.add("cb-modal");
+  modal.querySelector(".cb-x").onclick = closeModal;
+  bindProviderForm(modal, {}, providers, async () => {
+    closeModal();
+    const bar = $("#setup-banner");
+    if (bar) delete bar.dataset.dismissed;
+    if (currentBot) await syncSetupBanner();
+    else await renderEmptyState();
+    if (opts.continueToBot && bots.length === 0 && typeof createBotFlow === "function") createBotFlow();
+  }, closeModal);
 }
 
 /* ---- 模型设置 ---- */
@@ -82,7 +249,7 @@ async function settingsFlow() {
     body.innerHTML = `
       <div class="d-sec"><h4>本机 CLI <button class="ghost-btn" id="cli-refresh" title="重新探测">刷新</button></h4>
         <div class="mx-chips">${Object.keys(caps).length ? Object.entries(caps).map(([c, info]) => `<span class="mx-chip ${info?.ready ? "ok" : info?.installed ? "" : ""}" title="${esc(info?.bin || c)}">${info?.ready ? "✓" : info?.installed ? "○" : "✕"} ${esc(c)}${info?.ready ? " · 可派工" : info?.installed ? " · 未就绪" : ""}${info?.version ? ` · ${esc(String(info.version).split(" ")[0])}` : ""}${info?.account ? ` · ${esc(info.account)}` : ""}</span>`).join("") : ["claude", "codex", "cursor"].map((c) => `<span class="mx-chip">… ${c}</span>`).join("")}</div>
-        <div class="hint">名单来自 Coding Agent 注册表 + 本机实时探测（点刷新更新），提示词与 <code>cli.agent</code> 工具说明会跟着变，不必手写「能调哪些」。对话 Provider 选 CLI 只问答不改仓库；改工程走 <code>cli.agent</code>。Cursor 换号见钥匙串 / <code>cursor-agent login</code>。</div>
+        <div class="hint">名单来自 Coding Agent 注册表 + 本机实时探测（点刷新更新）。对话选「本地 cursor」是聊天脑（空沙箱，不改你的工程）；改工程走 <code>cli.agent</code> 派工。二者不要混成 Cursor IDE 的 Ask/Agent。</div>
       </div>
       <div class="d-sec"><h4>Provider <button class="list-add" id="pv-new" title="添加">＋</button></h4>
         ${providers.map((p) => `
@@ -106,7 +273,7 @@ async function settingsFlow() {
     renderEmbedding(body.querySelector("#em-sec"));
     renderUsage(body.querySelector("#us-sec"));
     body.querySelector("#cli-refresh")?.addEventListener("click", async () => {
-      Object.assign(caps, await api.providers.capabilities().catch(() => caps));
+      Object.assign(caps, await api.providers.capabilities(true).catch(() => caps));
       render();
     });
     body.querySelector("#pv-new").onclick = () => { editing = {}; render(); };
@@ -372,6 +539,7 @@ async function migrateFlow() {
       const r = await api.migration.import(path);
       result.className = "mg-result test-result ok";
       result.textContent = `✓ 导入完成：${r.importedBots} 个 bot、${r.importedProviders} 个 provider、${r.importedPets} 个宠物、${r.importedSkins ?? 0} 个皮肤、${r.importedEnv ?? 0} 项配置、${r.importedProjects ?? 0} 个项目、${r.importedRules ?? 0} 条命令规则` +
+        (r.skippedPlans > 0 ? `；另跳过 ${r.skippedPlans} 条旧编排（已下线，未导入）` : "") +
         (r.secretsToReenter?.length ? `。密钥绑定原电脑的钥匙串带不过来，需要重新填写：${r.secretsToReenter.map((x) => `${x.label || x.name}${x.bot ? `（${x.bot}）` : ""}`).join("、")}（bot 用到时会弹加密框）` : "");
       await refreshBots();
     } catch (e) { result.className = "mg-result test-result bad"; result.textContent = errText(e); }
@@ -383,7 +551,7 @@ async function botDetailFlow(b) {
     closeModal();
     botDetailFlow(bots.find((x) => x.id === b.id) || b);
   };
-  const [mem, stats, skills, tasks, stList, skins, grants, caps, cmd, cliPaths] = await Promise.all([
+  const [mem, stats, skills, tasks, stList, skins, grants, caps, cmd, cliPaths, termPaths] = await Promise.all([
     api.memory.list(b.id),
     api.memory.stats(b.id),
     api.skills.list(),
@@ -394,10 +562,11 @@ async function botDetailFlow(b) {
     api.consent.caps().catch(() => []),
     api.consent.rules().catch(() => ({ rules: [], trusted: [] })),
     api.consent.cliPaths(b.id).catch(() => []),
+    api.consent.termPaths ? api.consent.termPaths(b.id).catch(() => []) : Promise.resolve([]),
   ]);
   const st = stList.find((x) => x.botId === b.id) || { state: "idle" };
   const card = b.personaCard;
-  const trusted = !!cmd.trusted?.includes(b.id);
+  const permMode = cmd.modes?.[b.id] || (cmd.trusted?.includes(b.id) ? "auto" : "ask");
   const modal = openModal(`
     <h2><span class="gd-name" id="bd-name" title="点击改名">${esc(b.name)} <span class="gd-edit">✎</span></span> ${b.petEnabled ? "🐾" : ""}
       <span class="status-dot st-${esc(st.state)}" title="${esc(st.state)}"></span>
@@ -415,7 +584,7 @@ async function botDetailFlow(b) {
       <label>宠物皮肤</label>
       <span><select id="bd-skin" class="skin-select">${skins.map((s) => `<option value="${esc(s.id)}"${b.skinId === s.id ? " selected" : ""}>${esc(s.name)}${s.desc ? " — " + esc(s.desc) : ""}</option>`).join("")}</select></span>
     </div>
-    ${botPermSection(b.id, grants, caps, trusted, { cliPaths })}
+    ${botPermSection(b.id, grants, caps, permMode, { cliPaths, termPaths })}
     <div class="actions">
       <button class="ghost-btn" id="bd-persona">✨ 生成形象</button>
       <button class="primary-btn" id="bd-chat">去对话</button>
@@ -477,7 +646,7 @@ const MEMORY_KIND = { rule: "规范", fact: "事实/偏好", summary: "摘要", 
 const MEMORY_SOURCE = { user: "用户说的", bot: "bot 记下", manual: "手动添加", auto: "自动", "auto-summarize": "自动摘要", "bot-runtime": "bot 记下" };
 /** opts.ns 打开指定命名空间；opts.kind 只看某一类（rule / fact / event） */
 async function memoryFlow(opts = {}) {
-  const modal = sheet({ icon: "🧠", title: "记忆", sub: "规范常驻；事实按相关注入。MEMORY.md 由系统后台蒸馏，只在问到记忆或内容相关时带上（也可手动重写）", wide: true });
+  const modal = sheet({ icon: "🧠", title: "记忆", sub: "优先在对话里说「记住 / 忘掉」。面板用于浏览与从其它助手导入。Primary（主控）bot 的记忆是你的默认入口。", wide: true });
   const body = modal.querySelector(".mx-body");
   let filter = "";
   let kindFilter = opts.kind ?? "";
@@ -492,11 +661,13 @@ async function memoryFlow(opts = {}) {
       .filter((e) => !kindFilter || (kindFilter === "event" ? !["rule", "fact"].includes(e.kind) : e.kind === kindFilter))
       .filter((e) => !filter || e.content.toLowerCase().includes(filter.toLowerCase())).slice().reverse();
     const kindTabs = [["", `全部 ${entries.length}`], ["rule", `规范 ${count("rule")}`], ["fact", `事实 ${count("fact")}`], ["event", `其他 ${count("event")}`]];
+    const primary = bots.find((b) => b.isMaster);
     body.innerHTML = `
       <div class="mx-split">
-        <div class="mx-nav">${all.map((n) => `<button data-ns="${esc(n)}" class="${n === memoryNs ? "on" : ""}">${esc(nsLabel(n))}</button>`).join("")}</div>
+        <div class="mx-nav">${all.map((n) => `<button data-ns="${esc(n)}" class="${n === memoryNs ? "on" : ""}">${esc(nsLabel(n))}${n.startsWith("bot:") && primary && n === `bot:${primary.id}` ? " · 主控" : ""}</button>`).join("")}</div>
         <div class="mx-main">
-          <div class="mx-inline"><select id="mm-kind" class="skin-select"><option value="rule" ${kindFilter !== "fact" ? "selected" : ""}>规范</option><option value="fact" ${kindFilter === "fact" ? "selected" : ""}>事实/偏好</option></select><input id="mm-add" placeholder="记一条：例如「回答先给结论再展开」" /><button class="primary-btn" id="mm-add-btn">记住</button></div>
+          <div class="hint">也可直接对 bot 说「你还记得什么」「忘掉…」。下面可从 ChatGPT / Claude 等粘贴导出文本批量导入。</div>
+          <div class="mx-inline"><select id="mm-kind" class="skin-select"><option value="rule" ${kindFilter !== "fact" ? "selected" : ""}>规范</option><option value="fact" ${kindFilter === "fact" ? "selected" : ""}>事实/偏好</option></select><input id="mm-add" placeholder="记一条：例如「回答先给结论再展开」" /><button class="primary-btn" id="mm-add-btn">记住</button><button class="ghost-btn" id="mm-import" title="从其它助手导入">导入</button></div>
           <div class="mm-kinds">${kindTabs.map(([k, label]) => `<button data-kind="${k}" class="${k === kindFilter ? "on" : ""}">${label}</button>`).join("")}</div>
           <div class="mx-inline"><input id="mm-filter" placeholder="搜索 ${entries.length} 条记忆" value="${esc(filter)}" /></div>
           <div class="mm-list">${shown.map((e) => `
@@ -518,6 +689,17 @@ async function memoryFlow(opts = {}) {
     };
     body.querySelector("#mm-add-btn").onclick = add;
     body.querySelector("#mm-add").onkeydown = (e) => { if (e.key === "Enter" && !e.isComposing) add(); };
+    body.querySelector("#mm-import").onclick = async () => {
+      const text = await askInput("导入记忆", "粘贴其它助手导出的要点（每行一条），或 JSON 数组 [{kind,content}]", "");
+      if (!text?.trim()) return;
+      const owner = memoryNs.startsWith("bot:") ? memoryNs.slice(4) : currentBot?.id ?? bots.find((b) => b.isMaster)?.id ?? bots[0]?.id;
+      if (!owner) { alert("没有可写入的 bot"); return; }
+      try {
+        const r = await api.memory.import(owner, text, { namespace: memoryNs });
+        alert(`已导入 ${r.count} 条`);
+        render();
+      } catch (e) { alert(errText(e)); }
+    };
     const f = body.querySelector("#mm-filter");
     f.oninput = () => { filter = f.value; render().then(() => { const x = body.querySelector("#mm-filter"); x.focus(); x.setSelectionRange(x.value.length, x.value.length); }); };
     body.querySelectorAll("[data-del]").forEach((b) => (b.onclick = async () => { await api.memory.remove(memoryNs, b.dataset.del); render(); }));
@@ -582,30 +764,295 @@ async function skillsFlow() {
   render();
 }
 
-/* ---- 定时任务 ---- */
+/* ---- 例行（定时 / Webhook / 试跑） ---- */
 const WEEK = ["日", "一", "二", "三", "四", "五", "六"];
-function describeCron(cron) {
-  const [mi, h, d, mo, w] = String(cron).trim().split(/\s+/);
-  const t = /^\d+$/.test(h) && /^\d+$/.test(mi) ? `${h.padStart(2, "0")}:${mi.padStart(2, "0")}` : null;
-  if (mi === "*" && h === "*" && d === "*" && mo === "*" && w === "*") return "每分钟";
-  if (/^\*\/\d+$/.test(mi) && h === "*" && d === "*" && w === "*") return `每 ${mi.slice(2)} 分钟`;
-  if (/^\d+$/.test(mi) && h === "*" && d === "*" && w === "*") return `每小时第 ${mi} 分`;
-  if (t && d === "*" && mo === "*" && w === "*") return `每天 ${t}`;
-  if (t && d === "*" && mo === "*" && w === "1-5") return `工作日 ${t}`;
-  if (t && d === "*" && mo === "*" && /^\d$/.test(w)) return `每周${WEEK[Number(w) % 7]} ${t}`;
-  if (t && /^\d+$/.test(d) && mo === "*" && w === "*") return `每月 ${d} 日 ${t}`;
-  return cron;
+
+/** 入站 Webhook：复制 / 换新 / 关闭 */
+/** Grok 同款默认指令：从 body.message 取任务，写回当前对话 */
+const DEFAULT_HOOK_PROMPT =
+  "当收到 Webhook 请求时：从请求体 JSON 取出 message 字段。message 的内容是用户这次交给你的任务：把它当作用户本人在本对话里提出的请求去完成，再把结果写给用户。仍遵守平时的安全规则：不要擅自对外发邮件或消息、不要付款、不要在用户确认前删除。如果没有 message 字段或请求体不是 JSON，简短告诉用户本次请求没有可执行的 message。把结果发到本对话里给用户。";
+
+/** 对齐 Grok：指令 + 何时跑 + POST/密钥/请求头 + 暂停/编辑/删除 */
+async function manageRoutineWebhook(id) {
+  const tasks = await api.tasks.list().catch(() => []);
+  const task = tasks.find((x) => x.id === id);
+  if (!task) return alert("找不到这条例行");
+  const bot = botById(task.botId);
+  const modal = sheet({
+    icon: "🪝",
+    title: task.name || "Webhook 例行",
+    sub: bot?.name || "",
+  });
+  const body = modal.querySelector(".mx-body");
+  let showKey = false;
+  let showHdr = false;
+  let msg = "";
+
+  const resolveUrl = async (t, bridge, gw) => {
+    if (!t?.webhookToken) return { url: "", kind: "none" };
+    if (bridge?.configured && bridge.base) {
+      return { url: `${String(bridge.base).replace(/\/$/, "")}/w/${t.webhookToken}`, kind: "cloud" };
+    }
+    if ((gw?.enabled || gw?.running) && gw.routinesBase) {
+      return { url: `${gw.routinesBase}/${t.webhookToken}`, kind: "local" };
+    }
+    return { url: "", kind: "need-cloud" };
+  };
+
+  const render = async () => {
+    if (!modal.isConnected) return;
+    const [list, bridge, gw] = await Promise.all([
+      api.tasks.list().catch(() => []),
+      api.connect.shareBridge
+        ? api.connect.shareBridge().catch(() => ({ configured: false }))
+        : Promise.resolve({ configured: false }),
+      api.connect.gateway().catch(() => ({ enabled: false })),
+    ]);
+    const t = list.find((x) => x.id === id) || task;
+    // 未开通：先征得同意，绝不在点开时偷偷 ensureWebhook（定时例行保持无 Webhook）
+    if (!t.webhookToken) {
+      body.innerHTML = `
+        <div class="d-sec wh-sheet">
+          <div class="hint" style="line-height:1.6">这条例行目前是<strong>纯定时</strong>，没有入站 Webhook（对齐 Grok：两者分开）。<br/>
+            开通后才会生成 POST 链接；外部系统才能触发。定时调度可继续保留，也可改成「仅 Webhook」。</div>
+          ${msg ? `<div class="hint">${esc(msg)}</div>` : ""}
+          <div class="actions" style="margin-top:12px">
+            <button type="button" class="ghost-btn" id="wh-cancel">取消</button>
+            <button type="button" class="ghost-btn" id="wh-enable-keep">开通并保留定时</button>
+            <button type="button" class="primary-btn" id="wh-enable-only">开通为仅 Webhook</button>
+          </div>
+        </div>`;
+      body.querySelector("#wh-cancel")?.addEventListener("click", () => closeModal());
+      const enable = async (schedule) => {
+        try {
+          Object.assign(t, await api.tasks.ensureWebhook(id));
+          if (schedule === false) await api.tasks.update(id, { schedule: false });
+          // 若指令仍是普通定时文案，换成 Webhook 默认指令
+          const p = (t.prompt || "").trim();
+          if (!p || (p.length < 40 && !/message/i.test(p))) {
+            await api.tasks.update(id, { prompt: DEFAULT_HOOK_PROMPT });
+          }
+          msg = schedule === false ? "已开通：仅 Webhook 触发" : "已开通 Webhook（定时仍有效）";
+          if (currentBot) renderDetails(currentBot);
+          render();
+        } catch (e) { msg = errText(e); render(); }
+      };
+      body.querySelector("#wh-enable-keep")?.addEventListener("click", () => enable(true));
+      body.querySelector("#wh-enable-only")?.addEventListener("click", () => enable(false));
+      return;
+    }
+    const { url, kind } = await resolveUrl(t, bridge, gw);
+    const key = t.webhookToken || "";
+    const header = `Authorization: Bearer ${key}`;
+    const mask = (s) => "•".repeat(Math.min(28, Math.max(10, String(s).length)));
+    const instr = (t.prompt || "").trim() || DEFAULT_HOOK_PROMPT;
+    const whenLine = t.schedule === false
+      ? "当 Webhook 触发时（无定时）"
+      : kind === "local"
+        ? "当 Webhook 触发时（兼定时；本机局域网）"
+        : "当 Webhook 触发时" + (t.schedule === false ? "" : "（兼定时）");
+    body.innerHTML = `
+      <div class="d-sec wh-sheet">
+        <div class="wh-instr">${esc(instr)}</div>
+        <div class="wh-when">🌐 ${esc(whenLine)}</div>
+        ${kind === "need-cloud" ? `
+          <div class="d-card bp-stack" style="border-color:var(--acc)">
+            <div class="c-main">
+              <div class="c-title">还没有公网地址</div>
+              <div class="c-sub">粘贴 Cloudflare API Token，点生成。软件会返回你的 <code>*.workers.dev</code>，并给出这条 Webhook 的 POST 链接。</div>
+            </div>
+          </div>
+          <div class="mx-form" style="margin-top:10px">
+            <div class="mx-grid">
+              <label>API Token</label><input id="wh-cf-token" type="password" placeholder="粘贴 Cloudflare API Token" autocomplete="off" />
+            </div>
+            <div class="actions">
+              <button type="button" class="ghost-btn" id="wh-open-cloud">打开云服务页</button>
+              <button type="button" class="primary-btn" id="wh-provision">生成公网链接</button>
+            </div>
+          </div>` : `
+          <div class="wh-fields">
+            <div class="wh-row">
+              <span class="wh-lab">POST 到</span>
+              <code class="wh-val" title="${esc(url)}">${esc(url)}</code>
+              <button type="button" class="ghost-btn" data-copy="url" title="复制">复制</button>
+            </div>
+            <div class="wh-row">
+              <span class="wh-lab">密钥</span>
+              <code class="wh-val">${showKey ? esc(key) : esc(mask(key))}</code>
+              <button type="button" class="ghost-btn" data-toggle-key>${showKey ? "隐藏" : "显示"}</button>
+              <button type="button" class="ghost-btn" data-copy="key">复制</button>
+            </div>
+            <div class="wh-row">
+              <span class="wh-lab">请求头</span>
+              <code class="wh-val">${showHdr ? esc(header) : esc(mask(header))}</code>
+              <button type="button" class="ghost-btn" data-toggle-hdr>${showHdr ? "隐藏" : "显示"}</button>
+              <button type="button" class="ghost-btn" data-copy="hdr">复制</button>
+            </div>
+          </div>
+          <div class="hint">公网链接本身就是密钥，POST JSON 即可，例如 <code>{"message":"要做的事"}</code>。电脑在线时几秒内进对话；紧急可加 <code>"priority":"urgent"</code>。
+            ${kind === "local" ? "<br/>当前是本机地址；要公网链接请先在上面粘贴 Cloudflare Token 生成。" : ""}</div>
+        `}
+        ${msg ? `<div class="hint">${esc(msg)}</div>` : ""}
+        <div class="wh-foot">
+          <button type="button" class="ghost-btn" id="wh-pause">${t.enabled ? "暂停" : "启用"}</button>
+          <button type="button" class="ghost-btn" id="wh-edit">编辑</button>
+          <button type="button" class="ghost-btn" id="wh-rotate" title="旧链接立刻失效">换新密钥</button>
+          <button type="button" class="icon-btn danger-text" id="wh-del" title="删除例行">🗑</button>
+        </div>
+      </div>`;
+
+    const copy = async (text, ok) => {
+      try {
+        await navigator.clipboard.writeText(text);
+        msg = ok;
+        render();
+      } catch { alert("复制失败"); }
+    };
+    body.querySelector('[data-copy="url"]')?.addEventListener("click", () => copy(url, "已复制 POST 链接"));
+    body.querySelector('[data-copy="key"]')?.addEventListener("click", () => copy(key, "已复制密钥"));
+    body.querySelector('[data-copy="hdr"]')?.addEventListener("click", () => copy(header, "已复制请求头"));
+    body.querySelector("[data-toggle-key]")?.addEventListener("click", () => { showKey = !showKey; render(); });
+    body.querySelector("[data-toggle-hdr]")?.addEventListener("click", () => { showHdr = !showHdr; render(); });
+    body.querySelector("#wh-open-cloud")?.addEventListener("click", () => {
+      closeModal();
+      vaultFlow("share");
+    });
+    body.querySelector("#wh-provision")?.addEventListener("click", async () => {
+      const apiToken = body.querySelector("#wh-cf-token")?.value.trim();
+      if (!apiToken) { msg = "请先粘贴 Cloudflare API Token"; render(); return; }
+      const btn = body.querySelector("#wh-provision");
+      if (btn) { btn.disabled = true; btn.textContent = "生成中…"; }
+      msg = "正在用 Token 生成公网地址…";
+      try {
+        const r = await api.connect.provisionShareBridge({ apiToken });
+        if (!r.ok) { msg = [r.error || "生成失败", r.hint].filter(Boolean).join("\n"); render(); return; }
+        const base = String(r.base || "").replace(/\/$/, "");
+        const post = base && t.webhookToken ? `${base}/w/${t.webhookToken}` : base;
+        if (post) await navigator.clipboard.writeText(post).catch(() => {});
+        msg = post ? `已生成并复制：${post}` : "已生成公网地址";
+        render();
+      } catch (e) { msg = errText(e); render(); }
+    });
+    body.querySelector("#wh-pause")?.addEventListener("click", async () => {
+      await api.tasks.setEnabled(id, !t.enabled);
+      msg = t.enabled ? "已暂停" : "已启用";
+      if (currentBot) renderDetails(currentBot);
+      render();
+    });
+    body.querySelector("#wh-edit")?.addEventListener("click", () => {
+      closeModal();
+      routineEditFlow(t, bot);
+    });
+    body.querySelector("#wh-rotate")?.addEventListener("click", async () => {
+      if (!confirm("换新后旧链接与密钥立刻失效，确定？")) return;
+      try {
+        await api.tasks.rotateWebhook(id);
+        msg = "已换新密钥";
+        showKey = false;
+        showHdr = false;
+        render();
+      } catch (e) { alert(errText(e)); }
+    });
+    body.querySelector("#wh-del")?.addEventListener("click", async () => {
+      if (!confirm("删除这条例行？")) return;
+      await api.tasks.remove(id);
+      closeModal();
+      if (currentBot) renderDetails(currentBot);
+    });
+  };
+  await render();
+}
+
+async function routineCreateFlow(bot) {
+  if (!bot) return;
+  const modal = sheet({ icon: "⏰", title: `新建例行 · ${bot.name}`, sub: "到点或 Webhook 唤醒它做事" });
+  const body = modal.querySelector(".mx-body");
+  body.innerHTML = `
+    <div class="mx-form mx-grid">
+      <label>名称</label><input id="rc-name" placeholder="每日早报" />
+      <label>频率</label><span class="mx-row">
+        <select id="rc-freq" class="skin-select"><option value="day">每天</option><option value="work">工作日</option><option value="week">每周</option><option value="cron">自定义 cron</option></select>
+        <select id="rc-wd" class="skin-select">${WEEK.map((w, i) => `<option value="${i}" ${i === 1 ? "selected" : ""}>周${w}</option>`).join("")}</select>
+        <input id="rc-time" type="time" value="09:00" />
+        <input id="rc-cron" placeholder="0 9 * * *" style="display:none" />
+      </span>
+      <label>时区</label>${timezoneSelectHtml("rc-tz", "")}
+      <label>要做什么</label><textarea id="rc-prompt" rows="3" placeholder="生成今日早报…"></textarea>
+    </div>
+    <div class="hint">这是<strong>定时</strong>例行，默认不开 Webhook。需要入站链接请到例行页选「Webhook」页签单独创建。</div>
+    <div class="tk-err hint"></div>
+    <div class="actions"><button class="ghost-btn" id="rc-cancel">取消</button><button class="primary-btn" id="rc-ok">创建定时</button></div>`;
+  const sync = () => {
+    const v = body.querySelector("#rc-freq").value;
+    body.querySelector("#rc-wd").style.display = v === "week" ? "" : "none";
+    body.querySelector("#rc-time").style.display = v === "cron" ? "none" : "";
+    body.querySelector("#rc-cron").style.display = v === "cron" ? "" : "none";
+  };
+  body.querySelector("#rc-freq").onchange = sync; sync();
+  body.querySelector("#rc-cancel").onclick = closeModal;
+  body.querySelector("#rc-ok").onclick = async () => {
+    const err = body.querySelector(".tk-err");
+    const prompt = body.querySelector("#rc-prompt").value.trim();
+    if (!prompt) { err.textContent = "写一下要做什么"; return; }
+    const [hh, mm] = body.querySelector("#rc-time").value.split(":").map(Number);
+    const freq = body.querySelector("#rc-freq").value;
+    const cron = { day: `${mm} ${hh} * * *`, work: `${mm} ${hh} * * 1-5`, week: `${mm} ${hh} * * ${body.querySelector("#rc-wd").value}`, cron: body.querySelector("#rc-cron").value.trim() }[freq];
+    try {
+      await api.tasks.create({
+        botId: bot.id,
+        name: body.querySelector("#rc-name").value.trim() || prompt.slice(0, 16),
+        cron, prompt, source: "manual",
+        timezone: body.querySelector("#rc-tz")?.value || undefined,
+      });
+      closeModal();
+      if (currentBot) renderDetails(currentBot);
+    } catch (e) { err.textContent = errText(e); }
+  };
+}
+async function routineEditFlow(t, bot) {
+  const modal = sheet({ icon: "⏰", title: `编辑例行 · ${t.name}`, sub: bot?.name || "" });
+  const body = modal.querySelector(".mx-body");
+  body.innerHTML = `
+    <div class="mx-form mx-grid">
+      <label>名称</label><input id="re-name" value="${esc(t.name)}" />
+      <label>cron</label><input id="re-cron" value="${esc(t.cron)}" ${t.kind === "once" ? "disabled" : ""} />
+      <label>时区</label>${timezoneSelectHtml("re-tz", t.timezone || "")}
+      <label>指令</label><textarea id="re-prompt" rows="4">${esc(t.prompt || "")}</textarea>
+    </div>
+    <div class="tk-err hint"></div>
+    <div class="actions"><button class="ghost-btn" id="re-cancel">取消</button><button class="primary-btn" id="re-ok">保存</button></div>`;
+  body.querySelector("#re-cancel").onclick = closeModal;
+  body.querySelector("#re-ok").onclick = async () => {
+    try {
+      const patch = {
+        name: body.querySelector("#re-name").value.trim(),
+        prompt: body.querySelector("#re-prompt").value,
+        timezone: body.querySelector("#re-tz")?.value || "",
+      };
+      if (t.kind !== "once") patch.cron = body.querySelector("#re-cron").value.trim();
+      await api.tasks.update(t.id, patch);
+      closeModal();
+      if (currentBot) renderDetails(currentBot);
+    } catch (e) { body.querySelector(".tk-err").textContent = errText(e); }
+  };
 }
 async function tasksFlow() {
-  const modal = sheet({ icon: "⏰", title: "定时任务", sub: "到点自动唤醒 bot 去做事；一次性提醒会让宠物冒气泡", wide: true });
+  const modal = sheet({ icon: "⏰", title: "例行", sub: "到点或 Webhook 唤醒 bot；可试跑、暂停、查看历史", wide: true });
   const body = modal.querySelector(".mx-body");
   let mode = "repeat";
+  const stop = () => offTasks?.();
   const render = async () => {
+    if (!modal.isConnected) return stop();
     const tasks = await api.tasks.list();
     const sel = currentBot?.id ?? bots[0]?.id;
     body.innerHTML = `${notifyBlocked ? NOTIFY_HINT() : ""}
       <div class="d-sec mx-form">
-        <div class="mx-seg"><button data-mode="repeat" class="${mode === "repeat" ? "on" : ""}">周期任务</button><button data-mode="once" class="${mode === "once" ? "on" : ""}">一次性提醒</button></div>
+        <div class="mx-seg">
+          <button data-mode="repeat" class="${mode === "repeat" ? "on" : ""}">定时</button>
+          <button data-mode="once" class="${mode === "once" ? "on" : ""}">一次性</button>
+          <button data-mode="webhook" class="${mode === "webhook" ? "on" : ""}">Webhook</button>
+        </div>
         <div class="mx-grid">
           <label>交给</label><select id="tk-bot" class="skin-select">${botOptions(sel)}</select>
           ${mode === "repeat" ? `
@@ -618,23 +1065,45 @@ async function tasksFlow() {
             <input id="tk-cron" placeholder="0 9 * * *" />
           </span>
           <label>任务名</label><input id="tk-name" placeholder="每日早报" />
-          <label>要做什么</label><textarea id="tk-prompt" rows="2" placeholder="生成今日早报：国内外要闻 5 条，各一句话"></textarea>` : `
+          <label>要做什么</label><textarea id="tk-prompt" rows="2" placeholder="生成今日早报：国内外要闻 5 条，各一句话"></textarea>` : mode === "webhook" ? `
+          <label>名称</label><input id="tk-name" placeholder="Webhook 执行 message 任务" value="Webhook 执行 message 任务" />
+          <label>指令</label><textarea id="tk-prompt" rows="4">${esc(DEFAULT_HOOK_PROMPT)}</textarea>
+          <label></label><div class="hint">只在收到 Webhook 时跑，不会按点执行。创建后可复制 POST / 密钥。</div>` : `
           <label>多久后</label><span class="mx-row"><input id="tk-after" type="number" min="1" value="15" class="mx-num" /> 分钟</span>
           <label>提醒内容</label><input id="tk-text" placeholder="喝水、起来活动一下" />
           <label></label><label class="chk"><input id="tk-pet" type="checkbox" checked /> 让宠物冒气泡提醒</label>`}
         </div>
         <div class="tk-err hint"></div>
-        <div class="actions"><button class="primary-btn" id="tk-add">${mode === "repeat" ? "添加任务" : "添加提醒"}</button></div>
+        <div class="actions"><button class="primary-btn" id="tk-add">${mode === "repeat" ? "添加定时" : mode === "webhook" ? "创建 Webhook 例行" : "添加提醒"}</button></div>
       </div>
-      <div class="d-sec"><h4>全部任务 · ${tasks.length}</h4>
-        ${tasks.map((t) => `
-          <div class="d-card" data-id="${esc(t.id)}">
-            <div class="c-main"><div class="c-title">${esc(t.name)} <span class="tag">${esc(botById(t.botId)?.name ?? "已删除的 bot")}</span></div>
-              <div class="c-sub">${t.kind === "once" ? `🔔 一次性 · ${t.nextRunAt ? new Date(t.nextRunAt).toLocaleString("zh-CN", { hour12: false }) : "已触发"}` : `${esc(describeCron(t.cron))}${t.nextRunAt && t.enabled ? ` · 下次 ${esc(fmtTime(t.nextRunAt))}` : ""}`} · 已运行 ${t.runCount ?? 0} 次${t.lastResult ? ` · 上次${t.lastResult === "ok" ? "成功" : "失败"}` : ""}</div></div>
-            <button class="icon-btn" data-op="run" title="立即执行">⚡</button>
-            <button class="icon-btn" data-op="del" title="删除">✕</button>
-            <label class="switch" title="启用"><input type="checkbox" data-op="toggle" ${t.enabled ? "checked" : ""}/><span></span></label>
-          </div>`).join("") || `<div class="d-empty">还没有定时任务。也可以直接对 bot 说「每天早上 9 点给我发早报」</div>`}
+      <div class="d-sec"><h4>全部例行 · ${tasks.length}</h4>
+        <div class="hint" style="margin-bottom:8px">对齐 Grok：<b>定时</b>与 <b>Webhook</b> 分开建。定时默认没有入站链接；Webhook 页签才生成。<br/>
+          ⚡ 试跑 · 📋 历史 · 🪝 仅已开通时显示 · 开关＝整条例行暂停</div>
+        ${tasks.map((t) => {
+          const hist = (t.history || []).slice(-5).reverse();
+          const lastLabel = t.lastResult === "ok" ? "上次成功"
+            : t.lastResult === "error" ? "上次失败"
+            : t.lastResult === "running" ? "正在执行…"
+            : t.lastResult ? `上次 ${t.lastResult}` : "";
+          const kindTag = t.webhookToken
+            ? (t.schedule === false ? "仅 Webhook" : "定时+Webhook")
+            : "定时";
+          return `
+          <div class="d-card" data-id="${esc(t.id)}" style="flex-wrap:wrap">
+            <div class="c-main"><div class="c-title">${esc(t.name)} <span class="tag">${esc(botById(t.botId)?.name ?? "已删除的 bot")}</span> <span class="tag">${esc(kindTag)}</span>${t.source === "demo" ? ' <span class="tag">演示</span>' : ""}</div>
+              <div class="c-sub">${esc(routineWhen(t))} · 已运行 ${t.runCount ?? 0} 次${lastLabel ? ` · ${lastLabel}` : ""}</div></div>
+            <button class="icon-btn" data-op="run" title="立刻试跑一次（不等到点；后台执行）" ${t.lastResult === "running" ? "disabled" : ""}>⚡</button>
+            <button class="icon-btn" data-op="hist" title="查看最近运行记录">📋</button>
+            ${t.webhookToken
+              ? `<button class="icon-btn" data-op="hook" title="查看 Webhook">🪝</button>`
+              : `<button class="icon-btn" data-op="hook" title="可选：为此例行开通 Webhook">＋</button>`}
+            <button class="icon-btn" data-op="del" title="删除这条例行">✕</button>
+            <label class="switch" title="${t.enabled ? "暂停整条例行" : "启用"}"><input type="checkbox" data-op="toggle" ${t.enabled ? "checked" : ""}/><span></span></label>
+            <div class="routine-hist hidden" data-hist="${esc(t.id)}">${hist.length
+              ? hist.map((h) => `<div class="hint">${esc(fmtTime(h.ranAt))} · ${h.ok ? "✅" : "❌"}${h.error ? ` ${esc(h.error.slice(0, 80))}` : ""}</div>`).join("")
+              : `<div class="hint">还没有运行记录</div>`}</div>
+          </div>`;
+        }).join("") || `<div class="d-empty">还没有例行。也可以直接对 bot 说「每天早上 9 点给我发早报」</div>`}
       </div>`;
     body.querySelectorAll("[data-mode]").forEach((b) => (b.onclick = () => { mode = b.dataset.mode; render(); }));
     const freq = body.querySelector("#tk-freq");
@@ -657,7 +1126,19 @@ async function tasksFlow() {
           const cron = { day: `${mm} ${hh} * * *`, work: `${mm} ${hh} * * 1-5`, week: `${mm} ${hh} * * ${body.querySelector("#tk-wd").value}`, month: `${mm} ${hh} ${body.querySelector("#tk-md").value} * *`, hour: `${m % 60} * * * *`, every: `*/${m} * * * *`, cron: body.querySelector("#tk-cron").value.trim() }[freq.value];
           const prompt = body.querySelector("#tk-prompt").value.trim();
           if (!prompt) { err.textContent = "写一下要做什么"; return; }
+          // 纯定时：绝不带 webhook
           await api.tasks.create({ botId, name: body.querySelector("#tk-name").value.trim() || prompt.slice(0, 16), cron, prompt });
+        } else if (mode === "webhook") {
+          const prompt = body.querySelector("#tk-prompt").value.trim() || DEFAULT_HOOK_PROMPT;
+          const name = body.querySelector("#tk-name").value.trim() || "Webhook 执行 message 任务";
+          // 仅 Webhook：开通令牌 + 关闭到点调度
+          const t = await api.tasks.create({
+            botId, name, prompt, cron: "0 0 1 1 *", webhook: true, schedule: false, source: "manual",
+          });
+          render();
+          if (currentBot) renderDetails(currentBot);
+          if (t?.id) await manageRoutineWebhook(t.id);
+          return;
         } else {
           const text = body.querySelector("#tk-text").value.trim() || "时间到了";
           await api.tasks.create({ botId, name: `🔔 ${text}`, cron: "* * * * *", prompt: text, kind: "once", alarmAt: Date.now() + Math.max(1, Number(body.querySelector("#tk-after").value) || 15) * 60_000, notifyPet: body.querySelector("#tk-pet").checked });
@@ -668,9 +1149,21 @@ async function tasksFlow() {
     };
     body.querySelectorAll(".d-card[data-id]").forEach((card) => {
       const id = card.dataset.id;
-      card.querySelector('[data-op="run"]').onclick = async (e) => { e.target.textContent = "…"; await api.tasks.runNow(id); render(); };
+      card.querySelector('[data-op="run"]').onclick = async (e) => {
+        const btn = e.currentTarget;
+        btn.disabled = true;
+        btn.textContent = "…";
+        try { await api.tasks.runNow(id); } catch (err) { alert(errText(err)); }
+        render();
+      };
+      card.querySelector('[data-op="hist"]').onclick = () => card.querySelector(`[data-hist="${id}"]`)?.classList.toggle("hidden");
+      card.querySelector('[data-op="hook"]').onclick = async () => {
+        await manageRoutineWebhook(id);
+        render();
+        if (currentBot) renderDetails(currentBot);
+      };
       card.querySelector('[data-op="del"]').onclick = async () => {
-        if (!confirm("删除这个任务？")) return;
+        if (!confirm("删除这个例行？")) return;
         await api.tasks.remove(id);
         render();
         if (currentBot) renderDetails(currentBot);
@@ -678,6 +1171,14 @@ async function tasksFlow() {
       card.querySelector('[data-op="toggle"]').onchange = (e) => api.tasks.setEnabled(id, e.target.checked);
     });
   };
+  const offTasks = api.onAppChanged?.((what) => {
+    if (what === "tasks" || !what) render();
+  });
+  const closeBtn = modal.querySelector(".mx-close");
+  if (closeBtn) {
+    const prev = closeBtn.onclick;
+    closeBtn.onclick = () => { stop(); prev?.(); };
+  }
   render();
 }
 
@@ -733,6 +1234,7 @@ async function mcpFlow() {
           <div class="c-main"><div class="c-title">电脑操控 <span class="tag">内置</span></div>
             <div class="c-sub">看屏幕、点按钮、打字（辅助功能树，不抢鼠标）。打开开关会自动装好运行时、自检，并引导开权限。</div>
             ${cuBusy ? `<div class="hint">${esc(cuProgress || "处理中…")}</div>` : steps}
+            ${cu?.enabled && !cu.permissions?.accessibility ? `<div class="hint">辅助功能未生效：系统里勾的「Electron」常是另一份签名。请点「开辅助功能」让当前进程登记，完全退出后再开；若仍不行，把 Electron.app 拖进辅助功能列表。电脑操控点控还会走 Python 运行时，必要时也要给它授权。</div>` : ""}
             ${cu?.doctor && cu.enabled ? `<div class="hint" title="${esc(cu.doctor)}">自检：${esc(cu.doctor.slice(0, 120))}${cu.doctor.length > 120 ? "…" : ""}</div>` : ""}
             ${cu?.error && cu.enabled ? `<div class="hint" style="color:#b42318">✕ ${esc(cu.error)}</div>` : ""}
           </div>
@@ -816,51 +1318,128 @@ async function mcpFlow() {
 }
 
 /* ---- 群组 ---- */
-async function groupsFlow() {
-  const modal = sheet({ icon: "👥", title: "群聊", sub: "拉几个 bot 建群：你发一句，成员轮流接话，可以互相 @ 接力讨论" });
+/** 组队模板（与 core/group-onboard.ts 同步；UI 侧不 import core） */
+const GROUP_STARTERS_UI = [
+  { id: "research-write", name: "调研写作组", blurb: "一人挖资料，一人成文；用 @ 交接。", goal: "先调研再成文：明确主题与受众 → 收集要点与来源 → 提纲确认后写完整稿。成员用 @ 交接，不要假装并行。", roleHints: ["调研", "研究", "搜索", "写作", "文案", "编辑", "报告"] },
+  { id: "triage", name: "分诊评审组", blurb: "复述需求 → 谁合适 → 定下一步。", goal: "分诊用户需求：复述约束 → 候选负责人与理由 → 简单任务 bot.ask，多人同场用 @ 交接 → 回执谁负责、下一步、何时更新。", roleHints: ["产品", "工程", "开发", "风险", "评审", "主控", "助手"] },
+  { id: "daily-review", name: "日报复盘组", blurb: "主持串场，成员补完成/风险/明日。", goal: "日报复盘：主持人串场收集今日完成、进行中、风险阻塞、明日计划；结构输出 Markdown，不编造未确认事项。", roleHints: ["主持", "记录", "秘书", "助理", "主控", "助手"] },
+];
+
+function pickGroupMembersUI(starter, fallbackIds = []) {
+  const scored = bots.map((b) => {
+    const blob = `${b.name} ${b.role || ""}`.toLowerCase();
+    const hits = starter.roleHints.filter((h) => blob.includes(h.toLowerCase())).length;
+    return { id: b.id, hits };
+  }).filter((x) => x.hits > 0).sort((a, b) => b.hits - a.hits);
+  const out = [];
+  for (const x of scored) { if (out.length >= 4) break; if (!out.includes(x.id)) out.push(x.id); }
+  for (const id of fallbackIds) { if (out.length >= 2) break; if (!out.includes(id)) out.push(id); }
+  for (const b of bots) { if (out.length >= 2) break; if (!out.includes(b.id)) out.push(b.id); }
+  return out;
+}
+
+async function openCreatedGroup(g) {
+  await refreshBots();
+  const ng = groupList.find((x) => x.id === g.id) ?? g;
+  await selectGroup(ng, g.welcomeSessionId || undefined);
+}
+
+async function groupsFlow(opts = {}) {
+  const GROUP_MAX_MEMBERS = 6;
+  if (bots.length < 2) {
+    alert("至少需要 2 个 bot 才能建群。先去新建几个 bot。");
+    if (typeof createBotFlow === "function") createBotFlow();
+    return;
+  }
+  const modal = sheet({ icon: "👥", title: "群聊", sub: "组队做事：选模板或自建；@ 谁谁回，没 @ 由主持人先说（每群最多 6 人）" });
   const body = modal.querySelector(".mx-body");
-  const picked = new Set(currentBot ? [currentBot.id] : []);
+  const picked = new Set(opts.memberIds?.length ? opts.memberIds : (currentBot ? [currentBot.id] : []));
+  let starterId = opts.starterId || "";
+  let goalDraft = opts.goal || "";
   const render = async () => {
     const gs = await api.groups.list();
+    const starter = GROUP_STARTERS_UI.find((s) => s.id === starterId);
     body.innerHTML = `
+      <div class="d-sec"><h4>组队模板</h4>
+        <div class="gf-starters">${GROUP_STARTERS_UI.map((s) => `
+          <button type="button" class="gf-starter ${starterId === s.id ? "on" : ""}" data-sid="${esc(s.id)}">
+            <b>${esc(s.name)}</b><span>${esc(s.blurb)}</span>
+          </button>`).join("")}</div>
+        <div class="hint">点模板会预填群名、目标，并按角色关键词建议成员；仍可改。</div>
+      </div>
       <div class="d-sec mx-form"><h4>新建群聊</h4>
-        <input id="gf-name" placeholder="群名，例如「产品组」" />
+        <input id="gf-name" placeholder="群名，例如「产品组」" value="${esc(starter?.name || "")}" />
+        <textarea id="gf-goal" rows="2" placeholder="群目标（可选，会注入每位成员的提示）">${esc(goalDraft || starter?.goal || "")}</textarea>
         <div class="gf-members">${bots.map((b) => `<button class="gf-m ${picked.has(b.id) ? "on" : ""}" data-id="${esc(b.id)}"><span class="bot-avatar">${avatarHtml(b)}</span>${esc(b.name)}</button>`).join("")}</div>
         <div class="gf-err hint"></div>
-        <div class="actions"><button class="primary-btn" id="gf-add">创建（已选 ${picked.size} 个）</button></div>
+        <div class="actions"><button class="primary-btn" id="gf-add">创建（已选 ${picked.size}/${GROUP_MAX_MEMBERS}）</button></div>
       </div>
       <div class="d-sec"><h4>已有群聊 · ${gs.length}</h4>
         ${gs.map((g) => `
           <div class="d-card gf-card" data-id="${esc(g.id)}" style="cursor:pointer">
             <div class="group-avatars">${g.members.map(botById).filter(Boolean).slice(0, 3).map((m) => `<span>${avatarHtml(m)}</span>`).join("") || "<span>👥</span>"}</div>
-            <div class="c-main"><div class="c-title">${esc(g.name)}</div><div class="c-sub">${g.members.map((m) => esc(botById(m)?.name || "?")).join("、")}</div></div>
+            <div class="c-main"><div class="c-title">${esc(g.name)}</div><div class="c-sub">${g.settings?.goal ? esc(g.settings.goal.slice(0, 48)) + (g.settings.goal.length > 48 ? "…" : "") : g.members.map((m) => esc(botById(m)?.name || "?")).join("、")}</div></div>
             <button class="ghost-btn danger-text" data-del>解散</button>
-          </div>`).join("") || `<div class="d-empty">还没有群聊</div>`}
+          </div>`).join("") || `<div class="d-empty">还没有群聊。用上面的模板组队最快。</div>`}
       </div>`;
     const nameEl = body.querySelector("#gf-name");
+    const goalEl = body.querySelector("#gf-goal");
+    body.querySelectorAll(".gf-starter").forEach((btn) => (btn.onclick = () => {
+      starterId = btn.dataset.sid;
+      const s = GROUP_STARTERS_UI.find((x) => x.id === starterId);
+      if (s) {
+        goalDraft = s.goal;
+        picked.clear();
+        for (const id of pickGroupMembersUI(s, currentBot ? [currentBot.id] : [])) picked.add(id);
+      }
+      render();
+    }));
     body.querySelectorAll(".gf-m").forEach((b) => (b.onclick = () => {
+      if (!picked.has(b.dataset.id) && picked.size >= GROUP_MAX_MEMBERS) {
+        body.querySelector(".gf-err").textContent = `一个群最多 ${GROUP_MAX_MEMBERS} 个成员`;
+        return;
+      }
       picked.has(b.dataset.id) ? picked.delete(b.dataset.id) : picked.add(b.dataset.id);
+      goalDraft = goalEl.value;
       const v = nameEl.value;
-      render().then(() => (body.querySelector("#gf-name").value = v));
+      const sid = starterId;
+      render().then(() => {
+        body.querySelector("#gf-name").value = v;
+        starterId = sid;
+      });
     }));
     body.querySelector("#gf-add").onclick = async () => {
       const name = body.querySelector("#gf-name").value.trim();
+      const goal = body.querySelector("#gf-goal").value.trim();
       const err = body.querySelector(".gf-err");
       if (!name) { err.textContent = "起个群名"; return; }
       if (picked.size < 2) { err.textContent = "至少选 2 个成员"; return; }
+      if (picked.size > GROUP_MAX_MEMBERS) { err.textContent = `一个群最多 ${GROUP_MAX_MEMBERS} 个成员`; return; }
       const members = bots.map((b) => b.id).filter((id) => picked.has(id));
-      const g = await api.groups.create(name, members);
+      let g;
+      try {
+        g = await api.groups.create(name, members, {
+          settings: goal ? { goal, relay: true } : { relay: true },
+          starterId: starterId || undefined,
+        });
+      } catch (e) { err.textContent = e?.message || String(e); return; }
       closeModal();
-      await refreshBots();
-      selectGroup(groupList.find((x) => x.id === g.id) ?? g);
+      await openCreatedGroup(g);
     };
     body.querySelectorAll(".gf-card").forEach((card) => (card.onclick = async (e) => {
       const id = card.dataset.id;
       if (e.target.closest("[data-del]")) {
         if (!confirm("解散这个群聊？（聊天记录保留）")) return;
         await api.groups.remove(id);
-        if (currentGroup?.id === id) { currentGroup = null; currentSession = null; clearMessages(); $("#chat-bar").classList.add("hidden"); $("#empty-state").style.display = ""; }
+        if (currentGroup?.id === id) {
+          currentGroup = null;
+          currentSession = null;
+          renderRelayBar();
+          clearMessages();
+          $("#chat-bar").classList.add("hidden");
+        }
         await refreshBots();
+        if (!currentBot && !currentGroup) await renderEmptyState();
         return render();
       }
       closeModal();
@@ -869,188 +1448,172 @@ async function groupsFlow() {
       if (g) selectGroup(g);
     }));
   };
+  if (opts.starterId) {
+    const s = GROUP_STARTERS_UI.find((x) => x.id === opts.starterId);
+    if (s && picked.size < 2) {
+      for (const id of pickGroupMembersUI(s, [...picked])) picked.add(id);
+    }
+  }
   render();
 }
 
-/* ---- 编排 ---- */
-async function plansFlow() {
-  const modal = sheet({ icon: "🧩", title: "编排", sub: "一句话让几个 bot 按阶段接力完成一件事，前一阶段的产出交给下一阶段", wide: true });
-  const body = modal.querySelector(".mx-body");
-  const STATUS = { done: "已完成", error: "失败", running: "进行中", pending: "未开始" };
-  const ICON = { done: "✓", error: "✕", running: "", pending: "○" };
-  /** 用户手动展开的结果 / 阶段产出（plan.id 或 stage.id），刷新时保持 */
-  const opened = new Set();
-  const cardErr = new Map();
-  let plans = [];
-  const sigs = new Map();
-  body.innerHTML = `
-    <div class="d-sec mx-form">
-      <textarea id="pl-text" rows="2" placeholder="例如：让 ${esc(bots[0]?.name || "A")} 调研竞品，${esc(bots[1]?.name || "B")} 总结要点，${esc(bots[2]?.name || "C")} 写成报告"></textarea>
-      <div class="mx-chips">${bots.map((b) => `<button class="mx-chip" data-name="${esc(b.name)}">＋ ${esc(b.name)}</button>`).join("")}</div>
-      <div class="pl-err hint"></div>
-      <div class="actions"><button class="primary-btn" id="pl-go">拆解并运行</button></div>
-    </div>
-    <div class="d-sec"><h4>计划 · <span id="pl-count">0</span></h4><div id="pl-list"></div></div>`;
-  const ta = body.querySelector("#pl-text");
-  const list = body.querySelector("#pl-list");
-  const dur = (ms) => { const s = Math.max(0, Math.round(ms / 1000)); return s < 60 ? `${s} 秒` : `${Math.floor(s / 60)} 分 ${s % 60} 秒`; };
-  const liveText = (t) => (t || "").replace(/```tool[\s\S]*?(```|$)/g, "").trim();
-  const sigOf = (p) => JSON.stringify([p.status, p.result, p.stages.map((st) => [st.status, st.error, !!st.result])]);
-
-  const stepHtml = (p, st, i) => {
-    const bot = botById(st.botId);
-    const time = st.status === "running" && st.startedAt ? `<span class="pl-time" data-since="${st.startedAt}">${dur(Date.now() - st.startedAt)}</span>`
-      : st.startedAt && st.finishedAt ? `<span class="pl-time">${dur(st.finishedAt - st.startedAt)}</span>` : "";
-    let extra = "";
-    if (st.status === "running") {
-      const t = liveText(st.live);
-      extra = `<div class="pl-activity" data-act="${esc(st.id)}">${esc(st.activity || (t ? "正在写…" : "思考中…"))}</div>
-        <div class="pl-live ${t ? "" : "empty"}" data-live="${esc(st.id)}">${esc(t)}</div>`;
-    } else if (st.status === "error" && st.error) {
-      extra = `<div class="pl-step-err">${esc(st.error)}</div>`;
-    } else if (st.status === "done" && st.result) {
-      extra = `<details class="pl-out" data-key="${esc(st.id)}" ${opened.has(st.id) ? "open" : ""}><summary>这一步的产出</summary><div class="pl-md">${renderMarkdown(esc(st.result))}</div></details>`;
-    }
-    const ownerId = st.ownerBotId || st.botId;
-    const owner = botById(ownerId);
-    const ownerTag = ownerId !== st.botId
-      ? `<span class="tag" title="已移交">负责人 ${esc(owner?.name || ownerId)}</span>`
-      : "";
-    const note = st.handOffNote ? `<div class="hint">移交：${esc(st.handOffNote)}</div>` : "";
-    return `<div class="pl-step s-${esc(st.status)}">
-      <div class="pl-step-row"><span class="pl-dot">${ICON[st.status] ?? "○"}</span>
-        <span class="pl-step-bot">${i + 1}. ${esc(bot?.name || "已删除的 bot")}${st.mode === "fan" ? '<span class="tag">并行</span>' : ""}${ownerTag}</span>
-        <span class="pl-step-prompt" title="${esc(st.prompt || "")}">${esc(st.prompt || "")}</span>${time}</div>${note}${extra}</div>`;
-  };
-
-  const cardHtml = (p) => {
-    const running = p.status === "running";
-    const doneN = p.stages.filter((st) => st.status === "done").length;
-    const label = p.status === "error" && p.result === "（已取消）" ? "已取消" : STATUS[p.status] ?? p.status;
-    const total = p.startedAt && p.finishedAt ? ` · 用时 ${dur(p.finishedAt - p.startedAt)}` : "";
-    const failed = p.status === "error";
-    const result = !p.result ? "" : failed
-      ? `<div class="pl-step-err">${esc(p.result)}</div>`
-      : `<details class="pl-result" data-key="${esc(p.id)}" ${opened.has(p.id) ? "open" : ""}><summary>最终结果</summary><div class="pl-md">${renderMarkdown(esc(p.result))}</div><button class="ghost-btn" data-op="copy">复制结果</button></details>`;
-    return `<div class="pl-card ${running ? "running" : ""}" data-id="${esc(p.id)}">
-      <div class="pl-head"><b title="${esc(p.title)}">${esc(p.title)}</b>
-        <span class="pl-st st-${esc(p.status)}">${esc(label)}${running ? ` · ${doneN}/${p.stages.length}` : ""}${(() => {
-          const cur = p.stages.find((s) => s.status === "running") || p.stages.find((s) => s.status === "pending");
-          if (!cur) return "";
-          const oid = cur.ownerBotId || cur.botId;
-          const on = botById(oid)?.name || oid;
-          return ` · 当前负责人 ${esc(on)}`;
-        })()}</span>
-        ${running && p.startedAt ? `<span class="pl-time" data-since="${p.startedAt}">${dur(Date.now() - p.startedAt)}</span>` : total ? `<span class="pl-time">${esc(total.slice(3))}</span>` : ""}
-        <span class="mx-ops">${running ? `<button class="ghost-btn" data-op="cancel">停止</button>` : `<button class="ghost-btn" data-op="run">${p.status === "pending" ? "运行" : "重新运行"}</button><button class="icon-btn" data-op="del" title="删除">✕</button>`}</span></div>
-      ${running ? `<div class="pl-bar"><i style="width:${Math.round((doneN / p.stages.length) * 100)}%"></i></div>` : ""}
-      <div class="pl-steps">${p.stages.map((st, i) => stepHtml(p, st, i)).join("")}</div>
-      ${result}
-      ${cardErr.get(p.id) ? `<div class="pl-step-err">${esc(cardErr.get(p.id))}</div>` : ""}
-    </div>`;
-  };
-
-  const bindCard = (card) => {
-    card.querySelectorAll("details[data-key]").forEach((d) => d.addEventListener("toggle", () => {
-      if (d.open) opened.add(d.dataset.key); else opened.delete(d.dataset.key);
-    }));
-    card.querySelectorAll(".pl-live").forEach((el) => (el.scrollTop = el.scrollHeight));
-  };
-  const renderCard = (p) => {
-    sigs.set(p.id, sigOf(p));
-    const old = list.querySelector(`.pl-card[data-id="${CSS.escape(p.id)}"]`);
-    if (!old) return renderAll();
-    old.outerHTML = cardHtml(p);
-    bindCard(list.querySelector(`.pl-card[data-id="${CSS.escape(p.id)}"]`));
-  };
-  const renderAll = () => {
-    body.querySelector("#pl-count").textContent = plans.length;
-    list.innerHTML = plans.map(cardHtml).join("") || `<div class="d-empty">还没有编排计划</div>`;
-    plans.forEach((p) => sigs.set(p.id, sigOf(p)));
-    list.querySelectorAll(".pl-card").forEach(bindCard);
-  };
-  /** 只有实时产出变了：原地更新文字，不重画卡片（不打断阅读和滚动） */
-  const patchLive = (p) => {
-    for (const st of p.stages) {
-      if (st.status !== "running") continue;
-      const t = liveText(st.live);
-      const el = list.querySelector(`[data-live="${CSS.escape(st.id)}"]`);
-      if (el && el.textContent !== t) {
-        const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
-        el.textContent = t;
-        el.classList.toggle("empty", !t);
-        if (atBottom) el.scrollTop = el.scrollHeight;
-      }
-      const act = list.querySelector(`[data-act="${CSS.escape(st.id)}"]`);
-      if (act) act.textContent = st.activity || (t ? "正在写…" : "思考中…");
-    }
-  };
-  const apply = (p) => {
-    const i = plans.findIndex((x) => x.id === p.id);
-    const prev = plans[i];
-    if (i < 0) { plans.unshift(p); return renderAll(); }
-    plans[i] = p;
-    if (prev.status === "running" && p.status === "done") opened.add(p.id);
-    if (sigs.get(p.id) !== sigOf(p)) renderCard(p); else patchLive(p);
-  };
-  const refresh = async () => { plans = await api.plans.list(); renderAll(); };
-
-  const start = async (id) => {
-    cardErr.delete(id);
-    const p = plans.find((x) => x.id === id);
-    if (p) {
-      p.status = "running";
-      p.result = undefined;
-      p.startedAt = Date.now();
-      p.finishedAt = undefined;
-      p.stages = p.stages.map((st) => ({ ...st, status: "pending", result: undefined, error: undefined, startedAt: undefined, finishedAt: undefined, live: undefined, activity: undefined }));
-      opened.delete(id);
-      p.stages.forEach((st) => opened.delete(st.id));
-      renderCard(p);
-    }
-    try { apply(await api.plans.run(id)); }
-    catch (x) { cardErr.set(id, errText(x)); await refresh(); }
-  };
-
-  body.querySelectorAll("[data-name]").forEach((b) => (b.onclick = () => { ta.value += (ta.value && !/[，,\s]$/.test(ta.value) ? "，" : "") + `让 ${b.dataset.name} `; ta.focus(); }));
-  const go = body.querySelector("#pl-go");
-  go.onclick = async () => {
-    const text = ta.value.trim();
-    const err = body.querySelector(".pl-err");
-    err.textContent = "";
-    if (!text) { err.textContent = "写一下要做什么、交给谁"; return; }
-    go.disabled = true;
-    go.textContent = "正在拆解成阶段…";
-    try {
-      const plan = await api.plans.createFromText(text);
-      ta.value = "";
-      plans.unshift(plan);
-      renderAll();
-      list.scrollIntoView({ block: "start", behavior: "smooth" });
-      void start(plan.id);
-    } catch (x) { err.textContent = errText(x); }
-    go.disabled = false;
-    go.textContent = "拆解并运行";
-  };
-  list.onclick = async (e) => {
-    const btn = e.target.closest("button[data-op]");
-    if (!btn) return;
-    const id = btn.closest(".pl-card").dataset.id;
-    const op = btn.dataset.op;
-    if (op === "copy") { api.system.copy(plans.find((p) => p.id === id)?.result ?? ""); btn.textContent = "已复制"; }
-    if (op === "cancel") { btn.disabled = true; btn.textContent = "正在停止…"; await api.plans.cancel(id); }
-    if (op === "del") { if (!confirm("删除这个计划？")) return; await api.plans.remove(id); await refresh(); }
-    if (op === "run") void start(id);
-  };
-
-  const offUpdate = api.onPlanUpdate((p) => { if (!modal.isConnected) return stop(); apply(p); });
-  const tick = setInterval(() => {
-    if (!modal.isConnected) return stop();
-    list.querySelectorAll("[data-since]").forEach((el) => (el.textContent = dur(Date.now() - Number(el.dataset.since))));
-  }, 1000);
-  function stop() { offUpdate(); clearInterval(tick); }
-  await refresh();
+function soLogo(id, size = 28) {
+  const brand = id?.brand || "unknown";
+  const mark = esc(id?.mark || "·");
+  const label = esc(id?.label || "");
+  if (id?.iconDataUrl) {
+    return `<span class="so-logo so-logo-${size}" title="${label}"><img src="${esc(id.iconDataUrl)}" alt="${label}" /></span>`;
+  }
+  return `<span class="so-logo so-logo-${size} so-brand-${esc(brand)}" title="${label}" aria-label="${label}"><span class="so-mark">${mark}</span></span>`;
 }
+
+function soKindTag(kind) {
+  const map = { app: "软件", cli: "命令行", system: "系统盘", unknown: "进程", data: "数据盘", external: "外置", network: "网络", other: "卷" };
+  return map[kind] || kind || "";
+}
+
+/* ---- 系统能力（本机权限总览；监听名单在 bot 详情） ---- */
+async function systemManageFlow() {
+  const modal = sheet({ icon: "🖥", title: "系统能力", sub: "本机权限与磁盘；要听哪些 App 请到 bot 详情「系统监听」", wide: false });
+  const body = modal.querySelector(".mx-body");
+  const render = async () => {
+    body.innerHTML = `<div class="d-empty">读取中…</div>`;
+    const st = await api.systemObserve?.status?.().catch(() => null);
+    if (!st) {
+      body.innerHTML = `<div class="d-empty">系统观察未就绪（需重建壳）</div>`;
+      return;
+    }
+    const c = st.caps || {};
+    const front = st.snap?.frontmost || {};
+    const frontId = front.identity ? { ...front.identity, iconDataUrl: front.iconDataUrl || front.identity.iconDataUrl } : null;
+    const disk = (st.snap?.disk || []).filter((d) => d.mount === "/" || d.mount.includes("Data")).slice(0, 2);
+    const bot = currentBot;
+
+    body.innerHTML = `
+      <div class="d-sec">
+        <div class="sw-callout">
+          <div class="c-main">
+            <div class="c-title">监听名单挂在 bot 上</div>
+            <div class="c-sub">每个 bot 自己勾选要盯的 App；sys.* 默认按该名单。不在这里刷全机进程，避免打扰对话。</div>
+          </div>
+          <button class="primary-btn" id="so-bot-watch" ${bot ? "" : "disabled"}>${bot ? `打开「${esc(bot.name)}」监听` : "先选一个 bot"}</button>
+        </div>
+      </div>
+      <div class="d-sec"><h4>本机权限</h4>
+        <div class="so-cap-grid so-cap-compact">
+          <div class="so-cap"><span class="so-logo so-logo-28 so-brand-macos"><span class="so-mark">观</span></span><div><div class="so-cap-t">系统观察</div><div class="so-cap-s">sys.*</div></div><span class="tag on">开</span></div>
+          <div class="so-cap">${soLogo({ brand: "macos", mark: "AX", label: "辅助功能" }, 28)}<div><div class="so-cap-t">辅助功能</div></div>${c.accessibility ? '<span class="tag on">已授权</span>' : '<button class="ghost-btn" data-pref="accessibility">去授权</button>'}</div>
+          <div class="so-cap">${soLogo({ brand: "disk", mark: "SCR", label: "屏幕录制" }, 28)}<div><div class="so-cap-t">屏幕录制</div></div>${c.screen ? '<span class="tag on">已授权</span>' : '<button class="ghost-btn" data-pref="screen">去授权</button>'}</div>
+          <div class="so-cap">${soLogo({ brand: "electron", mark: "CU", label: "电脑操控" }, 28)}<div><div class="so-cap-t">电脑操控</div></div>${c.computerUse ? '<span class="tag on">已启用</span>' : '<button class="ghost-btn" id="so-cu">去打开</button>'}</div>
+        </div>
+      </div>
+      <div class="d-sec"><h4>此刻</h4>
+        <div class="d-card so-app-card sw-front-slim">
+          ${frontId ? soLogo(frontId, 28) : soLogo({ brand: "unknown", mark: "?", label: "未知" }, 28)}
+          <div class="c-main">
+            <div class="c-title">${esc(frontId?.label || front.name || "—")}</div>
+            <div class="c-sub">前台</div>
+          </div>
+        </div>
+        ${disk.map((d) => {
+          const warn = d.usedPct >= 85;
+          return `<div class="d-card so-disk-card ${warn ? "so-warn" : ""}" style="margin-top:6px">
+            ${soLogo({ brand: "disk", mark: "HD", label: d.mount }, 28)}
+            <div class="c-main">
+              <div class="c-title">${esc(d.mount)} · ${d.usedPct}%</div>
+              <div class="so-bar"><i style="width:${Math.min(100, d.usedPct)}%"></i></div>
+            </div>
+          </div>`;
+        }).join("")}
+      </div>
+      <div class="actions" style="margin-top:10px">
+        <button class="ghost-btn" id="so-refresh">刷新</button>
+        <button class="ghost-btn" id="so-auth">系统授权</button>
+      </div>`;
+    body.querySelectorAll("[data-pref]").forEach((b) => (b.onclick = () => api.system.openPrefs(b.dataset.pref)));
+    body.querySelector("#so-cu")?.addEventListener("click", () => { closeModal(); mcpFlow(); });
+    body.querySelector("#so-refresh")?.addEventListener("click", () => render());
+    body.querySelector("#so-auth")?.addEventListener("click", () => { closeModal(); sysaccessFlow(); });
+    body.querySelector("#so-bot-watch")?.addEventListener("click", () => {
+      if (!currentBot) return;
+      closeModal();
+      detailsTab = "info";
+      if (typeof revealDetailsAdvanced === "function") revealDetailsAdvanced();
+      toggleDetails(true);
+      requestAnimationFrame(() => document.getElementById("d-watch")?.scrollIntoView({ behavior: "smooth", block: "nearest" }));
+    });
+  };
+  await render();
+}
+
+/** bot 详情：手动勾选要监听的 App */
+async function pickWatchAppsFlow(botId) {
+  const bot = botById(botId);
+  if (!bot || !api.systemWatch) return;
+  const modal = sheet({ icon: "👁", title: `选择监听 · ${bot.name}`, sub: "勾选后，这个 bot 的 sys.observe / sys.processes 默认只盯这些 App", wide: true });
+  const body = modal.querySelector(".mx-body");
+  body.innerHTML = `<div class="d-empty">扫描 Applications…</div>`;
+  const [watch, installed] = await Promise.all([
+    api.systemWatch.get(botId).catch(() => ({ enabled: true, apps: [] })),
+    api.systemWatch.installedApps().catch(() => []),
+  ]);
+  const selected = new Set(watch.apps || []);
+  const SUGGEST = ["Cursor", "Codex", "Claude", "Visual Studio Code", "Terminal", "iTerm", "Google Chrome", "Safari", "WeChat", "飞书"];
+  const render = () => {
+    const q = (body.querySelector("#sw-q")?.value || "").trim().toLowerCase();
+    const rows = installed.filter((a) => !q || a.name.toLowerCase().includes(q));
+    const suggestHits = SUGGEST
+      .map((name) => installed.find((a) => a.name === name) || { name, brand: "unknown", mark: name.slice(0, 2) })
+      .filter((a, i, arr) => arr.findIndex((x) => x.name === a.name) === i);
+    body.innerHTML = `
+      <div class="sw-pick-head">
+        <input id="sw-q" class="skin-select" placeholder="搜索 App…" value="${esc(q)}" />
+        <span class="hint">已选 ${selected.size}</span>
+      </div>
+      <div class="sw-suggest">${suggestHits.map((a) => {
+        const on = selected.has(a.name);
+        return `<button type="button" class="sw-chip ${on ? "on" : ""}" data-toggle="${esc(a.name)}">${soLogo({ brand: a.brand, mark: a.mark || a.name.slice(0, 2), label: a.name, iconDataUrl: a.iconDataUrl }, 20)}<span>${esc(a.name)}</span></button>`;
+      }).join("")}</div>
+      <div class="sw-pick-list">
+        ${rows.map((a) => {
+          const on = selected.has(a.name);
+          return `<label class="sw-pick-row ${on ? "on" : ""}">
+            <input type="checkbox" data-name="${esc(a.name)}" ${on ? "checked" : ""} />
+            ${soLogo({ brand: a.brand, mark: a.mark || a.name.slice(0, 2), label: a.name, iconDataUrl: a.iconDataUrl }, 28)}
+            <span class="sw-pick-name">${esc(a.name)}</span>
+          </label>`;
+        }).join("") || `<div class="d-empty">没有匹配的 App</div>`}
+      </div>
+      <div class="actions" style="margin-top:10px">
+        <button class="ghost-btn" id="sw-cancel">取消</button>
+        <button class="primary-btn" id="sw-save">保存名单</button>
+      </div>`;
+    const qEl = body.querySelector("#sw-q");
+    let t = null;
+    qEl?.addEventListener("input", () => {
+      clearTimeout(t);
+      t = setTimeout(render, 120);
+    });
+    qEl?.focus();
+    if (q && qEl) qEl.setSelectionRange(q.length, q.length);
+    const toggle = (name) => {
+      if (selected.has(name)) selected.delete(name);
+      else selected.add(name);
+      render();
+    };
+    body.querySelectorAll("[data-toggle]").forEach((btn) => (btn.onclick = () => toggle(btn.dataset.toggle)));
+    body.querySelectorAll("input[data-name]").forEach((inp) => (inp.onchange = () => toggle(inp.dataset.name)));
+    body.querySelector("#sw-cancel").onclick = () => closeModal();
+    body.querySelector("#sw-save").onclick = async () => {
+      await api.systemWatch.set(botId, { apps: [...selected] });
+      closeModal();
+      if (typeof refreshWatchChip === "function") refreshWatchChip();
+      if (currentBot?.id === botId && typeof renderDetails === "function") renderDetails(currentBot);
+    };
+  };
+  render();
+}
+
 
 /* ---- 系统授权 ---- */
 async function sysaccessFlow() {
@@ -1071,8 +1634,9 @@ async function sysaccessFlow() {
           <button class="primary-btn" id="sa-cu">打开 MCP 里的开关</button></div>
       </div>
       <div class="d-sec"><h4>macOS 权限</h4>
-        <div class="d-card"><div class="c-main"><div class="c-title">辅助功能</div><div class="c-sub">bot 操作其他 App（点击、输入）需要</div></div>
-          ${tcc.accessibility ? '<span class="tag on">已授权</span>' : '<button class="ghost-btn" data-pref="accessibility">去授权</button>'}</div>
+        <div class="d-card"><div class="c-main"><div class="c-title">辅助功能</div><div class="c-sub">bot 操作其他 App（点击、输入）需要${tcc.accessibility ? "" : " · 列表里同名 Electron 开着也可能不是当前这份"}</div></div>
+          ${tcc.accessibility ? '<span class="tag on">已授权</span>' : '<span class="mx-row"><button class="ghost-btn" data-pref="accessibility">去授权</button><button class="ghost-btn" id="sa-reveal-e">显示 Electron.app</button></span>'}</div>
+        ${!tcc.accessibility && tcc.hint ? `<div class="hint">${esc(tcc.hint)}</div>` : ""}
         <div class="d-card"><div class="c-main"><div class="c-title">屏幕录制</div><div class="c-sub">bot 截屏看屏幕需要</div></div>
           ${tcc.screen ? '<span class="tag on">已授权</span>' : '<button class="ghost-btn" data-pref="screen">去授权</button>'}</div>
       </div>
@@ -1089,7 +1653,7 @@ async function sysaccessFlow() {
         </div>
       </div>
       <div class="d-sec"><h4>命令规则 · ${cmd.rules.length}</h4>
-        <div class="hint">「总是允许」的命令不再弹卡片；「禁止」的命令直接拦下。sudo、rm -rf / 这类危险命令不受规则影响，每次都要确认。</div>
+        <div class="hint">「总是允许」的命令不再弹卡片；「禁止」的命令直接拦下。Ask/Auto 下危险命令仍每次确认；Always 模式危险命令也会直接跑，除非这里禁止。</div>
         ${cmd.rules.map((r) => `
           <div class="d-card"><div class="c-main"><div class="c-title"><code>${esc(r.command)}</code> <span class="tag ${r.decision === "allow" ? "on" : ""}">${r.decision === "allow" ? "总是允许" : "禁止"}</span></div>
             <div class="c-sub">${esc(ruleBot(r.botId))} · ${esc(fmtTime(r.createdAt))}</div></div>
@@ -1102,11 +1666,18 @@ async function sysaccessFlow() {
         </div>
         <div class="ms-err hint" id="sa-rule-err"></div>
       </div>
-      <div class="d-sec"><h4>信任模式</h4>
-        <div class="hint">打开后这个 bot 执行命令不再逐个询问。禁止规则仍然生效，危险命令仍要你确认，所有操作照常记录。</div>
-        ${bots.map((b) => `
-          <div class="d-card"><div class="c-main"><div class="c-title">${esc(b.name)}</div><div class="c-sub">${cmd.trusted.includes(b.id) ? "命令直接执行" : "每个新命令先问你"}</div></div>
-            <label class="switch" title="信任模式"><input type="checkbox" data-trust="${esc(b.id)}" ${cmd.trusted.includes(b.id) ? "checked" : ""}/><span></span></label></div>`).join("")}
+      <div class="d-sec"><h4>权限模式</h4>
+        <div class="hint">Ask 全问 · Auto 安全自动过（危险仍问）· Always 基本全过。禁止规则始终生效，操作照常记录。</div>
+        ${bots.map((b) => {
+          const m = cmd.modes?.[b.id] || (cmd.trusted?.includes(b.id) ? "auto" : "ask");
+          return `
+          <div class="d-card"><div class="c-main"><div class="c-title">${esc(b.name)}</div><div class="c-sub">${esc(PERM_MODE_HINT[m] || PERM_MODE_HINT.ask)}</div></div>
+            <select class="skin-select" data-mode="${esc(b.id)}" data-prev="${esc(m)}">
+              <option value="ask" ${m === "ask" ? "selected" : ""}>Ask</option>
+              <option value="auto" ${m === "auto" ? "selected" : ""}>Auto</option>
+              <option value="always" ${m === "always" ? "selected" : ""}>Always</option>
+            </select></div>`;
+        }).join("")}
       </div>
       <div class="d-sec"><h4>操作记录 <span><select id="sa-filter" class="skin-select"><option value="">全部 bot</option>${botOptions(auditBot)}</select><button class="ghost-btn" id="sa-export">导出…</button></span></h4>
         <div class="sa-audit">${shown.map((ev) => `
@@ -1114,6 +1685,7 @@ async function sysaccessFlow() {
       </div>`;
     body.querySelector("#sa-cu")?.addEventListener("click", () => { closeModal(); mcpFlow(); });
     body.querySelectorAll("[data-pref]").forEach((b) => (b.onclick = () => api.system.openPrefs(b.dataset.pref)));
+    body.querySelector("#sa-reveal-e")?.addEventListener("click", () => api.system.revealElectronApp?.());
     body.querySelectorAll("[data-revoke]").forEach((b) => (b.onclick = async () => { await api.consent.revoke(b.dataset.revoke, b.dataset.cap); render(); }));
     body.querySelectorAll("[data-rule-cmd]").forEach((b) => (b.onclick = async () => { await api.consent.removeRule(b.dataset.ruleBot, b.dataset.ruleCmd); render(); }));
     body.querySelector("#sa-rule-add").onclick = async () => {
@@ -1123,9 +1695,14 @@ async function sysaccessFlow() {
         render();
       } catch (e) { body.querySelector("#sa-rule-err").textContent = errText(e); }
     };
-    body.querySelectorAll("[data-trust]").forEach((b) => (b.onchange = async () => {
-      if (b.checked && !confirm(`打开信任模式后，${botById(b.dataset.trust)?.name || "这个 bot"} 执行命令不再逐个询问（危险命令除外）。确定吗？`)) { b.checked = false; return; }
-      await api.consent.setTrusted(b.dataset.trust, b.checked);
+    body.querySelectorAll("[data-mode]").forEach((el) => (el.onchange = async () => {
+      const next = el.value === "auto" || el.value === "always" ? el.value : "ask";
+      const prev = el.dataset.prev || "ask";
+      const name = botById(el.dataset.mode)?.name || "这个 bot";
+      if (next === "always" && !confirm(`Always 模式下，${name} 将可直接执行危险命令。确定吗？`)) { el.value = prev; return; }
+      if (next === "auto" && prev === "ask" && !confirm(`Auto 模式下，${name} 的 Shell / 终端 / Coding CLI 不再逐个询问（危险除外）。确定吗？`)) { el.value = prev; return; }
+      await api.consent.setMode(el.dataset.mode, next);
+      el.dataset.prev = next;
       render();
     }));
     body.querySelector("#sa-grant").onclick = async () => {
@@ -1251,14 +1828,14 @@ async function petSmartFlow() {
 }
 
 const GITHUB_REPO = "https://github.com/zjyzhj/harness-system";
-const APP_VERSION = "0.1.0";
 
 /** 关于：GitHub 链接、开源与第三方声明 */
 async function aboutFlow() {
+  const info = await api.system.appInfo?.().catch(() => ({ version: "?", channel: "stable", schema: "?", update: { message: "" } }));
   const modal = sheet({
     icon: "ℹ",
     title: "关于 Harness Bot",
-    sub: `版本 ${APP_VERSION} · 本地优先的 AI 智能体指挥中心`,
+    sub: `版本 ${info.version} · ${info.channel} · schema ${info.schema} · 本地优先`,
     wide: true,
   });
   const body = modal.querySelector(".mx-body");
@@ -1269,8 +1846,10 @@ async function aboutFlow() {
         <a class="primary-btn about-ext" href="${GITHUB_REPO}" target="_blank" rel="noopener noreferrer">打开 GitHub 仓库</a>
         <a class="ghost-btn about-ext" href="${GITHUB_REPO}/issues" target="_blank" rel="noopener noreferrer">反馈 Issue</a>
         <button type="button" class="ghost-btn" id="about-copy">复制仓库链接</button>
+        <button type="button" class="ghost-btn" id="about-update">检查更新</button>
       </div>
       <p class="hint about-url"><code>${esc(GITHUB_REPO)}</code></p>
+      <p class="hint" id="about-update-msg"></p>
     </div>
     <div class="d-sec">
       <h4>声明</h4>
@@ -1307,6 +1886,14 @@ async function aboutFlow() {
       setTimeout(() => tip.remove(), 1500);
     } catch (e) { alert(errText(e)); }
   };
+  body.querySelector("#about-update").onclick = async () => {
+    const msg = body.querySelector("#about-update-msg");
+    msg.textContent = "检查中…";
+    try {
+      const r = await api.system.checkUpdate();
+      msg.textContent = r.message || (r.available ? "有新版本" : "已是最新");
+    } catch (e) { msg.textContent = errText(e); }
+  };
 }
 
 // ---- bind ----
@@ -1317,44 +1904,182 @@ $("#memory-btn").onclick = memoryFlow;
 $("#skills-btn").onclick = skillsFlow;
 $("#tasks-btn").onclick = tasksFlow;
 $("#groups-btn").onclick = groupsFlow;
-$("#plans-btn").onclick = plansFlow;
 $("#sysaccess-btn").onclick = sysaccessFlow;
+$("#sysmanage-btn")?.addEventListener("click", () => systemManageFlow());
 $("#env-btn").onclick = () => envFlow();
 $("#vault-btn").onclick = () => vaultFlow();
+$("#import-bot-btn")?.addEventListener("click", () => importBotFlow());
+$("#templates-btn")?.addEventListener("click", () => templatesBrowseFlow(currentBot));
 $("#mcp-btn").onclick = mcpFlow;
 
-/* ---- 保险库 / 连接（本机；无 OAuth / 支付 / 云邮箱） ---- */
-async function vaultFlow() {
-  const modal = sheet({ icon: "🛡", title: "保险库 / 连接", sub: "本机密钥 · 环境 · 通讯录 · MCP / Webhook / CLI（非应用市场）", wide: true });
+/** 本地模板库：内置技能模板 + 导入 harnessbot */
+async function templatesBrowseFlow(bot) {
+  const modal = sheet({ icon: "📦", title: "本地模板", sub: "内置技能模板 · 导入别人分享的 bot（无云端商店）", wide: true });
   const body = modal.querySelector(".mx-body");
-  let tab = "overview";
+  const render = async () => {
+    const templates = await api.skills.templates().catch(() => []);
+    body.innerHTML = `
+      <div class="d-sec"><h4>技能模板</h4>
+        ${templates.map((t) => `
+          <div class="d-card" data-tk="${esc(t.key)}">
+            <div class="c-main"><div class="c-title">${esc(t.name)} ${t.installed ? '<span class="tag">已有</span>' : ""}</div>
+              <div class="c-sub">${esc(t.description)}</div></div>
+            <button class="ghost-btn" data-op="install">${t.installed ? "再装私有" : "安装"}</button>
+            ${bot ? `<button class="ghost-btn" data-op="routine" title="安装并为当前 bot 挂例行">＋例行</button>` : ""}
+          </div>`).join("") || `<div class="d-empty">没有模板</div>`}
+      </div>
+      <div class="d-sec"><h4>Bot 模板</h4>
+        <div class="hint">别人分享的 harnessbot:// 链接或 .harnessbot 文件，导入后得到同样设定的 bot。</div>
+        <div class="actions"><button class="primary-btn" id="tb-import">导入 bot 模板…</button></div>
+      </div>`;
+    body.querySelector("#tb-import").onclick = () => { closeModal(); importBotFlow(); };
+    body.querySelectorAll("[data-tk]").forEach((card) => {
+      const key = card.dataset.tk;
+      card.querySelector('[data-op="install"]').onclick = async () => {
+        try {
+          await api.skills.installTemplate(key, bot?.id);
+          alert("已安装");
+          render();
+          if (currentBot) renderDetails(currentBot);
+        } catch (e) { alert(errText(e)); }
+      };
+      const rbtn = card.querySelector('[data-op="routine"]');
+      if (rbtn) rbtn.onclick = async () => {
+        if (!bot) return;
+        try {
+          const skill = await api.skills.installTemplate(key, bot.id);
+          await api.tasks.create({
+            botId: bot.id,
+            name: `例行：${skill.name}`,
+            cron: "0 9 * * 1-5",
+            prompt: `请按技能 [${skill.name}](app:skill/${skill.key}) 执行一遍，按当前环境调整后汇报。`,
+            skillKey: skill.key,
+            source: "template",
+          });
+          alert(`已为 ${bot.name} 安装技能并挂工作日 09:00 例行`);
+          closeModal();
+          if (currentBot) renderDetails(currentBot);
+        } catch (e) { alert(errText(e)); }
+      };
+    });
+  };
+  render();
+}
+
+/* ---- Connect 应用（本机目录；无 OAuth / 支付 / 云邮箱） ---- */
+async function vaultFlow(initialTab) {
+  const modal = sheet({ icon: "🔗", title: "Connect", sub: "粘贴 Cloudflare Token，生成你的公网地址 · 出站 Webhook · 本机网关备用", wide: true });
+  const body = modal.querySelector(".mx-body");
+  const allowed = new Set(["apps", "overview", "contacts", "webhooks", "gateway", "share", "mcp"]);
+  let tab = allowed.has(initialTab) ? initialTab : "apps";
   let catalog = await api.vault.catalog().catch(() => ({ secrets: 0, env: 0, contacts: 0, webhooks: 0, mcp: [], cli: [] }));
   let contactList = await api.contacts.list().catch(() => []);
   let hooks = await api.connectors.listWebhooks().catch(() => []);
+  let cards = await api.connect.cards().catch(() => []);
+  let gw = await api.connect.gateway().catch(() => ({ enabled: false, running: false, port: 8787, host: "127.0.0.1" }));
+  let bridge = await api.connect.shareBridge?.().catch(() => ({ configured: false, base: "", hasKey: false, keyHint: "", path: "" }))
+    ?? { configured: false, base: "", hasKey: false, keyHint: "", path: "" };
+  let bridgeMsg = "";
+  let bridgeProvisionSteps = [];
+  let gwMsg = "";
+  let shareEdit = true; // 配置区默认展开，避免用户找不到密钥/地址
+  let shareLinks = { items: [], truncated: false, ttlDays: 90, error: "" };
+  let inboundHooks = [];
   let editingContact = null;
   let editingHook = null;
+  const loadShareLinks = async () => {
+    if (!bridge.configured || !api.connect.listShareLinks) {
+      shareLinks = { items: [], truncated: false, ttlDays: 90, error: "" };
+      return;
+    }
+    try {
+      const r = await api.connect.listShareLinks();
+      shareLinks = { items: r.items || [], truncated: !!r.truncated, ttlDays: r.ttlDays || 90, error: "" };
+    } catch (e) {
+      shareLinks = { items: [], truncated: false, ttlDays: 90, error: errText(e) };
+    }
+  };
+  const loadInboundHooks = async () => {
+    const tasks = await api.tasks.list().catch(() => []);
+    const base = String(bridge.base || "").replace(/\/$/, "");
+    inboundHooks = (tasks || []).filter((t) => t.webhookToken).map((t) => ({
+      id: t.id,
+      name: t.name || "Webhook",
+      enabled: t.enabled !== false,
+      url: base ? `${base}/w/${t.webhookToken}` : "",
+    }));
+  };
   const refresh = async () => {
     catalog = await api.vault.catalog().catch(() => catalog);
     contactList = await api.contacts.list().catch(() => contactList);
     hooks = await api.connectors.listWebhooks().catch(() => hooks);
+    cards = await api.connect.cards().catch(() => cards);
+    gw = await api.connect.gateway().catch(() => gw);
+    bridge = await api.connect.shareBridge?.().catch(() => bridge) ?? bridge;
+    if (tab === "share") {
+      await loadShareLinks();
+      await loadInboundHooks();
+    }
     render();
+  };
+  const installCard = async (card) => {
+    if (card.kind === "computer") { closeModal(); return mcpFlow(); }
+    if (card.kind === "secret") { closeModal(); return envFlow(); }
+    if (card.kind === "share") { tab = "share"; shareEdit = true; await loadShareLinks(); await loadInboundHooks(); return render(); }
+    if (card.kind === "webhook") { tab = "webhooks"; editingHook = { name: "", url: "" }; return render(); }
+    if (card.kind === "mcp" && card.mcp) {
+      const servers = await (api.mcp.serversAll?.() || api.mcp.servers()).catch(() => []);
+      const id = card.mcp.name.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+      if (servers.some((s) => s.id === id || s.name === card.mcp.name)) {
+        alert(`「${card.mcp.name}」似乎已添加，打开 MCP 页管理。`);
+        closeModal();
+        return mcpFlow();
+      }
+      const env = card.mcp.envHint
+        ? Object.fromEntries(card.mcp.envHint.split(";").map((x) => x.split("=")).filter((p) => p.length >= 2).map(([k, ...v]) => [k.trim(), v.join("=").trim()]))
+        : undefined;
+      const next = [...servers.filter((s) => s.id !== "computer" || s.builtin !== false), {
+        id, name: card.mcp.name, command: card.mcp.command, args: card.mcp.args, ...(env ? { env } : {}),
+      }];
+      await api.mcp.saveServers(next.map(({ tools: _t, error: _e, connected: _c, ...s }) => s));
+      alert(`已添加「${card.name}」。若需 Token，先在环境配置里存密钥，命令里用 {{secret:名字}}。`);
+      closeModal();
+      return mcpFlow();
+    }
   };
   const render = () => {
     const tabs = [
-      ["overview", "总览"],
+      ["apps", "应用"],
+      ["overview", "保险库"],
       ["contacts", "通讯录"],
-      ["webhooks", "Webhook"],
+      ["webhooks", "出站 Webhook"],
+      ["share", "云服务"],
+      ["gateway", "本机网关"],
       ["mcp", "MCP / CLI"],
     ].map(([id, label]) => `<button class="ghost-btn ${tab === id ? "on" : ""}" data-tab="${id}">${label}</button>`).join("");
     let main = "";
-    if (tab === "overview") {
+    if (tab === "apps") {
+      const installedMcp = new Set((catalog.mcp || []).map((m) => (m.name || "").toLowerCase()));
+      main = `
+        <div class="d-sec">
+          <div class="hint">生成公网地址：打开「云服务」，粘贴 Cloudflare API Token，点「生成公网链接」。返回的 <code>*.workers.dev</code> 就是你的桥；要呼叫某个 bot，再复制下面或例行 🪝 里的 <code>/w/…</code> 链接。云：${bridge.configured ? "已开通" : "未开通"} · 本机网关：${gw.running ? "运行中" : "未开"}。</div>
+          <div class="connect-grid">${cards.map((c) => {
+            const on = c.kind === "mcp" && installedMcp.has((c.mcp?.name || "").toLowerCase());
+            return `<button class="connect-card" data-cid="${esc(c.id)}">
+              <div class="cc-title">${esc(c.name)}${c.badge ? ` <span class="tag">${esc(c.badge)}</span>` : ""}${on ? ' <span class="tag">已装</span>' : ""}</div>
+              <div class="cc-sub">${esc(c.blurb)}</div>
+              <div class="cc-act">${on ? "管理" : c.kind === "mcp" ? "安装" : "打开"}</div>
+            </button>`;
+          }).join("")}</div>
+        </div>`;
+    } else if (tab === "overview") {
       main = `
         <div class="d-sec">
           <div class="d-card"><div class="c-main"><div class="c-title">密钥</div><div class="c-sub">${catalog.secrets} 项 · 加密本机</div></div><button class="ghost-btn" id="v-env">打开环境配置</button></div>
           <div class="d-card"><div class="c-main"><div class="c-title">环境变量</div><div class="c-sub">${catalog.env} 项 · 明文配置</div></div><button class="ghost-btn" id="v-env2">打开环境配置</button></div>
           <div class="d-card"><div class="c-main"><div class="c-title">通讯录</div><div class="c-sub">${catalog.contacts} 人 · 无支付</div></div></div>
-          <div class="d-card"><div class="c-main"><div class="c-title">Webhook</div><div class="c-sub">${catalog.webhooks} 个端点</div></div></div>
-          <div class="hint">不做：OAuth 应用市场、Shop Pay、云邮箱身份 name+tag@。添加 MCP 走现有 MCP 页；密钥用 {{secret:名字}}。</div>
+          <div class="d-card"><div class="c-main"><div class="c-title">出站 Webhook</div><div class="c-sub">${catalog.webhooks} 个端点</div></div></div>
+          <div class="hint">密钥用 {{secret:名字}}。入站例行触发在「例行」卡片里开通 Webhook 令牌。</div>
         </div>`;
     } else if (tab === "contacts") {
       main = `<div class="d-sec"><h4>通讯录 <button class="list-add" id="ct-new" title="添加">＋</button></h4>
@@ -1367,14 +2092,150 @@ async function vaultFlow() {
           <div class="actions"><button class="ghost-btn" id="ct-cancel">取消</button><button class="primary-btn" id="ct-save">保存</button></div></div>` : ""}
       </div>`;
     } else if (tab === "webhooks") {
-      main = `<div class="d-sec"><h4>HTTP Webhook <button class="list-add" id="wh-new" title="添加">＋</button></h4>
-        ${hooks.map((w) => `<div class="d-card" data-wid="${esc(w.id)}"><div class="c-main"><div class="c-title">${esc(w.name)}</div><div class="c-sub">${esc(w.url)}${w.note ? ` · ${esc(w.note)}` : ""}</div></div>
-          <button class="ghost-btn" data-op="edit">编辑</button><button class="ghost-btn danger-text" data-op="del">删除</button></div>`).join("") || `<div class="d-empty">还没有 Webhook。Token 用 {{secret:名字}}，不要明文。</div>`}
+      const hdrText = (h) => Object.entries(h ?? {}).map(([k, v]) => `${k}: ${v}`).join("\n");
+      main = `<div class="d-sec"><h4>出站 HTTP Webhook <button class="list-add" id="wh-new" title="添加">＋</button></h4>
+        <div class="hint">把结果 POST 到你的服务。Authorization 等请求头请写 <code>{{secret:名字}}</code>，先在环境配置里用加密框保存真值，不要明文贴 Token。</div>
+        ${hooks.map((w) => `<div class="d-card" data-wid="${esc(w.id)}"><div class="c-main"><div class="c-title">${esc(w.name)}</div><div class="c-sub">${esc(w.url)}${w.note ? ` · ${esc(w.note)}` : ""}${w.headers && Object.keys(w.headers).length ? ` · ${Object.keys(w.headers).length} 个头` : ""}</div></div>
+          <button class="ghost-btn" data-op="edit">编辑</button><button class="ghost-btn danger-text" data-op="del">删除</button></div>`).join("") || `<div class="d-empty">还没有 Webhook。点 ＋ 添加端点。</div>`}
         ${editingHook ? `<div class="mx-form"><h4>${editingHook.id ? "编辑" : "添加"} Webhook</h4>
-          <div class="mx-grid"><label>名称</label><input id="wh-name" value="${esc(editingHook.name ?? "")}" />
-          <label>URL</label><input id="wh-url" value="${esc(editingHook.url ?? "")}" placeholder="https://…" />
-          <label>备注</label><input id="wh-note" value="${esc(editingHook.note ?? "")}" placeholder="可选；Header 里写 {{secret:…}}" /></div>
+          <div class="mx-grid"><label>名称</label><input id="wh-name" value="${esc(editingHook.name ?? "")}" placeholder="例如 飞书机器人" />
+          <label>URL</label><input id="wh-url" value="${esc(editingHook.url ?? "")}" placeholder="https://hooks.example/…" />
+          <label>请求头</label><textarea id="wh-headers" rows="3" placeholder="每行一个，例如：&#10;Authorization: Bearer {{secret:HOOK_TOKEN}}">${esc(hdrText(editingHook.headers))}</textarea>
+          <label>备注</label><input id="wh-note" value="${esc(editingHook.note ?? "")}" placeholder="可选" /></div>
           <div class="actions"><button class="ghost-btn" id="wh-cancel">取消</button><button class="primary-btn" id="wh-save">保存</button></div></div>` : ""}
+      </div>`;
+    } else if (tab === "gateway") {
+      const on = !!gw.running;
+      main = `<div class="d-sec">
+        <h4>本机网关 <span class="tag">高级 / 备用</span></h4>
+        <div class="hint"><b>公网例行 Webhook 不用改这里。</b>日常：到「云服务」用 Cloudflare 开通 → 例行卡片点 🪝 复制链接。<br/>
+          本页只给局域网调试或跨机 <code>/bots/msg</code> 用。</div>
+        <div class="d-card"><div class="c-main"><div class="c-title">${on ? "● 运行中" : "○ 未开启"}</div>
+          <div class="c-sub">${on ? esc(`${gw.host}:${gw.port}`) : "局域网备用；不配也能用云 Webhook"}${gw.routinesBase ? ` · ${esc(gw.routinesBase)}/:token` : ""}</div></div></div>
+        <details class="d-adv" ${on || gw.configured ? "open" : ""}>
+          <summary class="d-adv-sum">端口与安全<span class="d-adv-hint">监听 · 远程 · HMAC</span><span class="d-adv-caret">›</span></summary>
+          <div class="d-adv-body mx-form" style="padding-top:8px">
+            <div class="mx-grid">
+              <label></label><label class="chk"><input type="checkbox" id="gw-on" ${on || gw.configured ? "checked" : ""}/> 启用本机入站网关</label>
+              <label>端口</label><input id="gw-port" type="number" min="1" max="65535" value="${esc(String(gw.port || 8787))}" />
+              <label>监听地址</label><input id="gw-host" value="${esc(gw.host || "127.0.0.1")}" placeholder="127.0.0.1" />
+              <label></label><label class="chk"><input type="checkbox" id="gw-remote" ${gw.allowRemote ? "checked" : ""}/> 允许远程访问</label>
+              <label></label><label class="chk"><input type="checkbox" id="gw-hmac" ${gw.requireHmac ? "checked" : ""}/> 要求 HMAC 签名</label>
+            </div>
+            ${gw.warning ? `<div class="hint" style="color:var(--danger,#c44)">${esc(gw.warning)}</div>` : ""}
+            ${gwMsg ? `<div class="hint">${esc(gwMsg)}</div>` : ""}
+            <div class="actions">
+              <button class="ghost-btn" id="gw-probe">检测连通</button>
+              <button class="primary-btn" id="gw-save">保存并应用</button>
+            </div>
+          </div>
+        </details>
+        <h4 style="margin-top:16px">跨机 bot · POST /bots/msg</h4>
+        <div class="hint">其它进程用 Bearer 把消息投到本机 bot。与例行 🪝 链接不是一回事。</div>
+        <div class="d-card"><div class="c-main"><div class="c-title">${gw.hasMsgToken ? `令牌 ${esc(gw.msgTokenHint || "已生成")}` : "尚无令牌"}</div>
+          <div class="c-sub">${gw.botsMsgUrl ? esc(gw.botsMsgUrl) : "启用网关后显示地址"}</div></div>
+          <button class="ghost-btn" id="gw-copy-tok" ${gw.running && gw.hasMsgToken ? "" : "disabled"}>复制令牌</button>
+          <button class="ghost-btn" id="gw-rot-tok" ${gw.configured ? "" : "disabled"}>换新</button>
+        </div>
+      </div>`;
+    } else if (tab === "share") {
+      const fmtWhen = (ts) => {
+        if (!ts) return "未知时间";
+        try { return new Date(ts).toLocaleString(); } catch { return String(ts); }
+      };
+      const cf = bridge.cloudflare || {};
+      const linkRows = (shareLinks.items || []).map((it) => `
+        <div class="d-card" data-sid="${esc(it.id)}">
+          <div class="c-main">
+            <div class="c-title">${esc(it.name || "未命名 bot")}</div>
+            <div class="c-sub">${esc(fmtWhen(it.createdAt))} · 约 ${esc(String(it.expiresInDays || shareLinks.ttlDays || 90))} 天内有效<br/><code style="word-break:break-all">${esc(it.url)}</code></div>
+          </div>
+          <button class="ghost-btn" data-op="copy">复制</button>
+          <button class="ghost-btn danger-text" data-op="del">撤销</button>
+        </div>`).join("")
+        || `<div class="d-empty">${bridge.configured ? "还没有短链。去任意 bot →「分享」生成一条。" : "先开通云服务后再分享。"}</div>`;
+      const statusCard = bridge.configured
+        ? `<div class="d-card" style="border-color:var(--ok,#3a7)"><div class="c-main" style="flex:1">
+            <div class="c-title">● 你的公网地址</div>
+            <textarea class="sb-link" id="sb-base-out" readonly rows="2">${esc(bridge.base)}</textarea>
+            <div class="c-sub">由你的 Cloudflare Token 生成。呼叫 bot 请用下面的 POST 链接（<code>/w/…</code>），不要只 POST 这个根地址。</div>
+          </div>
+          <button class="ghost-btn" id="sb-copy-base">复制地址</button>
+          <button class="ghost-btn" id="sb-probe">检测连通</button>
+        </div>`
+        : `<div class="d-card" style="border-color:var(--acc)"><div class="c-main">
+            <div class="c-title">○ 还没有公网地址</div>
+            <div class="c-sub">粘贴 Cloudflare API Token，点「生成公网链接」。软件在你的账户里创建 Worker，并把 <code>https://harness-share-bridge.你的子域.workers.dev</code> 返回到这里。</div>
+          </div></div>`;
+      const hookRows = inboundHooks.map((h) => `
+        <div class="d-card" data-hookurl="${esc(h.url)}">
+          <div class="c-main">
+            <div class="c-title">${esc(h.name)}${h.enabled ? "" : " · 已暂停"}</div>
+            <div class="c-sub"><code style="word-break:break-all">${esc(h.url || "先生成上面的公网地址")}</code></div>
+          </div>
+          <button class="ghost-btn" data-op="copy-hook" ${h.url ? "" : "disabled"}>复制</button>
+        </div>`).join("")
+        || `<div class="d-empty">还没有呼叫链接。到 bot 详情 → 例行 →「＋ Webhook」，开通后地址会出现在这里。</div>`;
+      const stepsHtml = (bridgeProvisionSteps || []).map((s) =>
+        `<div class="hint">${s.ok ? "✓" : "✕"} ${esc(s.step)}${s.detail ? ` · ${esc(s.detail)}` : ""}</div>`).join("");
+      let currentSub = "";
+      try {
+        const host = new URL(String(bridge.base || "")).hostname.split(".");
+        if (host.length >= 4 && host.at(-2) === "workers" && host.at(-1) === "dev") currentSub = host[1] || "";
+      } catch { /* 手动绑的地址不一定是 workers.dev */ }
+      main = `<div class="d-sec">
+        <h4>生成公网地址</h4>
+        <div class="hint" style="line-height:1.65;margin-bottom:10px">
+          <b>你提供</b> Cloudflare API Token，并指定子域。<b>软件返回</b> <code>https://harness-share-bridge.子域.workers.dev</code>。<br/>
+          权限：Workers Scripts（Edit）、Workers KV Storage（Edit）、Account Settings（Read）。不要用 R2/S3 专用令牌。
+          ${bridge.fromEnv ? "<br/><b>注意：</b>短链配置被环境变量覆盖。" : ""}
+        </div>
+        ${statusCard}
+        <div class="mx-form" style="margin-top:12px">
+          <div class="mx-grid">
+            <label>API Token</label><input id="cf-token" type="password" value="" placeholder="${cf.hasToken ? `已保存（${esc(cf.tokenHint || "••••")}），留空=用已存` : "粘贴 Cloudflare API Token"}" autocomplete="off" />
+            <label>子域</label><input id="cf-subdomain" value="${esc(currentSub)}" placeholder="例如 my-bot，留空沿用账号现有子域" autocomplete="off" spellcheck="false" />
+          </div>
+          <div class="hint">公网地址是 <code>https://harness-share-bridge.子域.workers.dev</code>。这个子域属于整个 Cloudflare 账号，改名后该账号上所有 workers.dev 地址一起变，旧链接失效。</div>
+          <details class="d-adv" style="margin-top:8px">
+            <summary class="d-adv-sum">可选 · 账户与天数<span class="d-adv-hint">一般留空</span><span class="d-adv-caret">›</span></summary>
+            <div class="d-adv-body mx-form" style="padding-top:8px">
+              <div class="mx-grid">
+                <label>账户 ID</label><input id="cf-account" value="${esc(cf.accountId || "")}" placeholder="留空则用 Token 能看到的第一个账户" />
+                <label>短链天数</label><input id="sb-ttl" type="number" min="1" max="365" value="${esc(String(bridge.ttlDays || shareLinks.ttlDays || 90))}" />
+              </div>
+            </div>
+          </details>
+          ${bridgeMsg ? `<div class="hint">${esc(bridgeMsg)}</div>` : ""}
+          ${stepsHtml}
+          <div class="actions">
+            <button class="ghost-btn" id="sb-probe" ${bridge.configured ? "" : "disabled"}>检测连通</button>
+            <button class="primary-btn" id="cf-provision">${bridge.configured ? "重新生成 / 同步" : "生成公网链接"}</button>
+          </div>
+        </div>
+        <details class="d-adv" style="margin-top:12px">
+          <summary class="d-adv-sum">高级 · 手动绑定已有桥<span class="d-adv-hint">运维已 deploy 时</span><span class="d-adv-caret">›</span></summary>
+          <div class="d-adv-body mx-form" style="padding-top:8px">
+            <div class="mx-grid">
+              <label>服务地址</label><input id="sb-base-custom" value="${esc(bridge.base || "")}" placeholder="https://harness-share-bridge.xxx.workers.dev" />
+              <label>PUT_KEY</label><input id="sb-key" type="password" value="" placeholder="${bridge.hasKey ? `已保存（${esc(bridge.keyHint || "••••")}），留空=不改` : "粘贴业务密钥"}" autocomplete="off" />
+            </div>
+            <div class="actions">
+              <button class="ghost-btn danger-text" id="sb-clear" ${bridge.configured ? "" : "disabled"}>清除短链配置</button>
+              <button class="ghost-btn danger-text" id="cf-clear" ${cf.hasToken ? "" : "disabled"}>清除 CF Token</button>
+              <button class="primary-btn" id="sb-save">保存手动配置</button>
+            </div>
+          </div>
+        </details>
+        <h4 style="margin-top:16px">呼叫 bot</h4>
+        <div class="hint">外部 POST JSON <code>{"message":"要做的事"}</code> 到下面的链接。电脑开着时几秒内进对话。</div>
+        ${hookRows}
+        <h4 style="margin-top:16px">我分享过的短链 <button class="ghost-btn" id="sb-refresh" ${bridge.configured ? "" : "disabled"}>刷新</button></h4>
+        ${shareLinks.error ? `<div class="hint" style="color:var(--danger,#c44)">列表拉取失败：${esc(shareLinks.error)}<br/>
+          可点「重新生成 / 同步」把最新 Worker 推上去；临时可用本机网关。</div>` : ""}
+        ${shareLinks.truncated ? `<div class="hint">只显示最近一批。</div>` : ""}
+        ${linkRows}
+        <div class="hint">没开通也能分享：复制 <code>harnessbot://</code> 或 <code>.harnessbot</code> 文件。</div>
       </div>`;
     } else {
       const mcpRows = (catalog.mcp || []).map((m) => `<div class="d-card"><span class="ws-dot ${m.error ? "" : m.tools ? "on" : ""}"></span><div class="c-main"><div class="c-title">${esc(m.name)}</div><div class="c-sub">${m.error ? `✕ ${esc(m.error)}` : `${m.tools} 工具`} · ${esc(m.url ?? [m.command, ...(m.args || [])].filter(Boolean).join(" "))}</div></div></div>`).join("") || `<div class="d-empty">没有 MCP</div>`;
@@ -1384,7 +2245,17 @@ async function vaultFlow() {
         <div class="hint">添加连接走现有 mcp.add / 环境配置 / 密钥；不接 OAuth 应用市场。</div>`;
     }
     body.innerHTML = `<div class="actions" style="margin-bottom:12px">${tabs}</div>${main}`;
-    body.querySelectorAll("[data-tab]").forEach((b) => (b.onclick = () => { tab = b.dataset.tab; editingContact = null; editingHook = null; render(); }));
+    body.querySelectorAll("[data-tab]").forEach((b) => (b.onclick = async () => {
+      tab = b.dataset.tab;
+      editingContact = null;
+      editingHook = null;
+      if (tab === "share") { await loadShareLinks(); await loadInboundHooks(); }
+      render();
+    }));
+    body.querySelectorAll(".connect-card").forEach((btn) => (btn.onclick = () => {
+      const card = cards.find((c) => c.id === btn.dataset.cid);
+      if (card) void installCard(card);
+    }));
     body.querySelector("#v-env")?.addEventListener("click", () => { closeModal(); envFlow(); });
     body.querySelector("#v-env2")?.addEventListener("click", () => { closeModal(); envFlow(); });
     body.querySelector("#v-mcp")?.addEventListener("click", () => { closeModal(); mcpFlow(); });
@@ -1411,11 +2282,21 @@ async function vaultFlow() {
     body.querySelector("#wh-cancel")?.addEventListener("click", () => { editingHook = null; render(); });
     body.querySelector("#wh-save")?.addEventListener("click", async () => {
       try {
+        const rawHdr = body.querySelector("#wh-headers")?.value ?? "";
+        const headers = {};
+        for (const line of rawHdr.split("\n")) {
+          const t = line.trim();
+          if (!t) continue;
+          const i = t.indexOf(":");
+          if (i < 1) continue;
+          headers[t.slice(0, i).trim()] = t.slice(i + 1).trim();
+        }
         await api.connectors.upsertWebhook({
           id: editingHook.id,
           name: body.querySelector("#wh-name").value.trim(),
           url: body.querySelector("#wh-url").value.trim(),
           note: body.querySelector("#wh-note").value.trim() || undefined,
+          headers: Object.keys(headers).length ? headers : undefined,
         });
         editingHook = null;
         await refresh();
@@ -1426,7 +2307,194 @@ async function vaultFlow() {
       card.querySelector('[data-op="edit"]').onclick = () => { editingHook = hooks.find((w) => w.id === id); render(); };
       card.querySelector('[data-op="del"]').onclick = async () => { if (confirm("删除这个 Webhook？")) { await api.connectors.removeWebhook(id); await refresh(); } };
     });
+    body.querySelector("#gw-save")?.addEventListener("click", async () => {
+      try {
+        const enabled = !!body.querySelector("#gw-on")?.checked;
+        const r = await api.connect.setGateway({
+          enabled,
+          port: Number(body.querySelector("#gw-port")?.value || 8787),
+          host: body.querySelector("#gw-host")?.value.trim() || "127.0.0.1",
+          allowRemote: !!body.querySelector("#gw-remote")?.checked,
+          requireHmac: !!body.querySelector("#gw-hmac")?.checked,
+        });
+        gw = r.info || gw;
+        gwMsg = r.ok
+          ? (enabled ? (gw.running ? `已开启 · ${gw.host}:${gw.port}` : "已保存，但未成功监听（见警告）") : "已关闭入站网关")
+          : `失败：${r.error || "未知错误"}`;
+        render();
+      } catch (e) { gwMsg = errText(e); render(); }
+    });
+    body.querySelector("#gw-probe")?.addEventListener("click", async () => {
+      try {
+        const r = await api.connect.probeGateway();
+        gw = r.info || gw;
+        gwMsg = r.ok ? `连通正常（HTTP ${r.status}）` : `不通：${r.error || "网关未运行"}`;
+        render();
+      } catch (e) { gwMsg = errText(e); render(); }
+    });
+    body.querySelector("#gw-copy-tok")?.addEventListener("click", async () => {
+      try {
+        const r = await api.connect.gatewayMsgToken();
+        gw = r.info || gw;
+        if (!r.ok || !r.token) { gwMsg = r.error || "无令牌"; render(); return; }
+        await navigator.clipboard.writeText(r.token).catch(() => {});
+        gwMsg = "已复制 /bots/msg Bearer 令牌（请当密码保管）";
+        render();
+      } catch (e) { gwMsg = errText(e); render(); }
+    });
+    body.querySelector("#gw-rot-tok")?.addEventListener("click", async () => {
+      if (!confirm("换新跨机令牌？旧 Bearer 立刻失效。")) return;
+      try {
+        const r = await api.connect.rotateGatewayMsgToken();
+        gw = r.info || gw;
+        if (r.token) await navigator.clipboard.writeText(r.token).catch(() => {});
+        gwMsg = r.ok ? "已换新并复制 Bearer 令牌" : (r.error || "换新失败");
+        render();
+      } catch (e) { gwMsg = errText(e); render(); }
+    });
+    body.querySelector("#sb-edit")?.addEventListener("click", () => {
+      shareEdit = !shareEdit;
+      render();
+    });
+    body.querySelector("#cf-provision")?.addEventListener("click", async () => {
+      const btn = body.querySelector("#cf-provision");
+      const apiToken = body.querySelector("#cf-token")?.value.trim() || undefined;
+      const accountId = body.querySelector("#cf-account")?.value.trim() || undefined;
+      const subdomain = body.querySelector("#cf-subdomain")?.value.trim() || undefined;
+      const ttlDays = Number(body.querySelector("#sb-ttl")?.value || 90);
+      if (!apiToken && !bridge.cloudflare?.hasToken) {
+        bridgeMsg = "请先粘贴 Cloudflare API Token";
+        render();
+        return;
+      }
+      if (btn) { btn.disabled = true; btn.textContent = "开通中…"; }
+      bridgeMsg = "正在调用 Cloudflare API 开通短链桥…";
+      bridgeProvisionSteps = [];
+      render();
+      // re-disable after re-render
+      const btn2 = body.querySelector("#cf-provision");
+      if (btn2) { btn2.disabled = true; btn2.textContent = "开通中…"; }
+      try {
+        if (!api.connect.provisionShareBridge) throw new Error("当前版本不支持一键开通，请更新应用");
+        const r = await api.connect.provisionShareBridge({ apiToken, accountId, subdomain, ttlDays });
+        bridgeProvisionSteps = r.steps || [];
+        if (r.status) bridge = { ...r.status, cloudflare: bridge.cloudflare };
+        bridge = await api.connect.shareBridge?.().catch(() => bridge) ?? bridge;
+        if (r.ok) {
+          const url = r.base || bridge.base || "";
+          if (url) await navigator.clipboard.writeText(url).catch(() => {});
+          bridgeMsg = r.hint
+            ? `已生成 ${url}。${r.hint}`
+            : `已生成并复制公网地址：${url}`;
+          await loadShareLinks();
+          await loadInboundHooks();
+        } else {
+          bridgeMsg = [r.error || "开通失败", r.hint].filter(Boolean).join("\n");
+        }
+        render();
+      } catch (e) {
+        bridgeMsg = errText(e);
+        render();
+      }
+    });
+    body.querySelector("#cf-clear")?.addEventListener("click", async () => {
+      if (!confirm("清除本机保存的 Cloudflare API Token？")) return;
+      try {
+        await api.connect.clearCloudflare?.();
+        bridge = await api.connect.shareBridge?.().catch(() => bridge) ?? bridge;
+        bridgeMsg = "已清除 Cloudflare Token";
+        render();
+      } catch (e) { bridgeMsg = errText(e); render(); }
+    });
+    body.querySelector("#sb-save")?.addEventListener("click", async () => {
+      try {
+        const putKey = body.querySelector("#sb-key")?.value.trim();
+        const base = (body.querySelector("#sb-base-custom")?.value.trim() || "").replace(/\/$/, "");
+        if (!base) throw new Error("请填写已有桥的服务地址，或改用上方「确认开通」");
+        if (!putKey && !bridge.hasKey) throw new Error("请粘贴 PUT_KEY");
+        bridge = await api.connect.saveShareBridge({
+          base,
+          ttlDays: Number(body.querySelector("#sb-ttl")?.value || 90),
+          ...(putKey ? { putKey } : {}),
+        });
+        bridge = await api.connect.shareBridge?.().catch(() => bridge) ?? bridge;
+        shareEdit = true;
+        bridgeMsg = "已保存手动配置。公网地址见上方。";
+        await loadShareLinks();
+        await loadInboundHooks();
+        render();
+      } catch (e) { bridgeMsg = errText(e); render(); }
+    });
+    body.querySelectorAll("#sb-probe").forEach((btn) => btn.addEventListener("click", async () => {
+      try {
+        const r = await api.connect.probeShareBridge();
+        bridgeMsg = r.ok
+          ? `连通正常 · /health OK`
+          : `不通：${r.error || `HTTP ${r.status}`}。可点「重新生成 / 同步」。`;
+        render();
+      } catch (e) { bridgeMsg = errText(e); render(); }
+    }));
+    body.querySelector("#sb-clear")?.addEventListener("click", async () => {
+      if (!confirm("清除本机短链凭证？之后分享将不再生成短链（已发出的短链仍在云端，直到过期或你重新配置后在列表里撤销）。")) return;
+      try {
+        bridge = await api.connect.clearShareBridge();
+        bridge = await api.connect.shareBridge?.().catch(() => bridge) ?? bridge;
+        shareEdit = true;
+        bridgeMsg = "已清除。要再用，粘贴 Token 重新生成即可。";
+        shareLinks = { items: [], truncated: false, ttlDays: 90, error: "" };
+        inboundHooks = [];
+        render();
+      } catch (e) { bridgeMsg = errText(e); render(); }
+    });
+    body.querySelector("#sb-copy-base")?.addEventListener("click", async () => {
+      const url = bridge.base || "";
+      if (!url) return;
+      await navigator.clipboard.writeText(url).catch(() => {});
+      bridgeMsg = "已复制公网地址";
+      render();
+    });
+    body.querySelectorAll("[data-hookurl]").forEach((card) => {
+      card.querySelector('[data-op="copy-hook"]')?.addEventListener("click", async () => {
+        const url = card.getAttribute("data-hookurl") || "";
+        if (!url) return;
+        await navigator.clipboard.writeText(url).catch(() => {});
+        bridgeMsg = "已复制呼叫链接";
+        render();
+      });
+    });
+    body.querySelector("#sb-refresh")?.addEventListener("click", async () => {
+      await loadShareLinks();
+      await loadInboundHooks();
+      bridgeMsg = shareLinks.error ? `刷新失败：${shareLinks.error}` : `已刷新 · ${shareLinks.items.length} 条`;
+      render();
+    });
+    body.querySelectorAll("[data-sid]").forEach((card) => {
+      const id = card.dataset.sid;
+      const item = (shareLinks.items || []).find((x) => x.id === id);
+      card.querySelector('[data-op="copy"]')?.addEventListener("click", async () => {
+        if (!item?.url) return;
+        await navigator.clipboard.writeText(item.url).catch(() => {});
+        bridgeMsg = "已复制短链";
+        render();
+      });
+      card.querySelector('[data-op="del"]')?.addEventListener("click", async () => {
+        if (!confirm(`撤销短链「${item?.name || id}」？对方将立刻无法打开。`)) return;
+        try {
+          await api.connect.deleteShareLink(id);
+          bridgeMsg = `已撤销 ${id}`;
+          await loadShareLinks();
+          render();
+        } catch (e) {
+          bridgeMsg = errText(e);
+          render();
+        }
+      });
+    });
   };
+  if (tab === "share") {
+    await loadShareLinks();
+    await loadInboundHooks();
+  }
   render();
 }
 $("#pet-smart-btn").onclick = petSmartFlow;

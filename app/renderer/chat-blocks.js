@@ -1,5 +1,62 @@
 // 消息里的内容块：旁白与工具动作、交互卡片、产出物、群聊进度、授权请求
+/** 贴底判定：用户往上翻超过阈值后，流式/授权卡不再强行拽回底部 */
+const MSG_FOLLOW_PX = 140;
+function messagesNearBottom(px = MSG_FOLLOW_PX) {
+  const box = $("#messages");
+  if (!box) return true;
+  return box.scrollHeight - box.scrollTop - box.clientHeight <= px;
+}
+/** force=true：用户刚发送/切会话；流式增量与授权卡插入用默认（仅贴底时追） */
+function followMessages(force = false) {
+  const box = $("#messages");
+  if (!box) return;
+  if (force || messagesNearBottom()) box.scrollTop = box.scrollHeight;
+  const btn = $("#scroll-down");
+  if (btn) btn.classList.toggle("hidden", !messagesNearBottom(200));
+}
 /* ---------- 边做边说：每段旁白一个气泡，工具调用折叠成一行动作 ---------- */
+/** 与 core stripToolBlocks 对齐：顶格或紧跟句末的裸 {"tool":...}；「建议：{...}」保留 */
+function stripBareToolJson(s) {
+  const callable = (text, start) => {
+    let i = start - 1;
+    let lineLead = true;
+    while (i >= 0 && text[i] !== "\n") {
+      if (!/[ \t]/.test(text[i])) { lineLead = false; break; }
+      i--;
+    }
+    if (lineLead) return true;
+    i = start - 1;
+    while (i >= 0 && /[ \t]/.test(text[i])) i--;
+    if (i < 0) return true;
+    return /[。！？.!?]/.test(text[i]);
+  };
+  let out = String(s ?? ""), i = 0;
+  while (i < out.length) {
+    const key = out.indexOf('"tool"', i);
+    if (key < 0) break;
+    let start = key - 1;
+    while (start >= 0 && /\s/.test(out[start])) start--;
+    if (start < 0 || out[start] !== "{" || !/^\{\s*"tool"/.test(out.slice(start, key + 6))) { i = key + 6; continue; }
+    let depth = 0, inStr = false, esc = false, end = -1;
+    for (let j = start; j < out.length; j++) {
+      const c = out[j];
+      if (inStr) { if (esc) esc = false; else if (c === "\\") esc = true; else if (c === '"') inStr = false; continue; }
+      if (c === '"') { inStr = true; continue; }
+      if (c === "{") depth++;
+      else if (c === "}") { depth--; if (depth === 0) { end = j + 1; break; } }
+    }
+    if (end < 0) { i = key + 6; continue; }
+    let ok = false;
+    try {
+      const data = JSON.parse(out.slice(start, end));
+      ok = typeof data?.tool === "string" && /^[A-Za-z][\w./:-]*$/.test(data.tool.trim())
+        && (data.args === undefined || (data.args && typeof data.args === "object" && !Array.isArray(data.args)));
+    } catch { /* ignore */ }
+    if (ok && callable(out, start)) { out = out.slice(0, start) + out.slice(end); i = start; }
+    else i = end;
+  }
+  return out;
+}
 const TOOL_LABEL = {
   "fs.read": ["📖", "读取文件", "path"], "fs.write": ["✍️", "写入文件", "path"], "fs.list": ["📂", "查看目录", "path"],
   "bash.run": ["⌨️", "执行命令", "command"], "web.search": ["🔎", "搜索", "query"], "web.fetch": ["🌐", "打开网页", "url"],
@@ -8,7 +65,7 @@ const TOOL_LABEL = {
   "task.create": ["⏰", "创建定时任务", "name"], "task.list": ["⏰", "查看定时任务"], "task.delete": ["⏰", "删除定时任务", "name"],
   "bot.list": ["👥", "查看团队"], "app.updateSelf": ["🪪", "修改资料"], "app.setModel": ["🔀", "切换模型", "provider"], "app.listModels": ["🔀", "查看可用模型"],
   "app.state": ["🗂", "查看软件现状"], "app.createBot": ["➕", "新建 bot", "name"], "app.createGroup": ["👥", "新建群聊", "name"],
-  "app.updateGroup": ["👥", "修改群聊", "group"], "plan.start": ["🧩", "发起编排", "title"], "plan.list": ["🧩", "查看编排"], "plan.cancel": ["🧩", "停止编排", "plan"],
+  "app.updateGroup": ["👥", "修改群聊", "group"],
   "env.set": ["⚙️", "保存配置", "key"], "env.delete": ["⚙️", "删除配置", "key"],
   "skill.list": ["🧩", "查看技能"], "skill.get": ["🧩", "查看技能", "key"], "skill.save": ["🧩", "保存技能", "name"], "skill.delete": ["🧩", "删除技能", "key"],
   "demo.start": ["🎬", "开始演示录制", "title"], "demo.status": ["🎬", "演示录制状态"], "demo.finish": ["🎬", "演示存成技能", "name"], "demo.cancel": ["🎬", "取消演示录制"],
@@ -27,7 +84,13 @@ function actRow(b) {
 }
 function renderSegments(blocks, sources) {
   let html = "", texts = [], acts = [];
-  const flushText = () => { const h = texts.map(renderBlock).join(""); if (h.trim()) html += `<div class="bubble">${mentionLinks(citeLinks(h, sources))}</div>`; texts = []; };
+  const flushText = () => {
+    const h = texts.map(renderBlock).join("");
+    // 去掉只有空 pre/br 的空气泡（撤回或裸 ``` 残留）
+    const visible = h.replace(/<br\s*\/?>/gi, "").replace(/<pre[\s\S]*?<\/pre>/gi, (m) => (/<code[^>]*>\s*<\/code>/i.test(m) ? "" : m)).replace(/<[^>]+>/g, "").trim();
+    if (visible) html += `<div class="bubble">${mentionLinks(citeLinks(h, sources))}</div>`;
+    texts = [];
+  };
   const flushActs = () => {
     if (!acts.length) return;
     html += `<div class="act-list">${acts.map(actRow).join("")}</div>`;
@@ -52,7 +115,7 @@ function sendAsUser(text, m) {
   if (pending.has(currentSession)) return;
   // 群里只唤醒发卡片的那个 bot；单聊里卡片来自被 @ 的其他 bot 时也指回它
   const other = m && (currentGroup || (currentBot && m.from !== currentBot.id)) ? botById(m.from) : null;
-  $("#input").value = other ? `@${other.name} ${text}` : text;
+  setComposerInput(other ? `@${other.name} ${text}` : text);
   send();
 }
 
@@ -87,8 +150,7 @@ function choiceCard(c, m) {
     if (v === "确认") return answer(v, "确认，执行吧");
     if (v === "取消") return answer(v, "取消，先不要执行");
     answer(v, "", false);
-    $("#input").value = "修改：";
-    $("#input").focus();
+    setComposerInput("修改：", { focus: true, caret: "end" });
   }));
   const other = el.querySelector(".q-other input");
   if (other) {
@@ -110,7 +172,7 @@ function secretCard(c, m) {
     <div class="s-head"><span class="s-ico">🔑</span><b>${esc(c.label)}</b></div>
     <div class="s-row"><input type="password" placeholder="在这里粘贴，不会出现在聊天记录里" autocomplete="off" /><button class="primary-btn">保存</button></div>
     ${c.note ? `<div class="s-dim">用途：${esc(c.note)}</div>` : ""}
-    <div class="s-dim">加密保存在本机钥匙串，${c.scope === "all" ? "所有 bot 都能" : `只有 ${esc(bots.find((b) => b.id === m.from)?.name || "这个 bot")} 能`}通过名字 ${esc(c.name)} 使用，看不到内容</div>`;
+    <div class="s-dim">加密保存在本机钥匙串，所有 bot 都能通过名字 ${esc(c.name)} 使用，看不到内容</div>`;
   const inp = el.querySelector("input");
   const save = async () => {
     const v = inp.value;
@@ -129,19 +191,19 @@ function secretCard(c, m) {
 function formCard(c, m) {
   const el = document.createElement("div");
   const answered = !!c.answer;
-  el.className = `f-card ${answered ? "answered" : ""}`;
+  el.className = `form-card ${answered ? "answered" : ""}`;
   const fields = (c.fields || []).map((f) => {
     const val = answered ? (c.answer[f.key] ?? "") : (f.value ?? "");
     const dis = answered ? "disabled" : "";
     const label = `<span>${esc(f.label)}${f.required ? " *" : ""}</span>`;
     if (f.type === "textarea") {
-      return `<label class="f-field">${label}<textarea data-fk="${esc(f.key)}" rows="3" placeholder="${esc(f.placeholder || "")}" ${dis}>${esc(val)}</textarea></label>`;
+      return `<label class="form-field">${label}<textarea data-fk="${esc(f.key)}" rows="3" placeholder="${esc(f.placeholder || "")}" ${dis}>${esc(val)}</textarea></label>`;
     }
-    return `<label class="f-field">${label}<input data-fk="${esc(f.key)}" type="${f.type === "email" ? "email" : "text"}" value="${esc(val)}" placeholder="${esc(f.placeholder || "")}" ${dis} /></label>`;
+    return `<label class="form-field">${label}<input data-fk="${esc(f.key)}" type="${f.type === "email" ? "email" : "text"}" value="${esc(val)}" placeholder="${esc(f.placeholder || "")}" ${dis} /></label>`;
   }).join("");
   el.innerHTML = `
-    <div class="f-title">${esc(c.title)}</div>
-    <div class="f-fields">${fields}</div>
+    <div class="form-title">${esc(c.title)}</div>
+    <div class="form-fields">${fields}</div>
     ${answered
       ? `<div class="q-done">已提交：${esc(Object.entries(c.answer).map(([k, v]) => `${k}=${v}`).join("；"))}</div>`
       : `<div class="actions"><button class="primary-btn" data-submit>${esc(c.submitLabel || "提交")}</button></div>`}`;
@@ -275,26 +337,51 @@ function makeMsgEl(m) {
   wrapper.dataset.id = m.id ?? "";
   wrapper.dataset.ts = m.createdAt ?? "";
   if (m.kind === "event") {
-    wrapper.className = "msg sys";
-    wrapper.innerHTML = `<div class="bubble">${esc(m.content)}</div>`;
+    const routine = !!m.meta?.scheduled;
+    wrapper.className = "msg sys" + (routine ? " routine-evt" : "");
+    wrapper.innerHTML = `<div class="bubble">${esc(typeof m.content === "string" ? m.content : msgText(m))}</div>`;
+    return wrapper;
+  }
+  if (m.meta?.tag === "group-welcome" || m.from === "system") {
+    wrapper.className = "msg sys group-welcome";
+    wrapper.innerHTML = `<div class="bubble">${mentionLinks(renderMarkdown(esc(typeof m.content === "string" ? m.content : msgText(m))))}</div>`;
     return wrapper;
   }
   const blocks = Array.isArray(m.content) ? m.content : null;
   const media = blocks ? blocks.filter((b) => b.type === "image" || b.type === "file" || b.type === "audio") : [];
-  const cards = blocks ? blocks.filter((b) => b.type === "choice" || b.type === "secret" || b.type === "form" || b.type === "conclusion") : [];
+  const cards = blocks ? blocks.filter((b) => b.type === "choice" || b.type === "secret" || b.type === "form" || b.type === "conclusion" || b.type === "routine") : [];
   const sources = blocks?.find((b) => b.type === "sources")?.items ?? [];
-  const rest = blocks ? blocks.filter((b) => !["image", "file", "audio", "choice", "secret", "conclusion", "sources"].includes(b.type)) : null;
-  const isUser = m.from === "user";
+  const rest = blocks ? blocks.filter((b) => !["image", "file", "audio", "choice", "secret", "conclusion", "routine", "sources"].includes(b.type)) : null;
+  // Webhook 入站：左对齐入站卡（对齐 Grok），不是用户右侧绿泡；兼容旧数据 from=user + meta.webhook
+  const isInbound = m.from === "webhook" || m.from === "inbound" || (!!m.meta?.webhook && m.role === "user");
+  const isRoutine = !!m.meta?.scheduled && !isInbound;
+  const isUser = m.from === "user" && !isInbound;
   const sender = botById(m.from);
-  const showWho = !isUser && (m.kind === "bot-to-bot" || !currentBot || m.from !== currentBot.id);
-  wrapper.className = "msg " + (isUser ? "user" : "bot") + (m.meta?.tag ? ` ${m.meta.tag}` : "");
-  const inner = rest ? renderSegments(rest, sources) : `<div class="bubble">${mentionLinks(renderMarkdown(esc(m.content)))}</div>`;
+  const showWho = !isUser && !isInbound && (m.kind === "bot-to-bot" || !currentBot || m.from !== currentBot.id);
+  const failed = !isUser && !isInbound && /^❌/.test(typeof m.content === "string" ? m.content : msgText(m));
+  wrapper.className = "msg " + (isInbound ? "inbound" : isUser ? "user" : "bot")
+    + (isInbound && m.meta?.priority === "urgent" ? " urgent" : "")
+    + (isRoutine ? " routine" : "")
+    + (m.meta?.tag ? ` ${m.meta.tag}` : "")
+    + (failed ? " fail" : "");
+  const inner = rest ? renderSegments(rest, sources) : `<div class="bubble">${mentionLinks(renderMarkdown(esc(stripBoardLine(m.content))))}</div>`;
   const meta = m.meta ? [m.meta.model, m.meta.latencyMs != null ? fmtLatency(m.meta.latencyMs) : "", m.meta.tokensUsed ? fmtTok(m.meta.tokensUsed) + " tok" : "", m.meta.usage?.calls > 1 ? `${m.meta.usage.calls} 次模型调用` : "", m.meta.usage?.cached && m.meta.usage.input ? `缓存命中 ${Math.round((m.meta.usage.cached / m.meta.usage.input) * 100)}%` : ""].filter(Boolean).join(" · ") : "";
-  wrapper.innerHTML = `${showWho ? whoHtml(sender?.name ?? m.from, m.meta, sender) : ""}${inner}<div class="msg-meta">${esc([m.createdAt ? fmtTime(m.createdAt) : "", meta].filter(Boolean).join(" · "))}</div>`;
+  const inboundWho = isInbound
+    ? `<div class="who"><span class="who-hook">🪝 Webhook 入站</span>${m.meta?.priority === "urgent" ? `<span class="who-tag urgent">紧急</span>` : `<span class="who-tag">普通</span>`}</div>`
+    : "";
+  // 例行结果：对齐 Grok Routines in transcript，始终标「例行」+ 任务名
+  const routineWho = isRoutine
+    ? `<div class="who"><span class="who-hook">⏰ 例行</span><span class="who-tag routine">${esc(m.meta.scheduled)}</span></div>`
+    : "";
+  wrapper.innerHTML = `${inboundWho}${routineWho}${showWho ? whoHtml(sender?.name ?? m.from, m.meta, sender) : ""}${inner}<div class="msg-meta">${esc([m.createdAt ? fmtTime(m.createdAt) : "", meta].filter(Boolean).join(" · "))}</div>`;
   if (media.length) wrapper.insertBefore(renderMedia(media), wrapper.querySelector(".msg-meta"));
   if (sources.length) wrapper.insertBefore(sourcesStrip(sources), wrapper.querySelector(".msg-meta"));
   cards.forEach((c) => wrapper.insertBefore(
-    c.type === "choice" ? choiceCard(c, m) : c.type === "secret" ? secretCard(c, m) : c.type === "form" ? formCard(c, m) : conclusionCard(c, m),
+    c.type === "choice" ? choiceCard(c, m)
+      : c.type === "secret" ? secretCard(c, m)
+      : c.type === "form" ? formCard(c, m)
+      : c.type === "routine" ? routineCard(c, m)
+      : conclusionCard(c, m),
     wrapper.querySelector(".msg-meta"),
   ));
   decorateCode(wrapper);
@@ -322,22 +409,21 @@ function sourcesStrip(items) {
   return el;
 }
 
-/** 追问建议：只挂在会话最后一条 bot 回复下面 */
+/** 追问建议：挂在会话最后一条回复下；群聊欢迎房也可用（开场模板） */
 function showSuggestions(msgEl, list) {
   document.querySelectorAll("#messages .sugg").forEach((x) => x.remove());
-  if (!msgEl || !list?.length || currentGroup) return;
+  if (!msgEl || !list?.length) return;
   const box = document.createElement("div");
   box.className = "sugg";
   box.innerHTML = list.map((s) => `<button>${esc(s)}<span>↗</span></button>`).join("");
   box.querySelectorAll("button").forEach((btn, i) => (btn.onclick = () => {
     if (pending.has(currentSession)) return;
     box.remove();
-    $("#input").value = list[i];
+    setComposerInput(list[i]);
     send();
   }));
   (msgEl.classList.contains("msg-group") ? msgEl.lastElementChild ?? msgEl : msgEl).appendChild(box);
-  const mb = $("#messages");
-  if (mb.scrollHeight - mb.scrollTop - mb.clientHeight < 160) mb.scrollTop = mb.scrollHeight;
+  followMessages();
 }
 
 /** 发言人一行：群聊里标出在回应谁（A → B / → 你），主持人小结和结论单独标注 */
@@ -346,6 +432,70 @@ function whoHtml(name, meta, bot) {
   const to = meta?.replyTo === "user" ? "你" : meta?.replyTo ? botById(meta.replyTo)?.name ?? "" : "";
   const av = currentGroup && bot ? `<span class="who-av${isBusy(bot.id, true) ? " busy" : ""}" data-av-bot="${esc(bot.id)}" data-av-group>${avatarHtml(bot)}</span>` : "";
   return `<div class="who">${av}${esc(name)}${currentGroup && to ? `<span class="who-to"> → ${esc(to)}</span>` : ""}${tag}</div>`;
+}
+
+/** 打开右侧详情并滚到对应例行（详情已开时也要有可见反馈） */
+async function openRoutineInDetails(taskId, name) {
+  if (!currentBot) {
+    if (typeof tasksFlow === "function") return tasksFlow();
+    return;
+  }
+  detailsTab = "info";
+  toggleDetails(true);
+  await renderDetails(currentBot);
+  await new Promise((r) => requestAnimationFrame(r));
+  const cards = [...document.querySelectorAll("#details .routine-card")];
+  const hit = (taskId && cards.find((el) => el.dataset.task === taskId))
+    || (name && cards.find((el) => el.querySelector(".c-title")?.textContent?.includes(name)))
+    || cards[0];
+  if (!hit) {
+    if (typeof tasksFlow === "function") tasksFlow();
+    return;
+  }
+  hit.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  hit.classList.add("flash-hit");
+  setTimeout(() => hit.classList.remove("flash-hit"), 1600);
+}
+
+/** 例行卡：创建后出现在对话里（对齐 Grok）；可试跑 / 暂停 / 打开详情 */
+function routineCard(c, m) {
+  const el = document.createElement("div");
+  el.className = "rt-card";
+  const on = c.enabled !== false;
+  el.innerHTML = `
+    <div class="rt-head"><span class="rt-ico">⏰</span><span class="rt-title">例行 · ${esc(c.name)}</span>${on ? "" : `<span class="who-tag">已暂停</span>`}</div>
+    ${c.when ? `<div class="rt-when">${esc(c.when)}</div>` : ""}
+    <div class="rt-ops">
+      <button class="ghost-btn" data-a="run" title="立即试跑">⚡ 试跑</button>
+      <button class="ghost-btn" data-a="toggle">${on ? "暂停" : "启用"}</button>
+      <button class="ghost-btn" data-a="open">打开</button>
+    </div>`;
+  el.querySelectorAll("[data-a]").forEach((btn) => (btn.onclick = async (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const a = btn.dataset.a;
+    try {
+      if (a === "run") {
+        btn.disabled = true;
+        btn.textContent = "…";
+        await api.tasks.runNow(c.taskId);
+        btn.textContent = "⚡ 试跑";
+        btn.disabled = false;
+      } else if (a === "toggle") {
+        const next = !on;
+        await api.tasks.setEnabled(c.taskId, next);
+        c.enabled = next;
+        el.replaceWith(routineCard(c, m));
+        if (currentBot) renderDetails(currentBot);
+      } else if (a === "open") {
+        await openRoutineInDetails(c.taskId, c.name);
+      }
+    } catch (err) {
+      btn.disabled = false;
+      alert(errText(err));
+    }
+  }));
+  return el;
 }
 
 /** 讨论结论卡片：总结 / 决定 / 任务（可勾选、可分派执行）/ 待定问题 */
@@ -395,7 +545,7 @@ function appendMsg(m) {
   if (ts) box.dataset.lastTs = String(ts);
   const el = makeMsgEl(m);
   box.appendChild(el);
-  box.scrollTop = box.scrollHeight;
+  followMessages();
   return el;
 }
 
@@ -406,10 +556,17 @@ const sendQueue = new Map();
 /** 等待用户处理的授权请求：id → { req, inline 会话内卡片, float 右下角浮卡 } */
 const consents = new Map();
 
+/** 防止 Enter+点击 / 连击在 pending 挂上之前重入，乐观气泡打两份 */
+let sendBusy = false;
 async function send() {
+  if (!pending.has(currentSession) && sessionRunningHere()) {
+    const typed = !!$("#input")?.value.trim() || (typeof pendingAtt !== "undefined" && pendingAtt.length > 0);
+    if (!typed) return api.chat.cancel(currentSession);
+    await api.chat.cancel(currentSession);
+  }
   if (pending.has(currentSession)) {
     if (currentGroup && $("#input").value.trim()) return interject(currentGroup, currentSession);
-    // 单聊忙时：有新输入则入队，空闲后再发；点停止按钮仍走 setSending → cancel
+    // 单聊忙时：有输入 = steer（打断当前轮，立刻按新话重开）；空发送 = 仅停止
     const queuedText = $("#input").value.trim();
     if (queuedText || pendingAtt.length) {
       const text = queuedText;
@@ -419,40 +576,48 @@ async function send() {
       clearPending();
       const sid = currentSession;
       const q = sendQueue.get(sid) || [];
-      q.push({ text, rich, replyBot: currentBot });
+      q.unshift({ text, rich, replyBot: currentBot });
       sendQueue.set(sid, q);
+      void api.chat.cancel(sid);
       const tip = document.createElement("div");
       tip.className = "hint queue-tip";
-      tip.textContent = `已排队（${q.length}）：处理完上一条后发送`;
+      tip.textContent = "已插话：停下当前回复，按你的新指示继续";
       $("#messages")?.append(tip);
       setTimeout(() => tip.remove(), 2500);
+      setSending();
       return;
     }
     return api.chat.cancel(currentSession);
   }
   const text = $("#input").value.trim();
   if ((!text && !pendingAtt.length) || (!currentBot && !currentGroup)) return;
+  if (sendBusy) return;
+  sendBusy = true;
   $("#input").value = "";
   inputEl.style.height = "auto";
   const rich = pendingAtt.length ? [{ type: "text", text }, ...pendingAtt] : text;
   clearPending();
-  if (currentGroup) return sendGroup(currentGroup, rich, text);
-  // @组名 → 群组广播（G4）
-  const groups = await api.groups.list();
-  const gMatch = text.match(/^@([\p{L}\p{N}_\-\u4e00-\u9fa5]+)\s+([\s\S]+)/u);
-  const g = gMatch ? groups.find((x) => x.name === gMatch[1]) : null;
-  if (g) {
-    const members = await api.groups.broadcast(g.id, currentBot.id, gMatch[2]);
-    members.forEach((m) => appendMsg(m));
-    return;
+  try {
+    if (currentGroup) return await sendGroup(currentGroup, rich, text);
+    // @组名 → 群组广播（G4）
+    const groups = await api.groups.list();
+    const gMatch = text.match(/^@([\p{L}\p{N}_\-\u4e00-\u9fa5]+)\s+([\s\S]+)/u);
+    const g = gMatch ? groups.find((x) => x.name === gMatch[1]) : null;
+    if (g) {
+      const members = await api.groups.broadcast(g.id, currentBot.id, gMatch[2]);
+      members.forEach((m) => appendMsg(m));
+      return;
+    }
+    // @bot名 → 由被 @ 的 bot 在当前会话里接话（共享上下文，像群聊）
+    const replyBot = currentBot;
+    if (isForeign(currentSession)) await openOwnSession();
+    const sid = currentSession ?? `s-${Date.now()}`;
+    currentSession = sid;
+    const userEl = appendMsg({ sessionId: sid, from: "user", to: replyBot.id, role: "user", content: rich, kind: "chat", createdAt: Date.now() });
+    await streamReply({ sid, userEl, run: () => api.chat.sendStream(replyBot.id, rich, sid, chatOpts()), firstBot: replyBot });
+  } finally {
+    sendBusy = false;
   }
-  // @bot名 → 由被 @ 的 bot 在当前会话里接话（共享上下文，像群聊）
-  const replyBot = currentBot;
-  if (isForeign(currentSession)) await openOwnSession();
-  const sid = currentSession ?? `s-${Date.now()}`;
-  currentSession = sid;
-  const userEl = appendMsg({ sessionId: sid, from: "user", to: replyBot.id, role: "user", content: rich, kind: "chat", createdAt: Date.now() });
-  await streamReply({ sid, userEl, run: () => api.chat.sendStream(replyBot.id, rich, sid, chatOpts()), firstBot: replyBot });
 }
 
 async function drainSendQueue(sid) {
@@ -484,7 +649,8 @@ async function streamReply({ sid, userEl, run, firstBot, firstKey }) {
   pending.set(sid, entry);
   setSending();
   const t0 = Date.now();
-  const follow = () => { if (nodes.some((n) => n.isConnected)) { const box = $("#messages"); box.scrollTop = box.scrollHeight; } };
+  const follow = () => { if (nodes.some((n) => n.isConnected)) followMessages(); };
+  followMessages(true);
   const tail = () => nodes[nodes.length - 1];
   const add = (...els) => {
     const anchor = tail();
@@ -568,8 +734,13 @@ async function streamReply({ sid, userEl, run, firstBot, firstKey }) {
     }
     if (chunk.type === "retract") {
       b.text = "";
+      // 撤回后若还没有已落盘片段，不要留灰色空壳；显示短暂「处理中」
       const paint = () => {
-        b.bubble.innerHTML = b.done || `<span class="thinking">处理中<span class="dots"></span></span>`;
+        if (b.done) b.bubble.innerHTML = b.done;
+        else {
+          b.bubble.innerHTML = `<span class="thinking">处理中<span class="dots"></span></span>`;
+          b.bubble.classList.remove("hidden");
+        }
       };
       paint();
       follow();
@@ -580,18 +751,29 @@ async function streamReply({ sid, userEl, run, firstBot, firstKey }) {
       b.started = true;
       b.bubble.innerHTML = "";
     }
-    const shownText = () => b.text.replace(/```tool[\s\S]*?(```|$)/g, "").trim();
-    const paint = () => {
-      const t = shownText();
+    const shownText = (settle = false) => {
+      let s = stripBareToolJson(b.text.replace(/```tool[\s\S]*?(```|$)/g, ""))
+        .replace(/^【(?:已定|交给)】.*$/gm, "");
+      // 流式中勿 trim：尾部空格/换行一闪一闪会抖
+      return settle ? s.trim() : s.replace(/^\n+/, "");
+    };
+    /** 流式用轻量纯文本，避免半截 markdown（未闭合 ` / 列表）每字重绘把气泡打坏 */
+    const paintLive = (t) => {
+      const body = esc(t).replace(/\n/g, "<br/>");
+      b.bubble.innerHTML = b.done + (body ? `<div class="stream-live">${body}</div>` : b.done ? "" : `<span class="thinking">处理中<span class="dots"></span></span>`);
+    };
+    const paint = (settle = false) => {
+      const t = shownText(settle);
+      if (!settle) return paintLive(t);
       b.bubble.innerHTML = b.done + (t ? renderMarkdown(esc(t)) : b.done ? "" : `<span class="thinking">处理中<span class="dots"></span></span>`);
     };
     if (chunk.type === "text" && chunk.text) {
       b.text += chunk.text;
-      paint();
+      paint(false);
     } else if (chunk.type === "tool_call" && chunk.tool === "bot.ask") {
       let entry = asks.get(chunk.callId);
       if (!entry) {
-        const t = shownText();
+        const t = shownText(true);
         entry = { b, call: chunk, botId: askTarget(chunk)?.id, answer: "", html: b2bLiveHtml(chunk, "") };
         asks.set(chunk.callId, entry);
         b.done += (t ? renderMarkdown(esc(t)) : "") + b2bOutHtml(chunk) + entry.html;
@@ -603,19 +785,19 @@ async function streamReply({ sid, userEl, run, firstBot, firstKey }) {
         entry.html = fin;
         entry.done = true;
       }
-      paint();
+      paint(true);
     } else if (chunk.type === "tool_call" && chunk.status === "running") {
-      const t = shownText();
+      const t = shownText(true);
       const { icon, label, arg } = toolLabel(chunk);
       const live = `<div class="act-live"><span class="thinking">${icon} ${esc(label)}${arg ? ` · ${esc(arg)}` : ""}<span class="dots"></span></span></div>`;
       b.done += (t ? renderMarkdown(esc(t)) : "") + live;
       b.live.set(chunk.callId, live);
       b.text = "";
-      paint();
+      paint(true);
     } else if (chunk.type === "tool_call") {
       const live = b.live.get(chunk.callId);
       b.done = live ? b.done.replace(live, actRow(chunk)) : b.done + actRow(chunk);
-      paint();
+      paint(true);
     }
     follow();
   });
@@ -624,25 +806,34 @@ async function streamReply({ sid, userEl, run, firstBot, firstKey }) {
     const entry = [...asks.values()].reverse().find((x) => x.botId === ev.botId && !x.done);
     if (!entry) return;
     entry.answer += ev.block.text;
-    const next = b2bLiveHtml(entry.call, entry.answer.replace(/```tool[\s\S]*?(```|$)/g, ""));
+    const next = b2bLiveHtml(entry.call, stripBareToolJson(entry.answer.replace(/```tool[\s\S]*?(```|$)/g, "")));
     entry.b.done = entry.b.done.replace(entry.html, next);
     entry.html = next;
     entry.b.bubble.innerHTML = entry.b.done + `<span class="thinking">处理中<span class="dots"></span></span>`;
     follow();
   });
+  let failed = false;
   try {
     await run();
   } catch {
+    failed = true;
     // 失败信息已由主进程写入会话，刷新后显示
   }
   offStream();
   offB2b();
   clearInterval(ticker);
+  // 收尾：把流式纯文本换成正式 markdown，减少随后整页刷新的落差
+  bubbles.forEach((b) => {
+    if (!b.started) return;
+    const t = stripBareToolJson(b.text.replace(/```tool[\s\S]*?(```|$)/g, "")).replace(/^【(?:已定|交给)】.*$/gm, "").trim();
+    b.bubble.innerHTML = b.done + (t ? renderMarkdown(esc(t)) : b.done ? "" : "");
+  });
   pending.delete(sid);
   setSending();
-  if (currentSession === sid) await loadSessionMessages(sid, true);
+  // 有插话排队时跳过整页刷新，直接开下一轮，避免「消失再刷回来」叠闪
+  const queued = sendQueue.get(sid)?.length;
+  if (currentSession === sid && (failed || !queued)) await loadSessionMessages(sid, true);
   refreshBots();
-  // 处理完上一条后发送排队消息
   void drainSendQueue(sid);
   onReplyDone(sid);
 }
@@ -668,40 +859,139 @@ async function regenerate(m) {
 
 /** 接力进行中插话：消息立即上屏，下一个发言位优先回应（@ 了谁就谁回，没 @ 由主持人回） */
 async function interject(g, sid) {
+  if (sendBusy) return;
   const text = $("#input").value.trim();
+  if (!text && !pendingAtt.length) return;
+  sendBusy = true;
   const rich = pendingAtt.length ? [{ type: "text", text }, ...pendingAtt] : text;
   $("#input").value = "";
   inputEl.style.height = "auto";
   clearPending();
-  const r = await api.groups.interject(g.id, sid, rich);
-  if (!r?.ok) { $("#input").value = text; setSending(); return; }
-  const el = makeMsgEl({ sessionId: sid, from: "user", to: g.id, role: "user", content: rich, kind: "chat", createdAt: Date.now() });
-  pending.get(sid)?.add(el);
-  const box = $("#messages");
-  box.scrollTop = box.scrollHeight;
-  setSending();
+  try {
+    const r = await api.groups.interject(g.id, sid, rich);
+    if (!r?.ok) { setComposerInput(text); setSending(); return; }
+    // 若 onNewMessage 已把乐观气泡对上 id，就不再挂第二个
+    const live = pending.get(sid);
+    const textStr = typeof rich === "string" ? rich : (rich.find?.((b) => b.type === "text")?.text ?? text);
+    const already = live?.nodes?.some((n) => n.classList?.contains("user")
+      && (n.querySelector(".bubble")?.textContent || "").trim() === String(textStr).trim());
+    if (!already) {
+      const el = makeMsgEl({ sessionId: sid, from: "user", to: g.id, role: "user", content: rich, kind: "chat", createdAt: Date.now() });
+      live?.add(el);
+    }
+    followMessages(true);
+    setSending();
+  } finally {
+    sendBusy = false;
+  }
+}
+
+/**
+ * 与后端 openers 对齐的同步预览（无 LLM judge）：
+ * 显式 @ / → / 【交给】→ 按出现顺序；只有裸名可能被 judge → 先不出等待泡；
+ * 完全没点名 → 主持人（settings.moderator / 主控 / members[0]）。
+ */
+function previewGroupOpener(g, text) {
+  const room = bots.filter((b) => g.members.includes(b.id));
+  const hits = [];
+  const push = (bot, at) => { if (bot && !hits.some((h) => h.bot.id === bot.id)) hits.push({ bot, at }); };
+  for (const b of [...room].sort((a, c) => c.name.length - a.name.length)) {
+    const n = b.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    for (const re of [
+      new RegExp(`@${n}`, "g"),
+      new RegExp(`(?:→|->|➡️?)\\s*\\**${n}`, "g"),
+      new RegExp(`(?:^|\\n)\\s*\\**${n}\\**\\s*[：:]`, "g"),
+    ]) {
+      for (const m of text.matchAll(re)) push(b, m.index ?? 0);
+    }
+  }
+  for (const block of text.matchAll(/【交给】([^\n【]*)/g)) {
+    const body = block[1] ?? "";
+    const base = block.index ?? 0;
+    if (/^(?:全员|所有人|everyone)\s*$/i.test(body.trim())) {
+      for (const b of room) push(b, base);
+      continue;
+    }
+    for (const b of room) {
+      const at = body.indexOf(b.name);
+      if (at >= 0) push(b, base + at);
+    }
+  }
+  if (/@(?:everyone\b|所有人|全员)/i.test(text)) {
+    for (const b of room) push(b, text.search(/@(?:everyone\b|所有人|全员)/i));
+  }
+  hits.sort((a, c) => a.at - c.at);
+  if (hits.length) return hits[0].bot;
+  // 文中出现成员名但没有显式点名语法 → 可能走 who() judge，先别猜错人
+  const bare = room.some((b) => b.name && text.includes(b.name));
+  if (bare) return null;
+  const modId = g.settings?.moderator || room.find((b) => b.isMaster)?.id || g.members[0];
+  return botById(modId);
 }
 
 /** 群聊：一个共享会话，成员依次接话 */
 async function sendGroup(g, rich, text) {
   const sid = currentSession ?? `group-${g.id}-${Date.now()}`;
   currentSession = sid;
+  api.groups.gaze(g.id, sid);
   const userEl = appendMsg({ sessionId: sid, from: "user", to: g.id, role: "user", content: rich, kind: "chat", createdAt: Date.now() });
-  const named = bots.filter((b) => text.includes("@" + b.name)).sort((a, b) => text.indexOf("@" + a.name) - text.indexOf("@" + b.name));
-  const first = named[0] ?? botById(g.members[0]);
-  await streamReply({ sid, userEl, run: () => api.groups.chat(g.id, rich, sid), firstBot: first, firstKey: first ? `${first.id}:0` : undefined });
+  const first = previewGroupOpener(g, text);
+  await streamReply({ sid, userEl, run: () => api.groups.chat(g.id, rich, sid), firstBot: first || undefined, firstKey: first ? `${first.id}:0` : undefined });
   if (currentGroup?.id === g.id && !$("#details").classList.contains("hidden")) renderGroupDetails(currentGroup);
 }
 
 /** 消息里 @ 到的其他 bot（取最长匹配的名字，避免「灵感助手」误中「灵感小助手」） */
-/** 当前会话有回复进行中时，发送按钮变成「停止生成」 */
+/** 忙时按钮始终是停止（■）；点下去时若框里有字则顺带插话，避免「还在生成却显示可发送 ↑」 */
+/** 这条会话正在跑后台回合（Webhook / 例行），但不是用户刚点的发送 */
+function sessionRunningHere() {
+  if (!currentSession || (typeof currentGroup !== "undefined" && currentGroup)) return false;
+  const st = currentBot && liveStatus[currentBot.id];
+  return !!(st && st.state === "running" && st.sessionId === currentSession);
+}
+
+function syncInboundBusy() {
+  const box = $("#messages");
+  const running = sessionRunningHere() && !pending.has(currentSession);
+  if (!box) {
+    setSending();
+    return;
+  }
+  const last = box.querySelector(".msg:last-of-type");
+  const draftShowing = last && last.classList.contains("bot") && last.dataset.id && !last.classList.contains("live-wait");
+  if (running && !draftShowing) {
+    let el = box.querySelector(".live-wait");
+    if (!el) {
+      el = document.createElement("div");
+      el.className = "msg bot live-wait";
+      el.dataset.waitAt = String(Date.now());
+      el.innerHTML = `<div class="bubble"><span class="thinking">等待回复<span class="dots"></span> <span class="secs">0s</span></span></div>`;
+      box.appendChild(el);
+      followMessages();
+    }
+    const secs = el.querySelector(".secs");
+    if (secs) secs.textContent = `${Math.floor((Date.now() - Number(el.dataset.waitAt || Date.now())) / 1000)}s`;
+  } else {
+    box.querySelectorAll(".live-wait").forEach((n) => n.remove());
+  }
+  setSending();
+}
+
+setInterval(() => {
+  if (document.querySelector("#messages .live-wait")) syncInboundBusy();
+}, 500);
+
 function setSending() {
-  const busy = pending.has(currentSession);
-  const talk = busy && !!currentGroup && !!$("#input").value.trim();
+  const busy = pending.has(currentSession) || sessionRunningHere();
+  const typed = !!$("#input")?.value.trim() || (typeof pendingAtt !== "undefined" && pendingAtt.length > 0);
   const btn = $("#send-btn");
-  btn.classList.toggle("stop", busy && !talk);
-  btn.textContent = busy && !talk ? "■" : "↑";
-  btn.title = talk ? "插话：下一位发言者会先回应你" : busy ? "停止生成" : "发送";
+  btn.classList.toggle("stop", !!busy);
+  btn.classList.remove("steer");
+  btn.textContent = busy ? "■" : "↑";
+  btn.title = busy
+    ? (typed
+      ? (currentGroup ? "停止并插话：下一位会先回应你" : "停止当前回复，按输入框内容继续")
+      : "停止生成")
+    : "发送";
   syncConsentDock();
 }
 
@@ -715,39 +1005,65 @@ api.onGroupProgress((p) => {
 });
 function renderRelayBar() {
   const bar = $("#relay-bar");
-  const p = currentSession && relayState.get(currentSession);
-  if (!p) { bar.classList.add("hidden"); return; }
+  const p = currentGroup && currentSession && relayState.get(currentSession);
+  if (!p || p.groupId !== currentGroup.id) { bar.classList.add("hidden"); return; }
   bar.classList.remove("hidden");
   bar.classList.toggle("done", p.state === "done");
+  const failEls = [...document.querySelectorAll("#messages .msg.fail")];
+  const hasFail = failEls.length > 0 && (p.state === "done" || p.state === "paused");
+  bar.classList.toggle("fail", hasFail);
   const pct = p.max ? Math.min(100, Math.round(((p.turn ?? 0) / p.max) * 100)) : 0;
   const what = p.dispatch ? "分派执行" : "接力";
-  const text = p.state === "done" ? `${what}结束 · ${esc(p.reason || "")}`
+  const nextNames = p.next?.length ? esc(p.next.slice(0, 3).join("、")) + (p.next.length > 3 ? "…" : "") : "";
+  const stretch = p.max != null ? `本段 ${p.turn ?? 0}/${p.max}` : "";
+  const total = p.total != null && p.total !== p.turn ? ` · 累计 ${p.total}` : "";
+  const failHint = hasFail ? ` · ${failEls.length} 条失败可见` : "";
+  const text = p.state === "done" ? `${what}结束 · ${esc(p.reason || "")}${failHint}`
+    : p.state === "paused" ? `接力停住了${nextNames ? ` · 接下来：${nextNames}` : ""}${failHint}`
     : p.state === "summary" ? `🧭 ${esc(p.speaker)} 正在做第 ${p.round} 轮小结`
     : p.state === "conclusion" ? `📋 ${esc(p.speaker)} 正在整理结论`
-    : `${what}中 · 第 ${p.turn}/${p.max} ${p.dispatch ? "项" : "次发言"}${p.round > 1 ? ` · 第 ${p.round} 轮` : ""} · <b>${esc(p.speaker)}</b> 发言中${p.next?.length ? ` · 接下来：${esc(p.next.slice(0, 3).join("、"))}${p.next.length > 3 ? "…" : ""}` : ""}`;
+    : p.dispatch
+      ? `${what}中 · 第 ${p.turn}/${p.max} 项 · <b>${esc(p.speaker)}</b> 发言中${nextNames ? ` · 接下来：${nextNames}` : ""}`
+      : `${what}中 · ${stretch}${total}${p.round > 1 ? ` · 第 ${p.round} 轮` : ""} · <b>${esc(p.speaker)}</b> 发言中${nextNames ? ` · 接下来：${nextNames}` : ""}`;
+  const board = p.board?.length ? `<div class="hint">已定：${esc(p.board.slice(-3).join("；"))}</div>` : "";
   bar.innerHTML = `<div class="rb-track"><div class="rb-fill" style="width:${p.state === "done" ? 100 : pct}%"></div></div>
-    <div class="rb-row"><span class="rb-text">${text}</span>${p.state === "done" ? "" : `<span class="rb-hint">输入框打字可插话</span><button class="ghost-btn" id="rb-stop">停止</button>`}</div>`;
+    <div class="rb-row"><span class="rb-text">${text}</span>${p.state === "done" || p.state === "paused" ? "" : `<span class="rb-hint">输入框打字可插话</span><button class="ghost-btn" id="rb-stop">停止</button>`}${p.state === "paused" ? `<span class="rb-hint">发一句就接着说</span>` : ""}${hasFail ? `<button class="ghost-btn" id="rb-fail">看失败</button>` : ""}</div>${board}`;
   const stop = bar.querySelector("#rb-stop");
   if (stop) stop.onclick = () => api.chat.cancel(p.sessionId);
+  const jump = bar.querySelector("#rb-fail");
+  if (jump) jump.onclick = () => failEls[failEls.length - 1]?.scrollIntoView({ behavior: "smooth", block: "center" });
 }
 
 /* ---------- 授权请求：显示在 bot 干活的会话里；不在当前会话时浮在右下角 ---------- */
 function consentCard(req, floating) {
   const el = document.createElement("div");
   el.className = `cs-card ${req.danger ? "danger" : ""} ${floating ? "floating" : ""}`;
+  const opaqueCmd = !String(req.command || "").trim() || String(req.command).trim() === "$()";
   const alwaysPath = req.rememberPath ? `<button class="ghost-btn" data-d="allow-command" title="${esc(req.rememberPath)}">总是允许此目录</button>` : "";
-  const always = !alwaysPath && !req.danger && !req.onceOnly && req.command ? `<button class="ghost-btn" data-d="allow-command">总是允许 ${esc(req.command)}</button>` : "";
+  // "$()" 是解析失败占位，不能「总是允许」成一条永久规则
+  const always = !alwaysPath && !req.danger && !req.onceOnly && req.command && !opaqueCmd ? `<button class="ghost-btn" data-d="allow-command">总是允许 ${esc(req.command)}</button>` : "";
   const group = !req.danger && !req.command && !req.rememberPath && req.cap !== "bash:other" ? `<button class="ghost-btn" data-d="allow" title="以后不再问">长期批准「${esc(req.capLabel)}」</button>` : "";
   const reasons = req.reasons?.length ? `<div class="cs-reasons">${req.reasons.map((r) => `<div>· ${esc(r)}</div>`).join("")}${req.onceOnly && !req.danger ? `<div class="hint">这种写法只能逐次批准</div>` : ""}</div>` : "";
+  const typedGate = !!req.danger && req.cap !== "cli:agent" && req.cap !== "term:open";
+  const pathHint = (req.cap === "cli:agent" || req.cap === "term:open")
+    ? `<div class="hint">不用填密码，点下面的按钮即可。${req.rememberPath ? "「总是允许此目录」以后这个文件夹不再问。" : ""}</div>`
+    : "";
+  const pathHead = req.cap === "term:open" ? "想在工程目录打开终端"
+    : req.cap === "cli:agent" || req.rememberPath ? "想派 Coding CLI 改工程"
+    : null;
   el.innerHTML = `
-    <div class="cs-head">🔐 <b>${esc(req.botName)}</b> ${req.rememberPath ? `想派 Coding CLI 改工程` : req.command ? `想执行 <code>${esc(req.command)}</code>` : `请求使用「${esc(req.capLabel)}」`}</div>
+    <div class="cs-head">🔐 <b>${esc(req.botName)}</b> ${pathHead ? pathHead : !opaqueCmd ? `想执行 <code>${esc(req.command)}</code>` : `想执行一条命令`}</div>
     <pre class="cs-desc">${esc(req.description)}</pre>
     ${reasons}
-    ${req.danger ? `<div class="cs-warn">⚠️ 危险操作：每次都要确认，输入 confirm 后才能批准 <input placeholder="confirm" /></div>` : ""}
+    ${pathHint}
+    ${typedGate ? `<label class="cs-warn">这是危险命令。在框里输入「确认」后，允许按钮才能点。不是密码。<input type="text" placeholder="确认" autocomplete="off" spellcheck="false" name="harness-confirm" /></label>` : ""}
     <div class="cs-btns"><button class="primary-btn" data-d="allow-once">允许一次</button>${alwaysPath}${always}${group}<button class="ghost-btn" data-d="deny">拒绝</button>${floating && req.sessionId ? `<button class="ghost-btn" data-d="open">查看会话</button>` : ""}</div>`;
   const gate = el.querySelector(".cs-warn input");
   const allowBtns = [...el.querySelectorAll('[data-d^="allow"]')];
-  if (gate) { allowBtns.forEach((b) => (b.disabled = true)); gate.oninput = () => allowBtns.forEach((b) => (b.disabled = gate.value.trim().toLowerCase() !== "confirm")); }
+  if (gate) {
+    allowBtns.forEach((b) => (b.disabled = true));
+    gate.oninput = () => allowBtns.forEach((b) => (b.disabled = !/^(confirm|确认)$/i.test(gate.value.trim())));
+  }
   el.querySelectorAll("[data-d]").forEach((btn) => (btn.onclick = () => {
     if (btn.dataset.d === "open") return openSessionById(req.sessionId, req.botId);
     api.consent.respond(req.id, btn.dataset.d);
@@ -833,7 +1149,7 @@ api.onConsentRequest((req) => {
   if (live) {
     c.inline = consentCard(req, false);
     live.add(c.inline);
-    if (currentSession === req.sessionId) { const box = $("#messages"); box.scrollTop = box.scrollHeight; }
+    if (currentSession === req.sessionId) followMessages();
   }
   consents.set(req.id, c);
   syncConsentDock();
@@ -895,33 +1211,84 @@ function bouncePreview(el) {
   el.classList.add("pop");
 }
 
+async function openCreatedBot(bot) {
+  await refreshBots();
+  const nb = bots.find((x) => x.id === bot.id) ?? bot;
+  await selectBot(nb);
+  if (bot.welcomeSessionId) {
+    currentSession = bot.welcomeSessionId;
+    await loadSessionMessages(bot.welcomeSessionId, true);
+  }
+}
+
 async function createBotFlow() {
   let avatar = randomAvatar();
+  let draftTimer = null;
+  const providers = await api.providers.list().catch(() => []);
+  const needModel = providers.length === 0;
   const modal = openModal(`
     <div class="cb-head"><h2>新建 Bot</h2><button class="cb-x" title="关闭">✕</button></div>
     <div class="cb-body">
+      ${needModel ? `<div class="hint" id="cb-need-model">还没配置模型也可以先建；对话会走离线回复。<button class="link-btn" id="cb-goto-model" type="button">先去接模型</button></div>` : ""}
       <div class="cb-preview"></div>
       <input id="cb-name" class="cb-name" placeholder="给 Bot 起个名字" maxlength="24" />
+      <textarea id="cb-brief" class="cb-brief" rows="2" placeholder="一句话说明它是干什么的（可选，AI 会帮你填角色和人设）"></textarea>
+      <div class="cb-ai">
+        <label>角色</label><input id="cb-role" placeholder="例如：改包主控 / 翻译助手" />
+        <label>人设</label><input id="cb-persona" placeholder="例如：务实、少废话" />
+        <div class="hint" id="cb-ai-hint">填名字或描述后，会自动预填角色与人设，可再改。</div>
+      </div>
       <div class="cb-picker"></div>
     </div>
     <div class="cb-foot">
-      <span class="cb-links"><button class="link-btn" id="cb-text">用一句话描述创建…</button><button class="link-btn" id="cb-import">导入</button></span>
+      <span class="cb-links"><button class="link-btn" id="cb-text">用一句话描述创建…</button><button class="link-btn" id="cb-import">导入别人分享的 bot…</button></span>
       <button class="ghost-btn" id="cb-cancel">取消</button>
       <button class="primary-btn" id="cb-ok" disabled>创建</button>
     </div>`);
   modal.classList.add("cb-modal");
   const preview = modal.querySelector(".cb-preview");
   const nameEl = modal.querySelector("#cb-name");
+  const briefEl = modal.querySelector("#cb-brief");
+  const roleEl = modal.querySelector("#cb-role");
+  const personaEl = modal.querySelector("#cb-persona");
+  const hintEl = modal.querySelector("#cb-ai-hint");
   const ok = modal.querySelector("#cb-ok");
+  modal.querySelector("#cb-goto-model")?.addEventListener("click", () => {
+    closeModal();
+    quickProviderFlow({ continueToBot: true });
+  });
   avatarPicker(modal.querySelector(".cb-picker"), avatar, (a) => {
     avatar = a;
     preview.innerHTML = blobAvatarSvg(a, "preview");
     bouncePreview(preview);
   });
-  nameEl.oninput = () => {
+  const syncOk = () => {
     ok.disabled = !nameEl.value.trim();
     preview.classList.toggle("typing", !!nameEl.value);
   };
+  const runDraft = async () => {
+    const name = nameEl.value.trim();
+    const brief = briefEl.value.trim();
+    if (!name && !brief) return;
+    hintEl.textContent = "正在预填…";
+    try {
+      const text = `创建 bot：${name || "助手"}${brief ? `，${brief}` : ""}`;
+      const d = await api.bots.draft(text);
+      if (!roleEl.value.trim() && d.role) roleEl.value = d.role;
+      if (!personaEl.value.trim() && d.persona) personaEl.value = d.persona;
+      if (!name && d.name && d.name !== "助手") nameEl.value = d.name;
+      syncOk();
+      hintEl.textContent = "已预填，可直接改后再创建。";
+    } catch {
+      hintEl.textContent = "预填失败，你也可以手写角色和人设。";
+    }
+  };
+  const scheduleDraft = () => {
+    clearTimeout(draftTimer);
+    draftTimer = setTimeout(runDraft, 450);
+  };
+  nameEl.oninput = () => { syncOk(); scheduleDraft(); };
+  briefEl.oninput = scheduleDraft;
   nameEl.onkeydown = (e) => { if (e.key === "Enter" && !e.isComposing && !ok.disabled) ok.click(); };
   ok.onclick = async () => {
     const name = nameEl.value.trim();
@@ -930,10 +1297,15 @@ async function createBotFlow() {
     ok.textContent = "创建中…";
     preview.classList.add("busy");
     try {
-      const bot = await api.bots.create(`创建 bot：${name}`, { name, avatar });
+      const brief = briefEl.value.trim();
+      const text = `创建 bot：${name}${brief ? `，${brief}` : ""}`;
+      const bot = await api.bots.create(text, {
+        name, avatar,
+        role: roleEl.value.trim() || undefined,
+        persona: personaEl.value.trim() || undefined,
+      });
       closeModal();
-      await refreshBots();
-      selectBot(bots.find((x) => x.id === bot.id) ?? bot);
+      await openCreatedBot(bot);
     } catch (e) {
       ok.disabled = false;
       ok.textContent = "创建";
@@ -984,8 +1356,7 @@ async function createBotByTextFlow() {
     if (!text) return;
     const bot = await api.bots.create(text, { avatar: randomAvatar() });
     closeModal();
-    await refreshBots();
-    selectBot(bot);
+    await openCreatedBot(bot);
   };
   modal.querySelector("#mb-cancel").onclick = closeModal;
   modal.querySelector("#mb-import").onclick = () => importBotFlow();

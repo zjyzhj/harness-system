@@ -121,11 +121,12 @@ async function renderWorkbench() {
   pane.querySelector("[data-wb=ask]").onclick = () => {
     const ta = pane.querySelector(".wb-edit");
     const sel = ta && ta.selectionEnd > ta.selectionStart ? ta.value.slice(ta.selectionStart, ta.selectionEnd) : "";
-    $("#input").value = sel
-      ? `修改工作台里的「${f.name}」（${f.path}）中的这一段：\n"""\n${sel.slice(0, 1500)}\n"""\n改成：`
-      : `修改工作台里的「${f.name}」（${f.path}），直接改文件：`;
-    $("#input").focus();
-    $("#input").dispatchEvent(new Event("input"));
+    setComposerInput(
+      sel
+        ? `修改工作台里的「${f.name}」（${f.path}）中的这一段：\n"""\n${sel.slice(0, 1500)}\n"""\n改成：`
+        : `修改工作台里的「${f.name}」（${f.path}），直接改文件：`,
+      { focus: true, caret: "end" },
+    );
   };
   bindWbHead(pane);
 }
@@ -290,10 +291,20 @@ $("#projects-btn").onclick = () => projectsFlow();
 
 /* ======== 追问建议到达 ======== */
 api.onSuggestions(({ sessionId, msgId, suggestions }) => {
-  if (sessionId !== currentSession || pending.has(sessionId) || voiceMode) return;
-  const el = document.querySelector(`#messages [data-id="${msgId}"]`);
-  const lastMsg = [...document.querySelectorAll("#messages > [data-id]")].filter((x) => x.dataset.id).at(-1);
-  if (el && el === lastMsg) showSuggestions(el, suggestions);
+  if (sessionId !== currentSession || voiceMode) return;
+  // 允许在收尾刷新后到达：不要求 !pending；消息仍须是当前会话最后一条
+  const tryShow = () => {
+    const el = document.querySelector(`#messages [data-id="${msgId}"]`);
+    const lastMsg = [...document.querySelectorAll("#messages > [data-id]")].filter((x) => x.dataset.id).at(-1);
+    if (el && el === lastMsg) {
+      showSuggestions(el, suggestions);
+      return true;
+    }
+    return false;
+  };
+  if (tryShow()) return;
+  // loadSessionMessages 可能尚未挂上 data-id：短延迟再试一次
+  setTimeout(() => { if (sessionId === currentSession) tryShow(); }, 120);
 });
 
 /* ======== 软件内引用：bot 回复里的 [文字](app:类型/标识) 点开对应的东西 ======== */
@@ -307,11 +318,14 @@ const SETTINGS_PAGES = {
   secrets: () => envFlow(),
   vault: () => vaultFlow(),
   connectors: () => vaultFlow(),
+  share: () => vaultFlow("share"),
+  gateway: () => vaultFlow("gateway"),
+  webhooks: () => vaultFlow("webhooks"),
   skills: () => skillsFlow(),
   tasks: () => tasksFlow(),
   memory: () => memoryFlow(),
   mcp: () => mcpFlow(),
-  plans: () => plansFlow(),
+  plans: () => alert("编排已下线。多步协作请用群聊 @ 或让主控 bot.ask。"),
   access: () => sysaccessFlow(),
   pet: () => petSmartFlow(),
   about: () => aboutFlow(),
@@ -343,7 +357,22 @@ async function openRef(type, rawId) {
   }
   if (type === "file") return openInWorkbench(id.startsWith("/") ? id : `/${id}`);
   if (type === "project") return projectsFlow();
-  if (type === "task") return tasksFlow();
+  if (type === "task" || type === "tasks") {
+    if (id && currentBot) {
+      detailsTab = "info";
+      toggleDetails(true);
+      await renderDetails(currentBot);
+      const card = document.querySelector(`.routine-card[data-task], .routine-card`);
+      const hit = id
+        ? [...document.querySelectorAll(".routine-card")].find((el) => el.querySelector(".c-title")?.textContent?.includes(id)) || card
+        : card;
+      hit?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+      hit?.classList.add("flash-hit");
+      setTimeout(() => hit?.classList.remove("flash-hit"), 1600);
+      return;
+    }
+    return tasksFlow();
+  }
   if (type === "memory") {
     const [who, kind] = id.split("/");
     const b = bots.find((x) => x.id === who || x.name === who);
@@ -395,8 +424,10 @@ async function skillPreview(k) {
 /* ======== 分享 bot：创建副本 / 模板链接；导入别人分享的 bot ======== */
 function shareBotMenu(anchor, b) {
   popMenu(anchor, [
-    { html: `<b>创建副本</b><span class="pf-sub">复制一个同样设定的 bot，可以改着用</span>`, run: () => duplicateBot(b) },
     { html: `<b>分享模板链接</b><span class="pf-sub">发给别人，一键导入同样的 bot</span>`, run: () => shareBotFlow(b) },
+    { html: `<b>导入别人分享的 bot</b><span class="pf-sub">粘贴 harnessbot:// 链接或选 .harnessbot 文件</span>`, run: () => importBotFlow() },
+    { html: `<b>创建副本</b><span class="pf-sub">复制一个同样设定的 bot，可以改着用</span>`, run: () => duplicateBot(b) },
+    { html: `<b>本地模板库</b><span class="pf-sub">内置技能模板</span>`, run: () => templatesBrowseFlow(b) },
   ]);
 }
 
@@ -443,21 +474,32 @@ async function shareBotFlow(b) {
       nc.mcp && `${nc.mcp} 个 MCP`,
       nc.sharedSkills && `${nc.sharedSkills} 个共享技能提示`,
     ].filter(Boolean);
+    const primary = r.shortUrl || r.link;
+    const noShortHint = r.shortUrl ? "" : `
+      <p class="hint">当前是很长的协议链接，微信等可能发不出去。
+        ${r.shortError ? `短链失败：${esc(r.shortError)}。` : "还没启用短链。"}
+        <button type="button" class="link-btn" id="sb-setup">去开通短链桥（Cloudflare）</button>
+        ，或直接发下方的 <code>.harnessbot</code> 文件。
+      </p>`;
     body.innerHTML = `
-      <div class="sh-ok">✅ 链接已复制到剪贴板</div>
-      <textarea class="sb-link" readonly rows="3">${esc(r.link)}</textarea>
+      <div class="sh-ok">✅ ${r.shortUrl ? "短链" : "链接"}已复制到剪贴板</div>
+      ${r.shortUrl ? `<textarea class="sb-link" readonly rows="2">${esc(r.shortUrl)}</textarea>
+        <p class="hint">对方打开短链即可预览并导入。要立刻作废：Connect →「短链分享」→ 撤销。</p>
+        <details><summary class="hint">备用协议原文</summary><textarea class="sb-link dim" readonly rows="2">${esc(r.link)}</textarea></details>`
+        : `<textarea class="sb-link" readonly rows="3">${esc(r.link)}</textarea>${noShortHint}`}
       <ul class="sb-list">
         <li>包含：名字、角色、人设和提示词${b.avatarPath ? "、头像" : ""}${r.skills ? `、${r.skills} 个私有技能` : ""}${needBits.length ? `、依赖清单（${needBits.join("、")}）` : ""}</li>
         <li>不包含：模型与 API Key、密钥/配置的值、记忆、会话记录</li>
-        <li>链接太长发不出去时，发这个文件：<a class="ref ref-file" data-ref="file" data-id="${esc(r.file)}">${esc(r.file.split("/").pop())}</a></li>
+        <li>文件备用：<a class="ref ref-file" data-ref="file" data-id="${esc(r.file)}">${esc(r.file.split("/").pop())}</a></li>
       </ul>
       <div class="actions">
         <button class="ghost-btn" id="sb-reveal">在 Finder 中显示文件</button>
         <button class="primary-btn" id="sb-copy">再复制一次</button>
       </div>`;
     body.querySelector("#sb-reveal").onclick = () => api.system.reveal(r.file);
-    body.querySelector("#sb-copy").onclick = async (e) => { await navigator.clipboard.writeText(r.link); e.target.textContent = "已复制"; };
-    body.querySelector(".sb-link").onclick = (e) => e.target.select();
+    body.querySelector("#sb-copy").onclick = async (e) => { await navigator.clipboard.writeText(primary); e.target.textContent = "已复制"; };
+    body.querySelector("#sb-setup")?.addEventListener("click", () => { closeModal(); vaultFlow("share"); });
+    body.querySelectorAll(".sb-link").forEach((el) => (el.onclick = (e) => e.target.select()));
   } catch (e) {
     body.innerHTML = `<p class="err-text">打包失败：${esc(errText(e))}</p>`;
   }
@@ -514,5 +556,5 @@ function importBotFlow(prefill = "") {
 
 api.onImportLink((payload) => importBotFlow(payload));
 
-// 要等所有面板脚本加载完再跑：它会用到后面几个文件里声明的函数
-refreshBots().then(restoreView);
+// 名单在 renderer.js 里已经先画。这里只等它就绪再恢复上次会话。
+whenBotsReady().then(restoreView);

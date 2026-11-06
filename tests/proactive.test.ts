@@ -3,7 +3,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ProactiveEngine, collectSignals, type ProactiveSignal } from "../core/proactive";
-import type { ChatMessage, OrchestrationPlan, Session } from "../core/types";
+import type { ChatMessage, Session } from "../core/types";
 
 const H = 3600_000;
 const NOW = new Date(2026, 9, 28, 15, 0).getTime();
@@ -12,7 +12,7 @@ const bot = (sessionId: string, content: ChatMessage["content"], ago: number): C
   ({ sessionId, from: "a", to: "user", role: "assistant", content, kind: "chat", createdAt: NOW - ago });
 
 describe("主动跟进的信号", () => {
-  test("没选的选项、没接的提议、失败的编排和定时任务；已回复 / 太新 / 后台会话不算", () => {
+  test("没选的选项、没接的提议和失败的定时任务；已回复 / 太新 / 后台会话不算", () => {
     const msgs: Record<string, ChatMessage[]> = {
       "s-choice": [bot("s-choice", [{ type: "choice", id: "c1", question: "选哪个方向？", options: ["A", "B"] }], 3 * H)],
       "s-offer": [bot("s-offer", "初稿写好了。需要我再出一版英文的吗？", 4 * H)],
@@ -20,19 +20,15 @@ describe("主动跟进的信号", () => {
       "s-done": [bot("s-done", "需要我继续吗？", 5 * H), { ...bot("s-done", "好的", 4 * H), role: "user", from: "user" }],
       "plan-x-1": [bot("plan-x-1", "需要我继续吗？", 5 * H)],
     };
-    const plans = [{ id: "p1", ownerBotId: "user", title: "介绍页", createdAt: NOW - 3 * H, status: "error", finishedAt: NOW - 2 * H, stages: [{ id: "st", botId: "w", prompt: "", mode: "seq", status: "error", error: "超时", retries: 0 }] }] as OrchestrationPlan[];
     const sigs = collectSignals({
       sessions: Object.keys(msgs).map((id) => sess(id)),
       messages: (sid) => msgs[sid] ?? [],
-      plans,
       tasks: [{ id: "t1", botId: "a", name: "日报", cron: "0 9 * * *", enabled: true, runCount: 1, createdAt: 0, lastRunAt: NOW - H, lastError: "网络错误" }],
       masterId: "m",
       nameOf: (id) => (id === "w" ? "写作助手" : id),
       now: NOW,
     });
-    expect(sigs.map((s) => s.kind).sort()).toEqual(["choice", "offer", "plan", "task"]);
-    expect(sigs.find((s) => s.kind === "plan")?.fact).toContain("写作助手");
-    expect(sigs.find((s) => s.kind === "plan")?.botId).toBe("m");
+    expect(sigs.map((s) => s.kind).sort()).toEqual(["choice", "offer", "task"]);
   });
 });
 

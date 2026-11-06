@@ -51,6 +51,8 @@ header .date{font-size:12px;color:#8a8a86}
 .who{font-size:11.5px;color:#8a8a86}
 .bubble{padding:10px 14px;border-radius:16px;background:#f1f1ef;white-space:pre-wrap;word-break:break-word}
 .user .bubble{background:#2f8f4e;color:#fff}
+.inbound .bubble{background:#eef3fb;border:1px solid #c9daf0;border-radius:16px 16px 16px 6px}
+.inbound .av{background:#d9e6f8;color:#3559c7}
 .bubble p,.bubble li{margin:2px 0}
 .bubble ul,.bubble ol{padding-left:20px;white-space:normal}
 .bubble h1,.bubble h2,.bubble h3{font-size:15px;margin:6px 0 2px}
@@ -159,10 +161,12 @@ export function buildShareHtml(input: ShareInput, r: ShareRender): string {
     const blocks: ContentBlock[] = typeof m.content === "string" ? [{ type: "text", text: m.content }] : m.content;
     const body = blocksHtml(blocks, r, !!input.forImage);
     if (!body) continue;
-    const isUser = m.from === "user";
-    const name = isUser ? "我" : input.nameOf(m.from);
-    const av = input.avatarOf?.(m.from);
-    rows.push(`<div class="msg ${isUser ? "user" : "bot"}"><div class="av">${av ? `<img src="${av}" />` : r.esc(name.slice(0, 1))}</div><div class="col">${isUser ? "" : `<div class="who">${r.esc(name)}</div>`}${body}</div></div>`);
+    const isInbound = m.from === "webhook" || m.from === "inbound" || (!!(m.meta as { webhook?: boolean } | undefined)?.webhook && m.role === "user");
+    const isUser = m.from === "user" && !isInbound;
+    const name = isUser ? "我" : isInbound ? "Webhook 入站" : input.nameOf(m.from);
+    const av = isInbound ? null : input.avatarOf?.(m.from);
+    const cls = isInbound ? "inbound" : isUser ? "user" : "bot";
+    rows.push(`<div class="msg ${cls}"><div class="av">${av ? `<img src="${av}" />` : r.esc(name.slice(0, 1))}</div><div class="col">${isUser ? "" : `<div class="who">${r.esc(name)}</div>`}${body}</div></div>`);
   }
   const first = input.messages[0]?.createdAt ?? Date.now();
   const date = new Date(first).toLocaleDateString("zh-CN", { year: "numeric", month: "long", day: "numeric" });

@@ -3,7 +3,7 @@
  * 用法：bun run scripts/build-shell.ts
  */
 import { $ } from "bun";
-import { mkdirSync, cpSync } from "node:fs";
+import { mkdirSync, cpSync, existsSync } from "node:fs";
 import { join } from "node:path";
 
 const root = join(import.meta.dir, "..");
@@ -20,4 +20,7 @@ await $`bun build ${join(root, "app/main.ts")} --outfile ${join(dist, "main.cjs"
 await $`bun build ${join(root, "app/preload.ts")} --outfile ${join(dist, "preload.cjs")} --format cjs --target node --external electron`.quiet();
 
 cpSync(rendererSrc, rendererDist, { recursive: true });
+const xtermCss = join(root, "node_modules", "@xterm", "xterm", "css", "xterm.css");
+if (existsSync(xtermCss)) cpSync(xtermCss, join(rendererDist, "xterm.css"));
+await $`bun build ${join(root, "app/renderer/xterm-bundle.ts")} --outfile ${join(rendererDist, "xterm-bundle.js")} --format iife --target browser`.quiet();
 console.log("✅ shell built → dist/");

@@ -69,5 +69,9 @@ describe("对话里管理 MCP", () => {
 
     expect((await run("mcp.remove", { name: "Git" })).output).toContain("已移除");
     expect(servers.every((s) => s.id !== "git")).toBe(true);
+
+    // HTTP MCP 指向本机且无授权中心 → 拒绝（防 SSRF）
+    const local = await run("mcp.add", { name: "内网", url: "http://127.0.0.1:9999/mcp" });
+    expect(local.output).toMatch(/未允许|拒绝/);
   });
 });

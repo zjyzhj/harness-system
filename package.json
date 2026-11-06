@@ -8,23 +8,31 @@
   "scripts": {
     "postinstall": "bun run scripts/sign-electron-dev.ts",
     "sign:electron": "bun run scripts/sign-electron-dev.ts",
-    "dev": "bun run scripts/sign-electron-dev.ts && bun run scripts/build-shell.ts && electron .",
+    "dev": "bun run scripts/sign-electron-dev.ts && bun run scripts/build-shell.ts && bun run scripts/dev-electron.ts",
     "dev:core": "bun run --watch tests/demo.ts",
     "test": "bun test",
     "typecheck": "bunx tsc --noEmit",
     "build": "bun run scripts/gen-icon.ts && bun run scripts/build-shell.ts",
-    "start": "bun run sign:electron && bun run build && electron .",
+    "start": "bun run sign:electron && bun run build && bun run scripts/dev-electron.ts",
     "eval": "bun run sign:electron && bun run scripts/build-shell.ts && electron . --run-evals",
-    "dist": "bun run build && electron-builder --mac --arm64"
+    "smoke:group": "bun run scripts/smoke-group-live.ts",
+    "smoke:group:help": "echo '先: electron . --remote-debugging-port=9333；再: bun run smoke:group'",
+    "deploy:share-bridge": "bun run cloud/share-bridge/deploy.ts",
+    "dist": "bun run build && electron-builder --mac --arm64",
+    "dist:mac": "bun run dist",
+    "typecheck:strict": "bunx tsc --noEmit"
   },
   "devDependencies": {
     "@types/bun": "latest",
-    "electron": "^42",
+    "electron": "42",
     "electron-builder": "^26.18.0",
     "typescript": "^5.6.0"
   },
   "dependencies": {
-    "@huggingface/transformers": "^4.3.2"
+    "@huggingface/transformers": "^4.3.2",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/headless": "^6.0.0",
+    "@xterm/xterm": "^6.0.0"
   },
   "main": "dist/main.cjs",
   "build": {
@@ -34,6 +42,7 @@
     "directories": {
       "output": "release"
     },
+    "afterSign": "scripts/notarize.cjs",
     "mac": {
       "category": "public.app-category.productivity",
       "target": [{

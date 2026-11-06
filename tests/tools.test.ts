@@ -31,10 +31,12 @@ describe("tool-executor", () => {
     expect(r.output).toContain("hello");
   });
 
-  test("fs.read 拒绝白名单外路径", async () => {
-    const r = await exe.run("fs.read", { path: "/etc/passwd" });
-    expect(r.ok).toBe(false);
-    expect(r.output).toContain("白名单");
+  test("fs.read 可读工作区外路径（不再用工程白名单拦浏览）", async () => {
+    const outside = mkdtempSync(join(tmpdir(), "harness-fs-out-"));
+    writeFileSync(join(outside, "note.txt"), "outside-ok");
+    const r = await exe.run("fs.read", { path: join(outside, "note.txt") });
+    expect(r.ok).toBe(true);
+    expect(r.output).toContain("outside-ok");
   });
 
   test("bash.run 执行白名单命令", async () => {
@@ -59,6 +61,24 @@ describe("tool-executor", () => {
     const r = await exe.run("fs.list", { path: root });
     expect(r.ok).toBe(true);
     expect(r.output).toContain("notes");
+  });
+
+  test("fs.list / fs.read 不依赖工程名单 / extraRoots", async () => {
+    const project = mkdtempSync(join(tmpdir(), "harness-proj-"));
+    writeFileSync(join(project, "README.md"), "# hi");
+    const listed = await exe.run("fs.list", { path: project });
+    expect(listed.ok).toBe(true);
+    expect(listed.output).toContain("README.md");
+    const read = await exe.run("fs.read", { path: join(project, "README.md") });
+    expect(read.ok).toBe(true);
+    expect(read.output).toContain("# hi");
+  });
+
+  test("fs.write 不因 extraRoots 扩大写面", async () => {
+    const project = mkdtempSync(join(tmpdir(), "harness-proj-w-"));
+    const r = await exe.run("fs.write", { path: join(project, "x.txt"), content: "nope", extraRoots: [project] });
+    expect(r.ok).toBe(false);
+    expect(r.output).toMatch(/可写工作区|白名单/);
   });
 
   test("memory.add/search 经工具写入", async () => {

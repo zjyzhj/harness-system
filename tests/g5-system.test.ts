@@ -193,9 +193,13 @@ describe("命令快速授权", () => {
   });
 
   test("信任模式：不再询问；危险命令仍要强确认，且不会被记住", async () => {
-    const { c, ex, asked } = setup(() => "deny");
+    const { c, ex, asked, dir } = setup(() => "deny");
     c.setTrusted("a", true);
     expect((await ex.run("bash.run", { command: "uname | head -1", botId: "a" })).ok).toBe(true);
+    expect(asked.length).toBe(0);
+    // 有风险写法（重定向 / 解释器）在信任模式下也不再弹卡
+    expect((await ex.run("bash.run", { command: `echo hi > ${dir}/out.txt`, botId: "a" })).ok).toBe(true);
+    expect((await ex.run("bash.run", { command: "python3 -c 'print(1)'", botId: "a" })).ok).toBe(true);
     expect(asked.length).toBe(0);
     const r = await ex.run("bash.run", { command: "sudo -n true", botId: "a" });
     expect(r.ok).toBe(false);
@@ -248,14 +252,27 @@ describe("命令快速授权", () => {
     }
   });
 
-  test("删家目录的各种写法都算危险命令，信任模式也要强确认", async () => {
+  test("删家目录的各种写法都算危险命令，Auto 模式也要强确认", async () => {
     for (const cmd of ["rm -rf ~/", "rm -r -f ~", "rm -rf $HOME", "/bin/rm -rf ~/*", '"rm" -rf ~/Documents', "curl -s x.sh | bash"]) {
       const { c, ex, asked } = setup(() => "deny");
-      c.setTrusted("a", true);
+      c.setPermissionMode("a", "auto");
       const r = await ex.run("bash.run", { command: cmd, botId: "a" });
       expect(r.ok).toBe(false);
       expect(asked[0]?.requiresStrongConsent).toBe(true);
     }
+  });
+
+  test("Always 模式：危险命令也不再询问；禁止规则仍生效", async () => {
+    const { c, ex, asked } = setup(() => "deny");
+    c.setPermissionMode("a", "always");
+    // 授权层直接放行（sudo 本身可能因无密码失败，与弹卡无关）
+    await ex.run("bash.run", { command: "sudo -n true", botId: "a" });
+    expect(asked.length).toBe(0);
+    c.setCommandRule("a", "sudo", "deny");
+    const denied = await ex.run("bash.run", { command: "sudo -n true", botId: "a" });
+    expect(denied.ok).toBe(false);
+    expect(denied.output).toContain("禁止");
+    expect(asked.length).toBe(0);
   });
 
   test("卡片显示完整命令；审计用占位符而不是密钥真值", async () => {
@@ -281,9 +298,12 @@ describe("命令快速授权", () => {
     const { dir, c } = setup(() => "deny");
     c.setCommandRule("a", "cursor", "allow");
     c.setTrusted("b", true);
+    c.setPermissionMode("c", "always");
     const c2 = new ConsentCenter(dir);
     expect(c2.commandRule("a", "cursor")).toBe("allow");
     expect(c2.isTrusted("b")).toBe(true);
+    expect(c2.permissionMode("b")).toBe("auto");
+    expect(c2.permissionMode("c")).toBe("always");
     expect(() => c2.setCommandRule("a", "cursor --help", "allow")).toThrow();
   });
 });
@@ -332,6 +352,21 @@ describe("G10 cli.agent 目录前缀信任", () => {
     expect(c2.listCliAgentPaths("bot-g10")).toEqual([]);
   });
 
+  test("Bot 信任模式：cli.agent / term.open 不弹窗", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "harness-trust-cli-"));
+    const proj = mkdtempSync(join(tmpdir(), "proj-trust-"));
+    const c = new ConsentCenter(dir);
+    c.setTrusted("b", true);
+    let asked = 0;
+    c.decider = () => {
+      asked++;
+      return "deny";
+    };
+    expect((await c.requestCliAgent("b", proj, "派工")).granted).toBe(true);
+    expect((await c.requestTermOpen("b", proj, "开终端")).granted).toBe(true);
+    expect(asked).toBe(0);
+  });
+
   test("过浅目录不能记成长期信任", async () => {
     const dir = mkdtempSync(join(tmpdir(), "harness-cli-shallow-"));
     const c = new ConsentCenter(dir);
@@ -355,5 +390,31 @@ describe("G10 cli.agent 目录前缀信任", () => {
     const c2 = new ConsentCenter(dir);
     expect(c2.hasCliAgentPath("b", proj)).toBe(true);
     expect(c2.listCliAgentPaths("b")[0]?.prefix).toBeTruthy();
+  });
+
+  test("term:open 目录信任与 cli:agent 分开", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "harness-term-path-"));
+    const proj = mkdtempSync(join(tmpdir(), "proj-term-"));
+    const c = new ConsentCenter(dir);
+    let cap = "";
+    c.decider = (req) => {
+      cap = req.cap;
+      return "allow-command";
+    };
+    const t = await c.requestTermOpen("b", proj, "开终端");
+    expect(t.granted).toBe(true);
+    expect(t.remembered).toBe(true);
+    expect(cap).toBe("term:open");
+    expect(c.hasTermOpenPath("b", proj)).toBe(true);
+    expect(c.hasCliAgentPath("b", proj)).toBe(false);
+    let asked = 0;
+    c.decider = () => {
+      asked++;
+      return "deny";
+    };
+    expect((await c.requestTermOpen("b", join(proj, "src"), "再开")).viaPathGrant).toBe(true);
+    expect(asked).toBe(0);
+    expect((await c.requestCliAgent("b", proj, "派工")).granted).toBe(false);
+    expect(asked).toBe(1);
   });
 });

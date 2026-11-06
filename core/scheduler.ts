@@ -1,19 +1,31 @@
-import { randomUUID } from "node:crypto";
-import type { ScheduledTask } from "./types";
+import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import type { ScheduledTask, TaskRunLog } from "./types";
 import { readJsonSafe, writeJsonAtomic } from "./atomic-fs";
 import { join } from "node:path";
 
+const HISTORY_CAP = 20;
+
+/** IPC / 表单可改字段；不含 webhookToken / history / runCount / botId 等 */
+export const TASK_PUBLIC_PATCH_KEYS = [
+  "name", "prompt", "cron", "enabled", "alarmAt", "skillKey", "source",
+  "maxRetries", "notifyPet", "runPrompt", "deleteAfterRun", "sessionId",
+  "timezone", "schedule",
+] as const satisfies readonly (keyof ScheduledTask)[];
+
 /**
- * 定时任务调度器 — 对标 CowAgent agent/tools/scheduler/
+ * 定时 / 例行调度器 — 对标 CowAgent agent/tools/scheduler/
  * - cron 5 段表达式：分 时 日 月 周
  * - 后台定时器每 30s 检查到期任务，触发 bot 执行
  * - 任务持久化 tasks.json
+ * - 支持试跑、运行历史、入站 webhook 令牌
  */
 export class Scheduler {
   private tasks: ScheduledTask[] = [];
   private file: string;
   private timer: ReturnType<typeof setInterval> | null = null;
   private running = false;
+  /** 正在执行的任务 id（tick 与 runNow / webhook 互斥） */
+  private inFlight = new Set<string>();
 
   /** 到期触发回调：task → 交给 BotRuntime 执行 */
   onRun: ((task: ScheduledTask) => Promise<void>) | null = null;
@@ -30,6 +42,16 @@ export class Scheduler {
   private load() {
     const tasks = readJsonSafe<ScheduledTask[]>(this.file, []);
     this.tasks = Array.isArray(tasks) ? tasks : [];
+    // 进程重启后不可能还在跑；清掉残留的「running」，避免列表一直显示「正在执行」
+    let dirty = false;
+    for (const t of this.tasks) {
+      if (t.lastResult === "running") {
+        t.lastResult = "error";
+        t.lastError = t.lastError || "上次试跑被中断";
+        dirty = true;
+      }
+    }
+    if (dirty) this.persist();
   }
   private persist() {
     writeJsonAtomic(this.file, this.tasks);
@@ -41,10 +63,45 @@ export class Scheduler {
   listForBot(botId: string): ScheduledTask[] {
     return this.tasks.filter((t) => t.botId === botId);
   }
+  get(id: string): ScheduledTask | undefined {
+    return this.tasks.find((t) => t.id === id);
+  }
+  findByWebhookToken(token: string): ScheduledTask | undefined {
+    const t = String(token || "").trim();
+    if (!t) return undefined;
+    const needle = Buffer.from(t);
+    for (const x of this.tasks) {
+      if (!x.webhookToken) continue;
+      const have = Buffer.from(x.webhookToken);
+      if (have.length === needle.length && timingSafeEqual(have, needle)) return x;
+    }
+    return undefined;
+  }
 
-  create(input: { botId: string; name: string; cron: string; prompt?: string; maxRetries?: number; kind?: "cron" | "once"; alarmAt?: number; notifyPet?: boolean; runPrompt?: boolean; deleteAfterRun?: boolean; sessionId?: string }): ScheduledTask {
+  create(input: {
+    botId: string;
+    name: string;
+    cron: string;
+    prompt?: string;
+    maxRetries?: number;
+    kind?: "cron" | "once";
+    alarmAt?: number;
+    notifyPet?: boolean;
+    runPrompt?: boolean;
+    deleteAfterRun?: boolean;
+    sessionId?: string;
+    skillKey?: string;
+    source?: ScheduledTask["source"];
+    /** true 时服务端生成令牌；忽略任何客户端传入的 token */
+    webhook?: boolean;
+    /** false = 仅 Webhook，不参与到点调度（默认 true） */
+    schedule?: boolean;
+    timezone?: string;
+  }): ScheduledTask {
     const kind = input.kind ?? "cron";
     if (kind === "cron" && !isValidCron(input.cron)) throw new Error(`cron 表达式无效: ${input.cron}（应为 5 段：分 时 日 月 周）`);
+    const timezone = normalizeTimezone(input.timezone);
+    const schedule = input.schedule !== false;
     const t: ScheduledTask = {
       id: randomUUID(),
       botId: input.botId,
@@ -53,7 +110,7 @@ export class Scheduler {
       prompt: input.prompt ?? input.name,
       enabled: true,
       maxRetries: input.maxRetries ?? 2,
-      nextRunAt: kind === "once" ? (input.alarmAt ?? Date.now() + 60_000) : nextCronTime(input.cron, Date.now()),
+      nextRunAt: kind === "once" ? (input.alarmAt ?? Date.now() + 60_000) : nextCronTime(input.cron, Date.now(), timezone),
       runCount: 0,
       createdAt: Date.now(),
       kind,
@@ -62,6 +119,13 @@ export class Scheduler {
       runPrompt: input.runPrompt,
       deleteAfterRun: input.deleteAfterRun,
       sessionId: input.sessionId,
+      skillKey: input.skillKey,
+      source: input.source,
+      timezone: timezone || undefined,
+      webhookToken: input.webhook ? newWebhookToken() : undefined,
+      // 仅在显式关闭调度时落盘，避免旧数据语义噪音
+      schedule: schedule ? undefined : false,
+      history: [],
     };
     this.tasks.push(t);
     this.persist();
@@ -69,13 +133,29 @@ export class Scheduler {
     return t;
   }
 
+  /** 内部更新（可写运行态字段） */
   update(id: string, patch: Partial<ScheduledTask>): ScheduledTask | null {
     const t = this.tasks.find((x) => x.id === id);
     if (!t) return null;
-    Object.assign(t, patch);
-    if (patch.cron) t.nextRunAt = nextCronTime(t.cron, Date.now());
+    const { id: _id, createdAt: _c, ...safe } = patch as Partial<ScheduledTask> & { id?: string };
+    if (safe.timezone !== undefined) safe.timezone = normalizeTimezone(safe.timezone) || undefined;
+    Object.assign(t, safe);
+    if ((patch.cron || patch.timezone !== undefined) && t.kind !== "once") {
+      t.nextRunAt = nextCronTime(t.cron, Date.now(), t.timezone);
+    }
+    if (patch.alarmAt && t.kind === "once") t.nextRunAt = patch.alarmAt;
     this.persist();
+    this.onChange?.();
     return t;
+  }
+
+  /** IPC / UI 白名单更新：禁止改 webhookToken、history、botId、runCount 等 */
+  patchPublic(id: string, patch: Record<string, unknown>): ScheduledTask | null {
+    const safe: Partial<ScheduledTask> = {};
+    for (const key of TASK_PUBLIC_PATCH_KEYS) {
+      if (patch[key] !== undefined) (safe as Record<string, unknown>)[key] = patch[key];
+    }
+    return this.update(id, safe);
   }
 
   delete(id: string) {
@@ -87,6 +167,44 @@ export class Scheduler {
 
   setEnabled(id: string, enabled: boolean) {
     return this.update(id, { enabled });
+  }
+
+  /** 为已有例行开通入站 webhook 令牌 */
+  ensureWebhookToken(id: string): ScheduledTask | null {
+    const t = this.tasks.find((x) => x.id === id);
+    if (!t) return null;
+    if (!t.webhookToken) {
+      t.webhookToken = newWebhookToken();
+      this.persist();
+      this.onChange?.();
+    }
+    return t;
+  }
+
+  /** 轮换令牌：旧 URL 立刻失效 */
+  rotateWebhookToken(id: string): ScheduledTask | null {
+    const t = this.tasks.find((x) => x.id === id);
+    if (!t) return null;
+    t.webhookToken = newWebhookToken();
+    this.persist();
+    this.onChange?.();
+    return t;
+  }
+
+  clearWebhookToken(id: string): ScheduledTask | null {
+    const t = this.tasks.find((x) => x.id === id);
+    if (!t) return null;
+    if (t.webhookToken) {
+      t.webhookToken = undefined;
+      this.persist();
+      this.onChange?.();
+    }
+    return t;
+  }
+
+  private pushHistory(t: ScheduledTask, entry: TaskRunLog) {
+    const hist = [...(t.history ?? []), entry].slice(-HISTORY_CAP);
+    t.history = hist;
   }
 
   /** 启动后台循环 */
@@ -105,51 +223,130 @@ export class Scheduler {
     if (this.running) return;
     this.running = true;
     try {
-      const due = this.tasks.filter((t) => t.enabled && t.nextRunAt && t.nextRunAt <= now);
+      // schedule===false：仅 Webhook 例行，到点不跑（对齐 Grok：定时与 Webhook 分家）
+      const due = this.tasks.filter((t) => t.enabled && t.schedule !== false && t.nextRunAt && t.nextRunAt <= now && !this.inFlight.has(t.id));
       for (const t of due) {
         if (t.kind === "once") {
-          // 一次性闹钟：触发一次即禁用；通知宠物
-          this.update(t.id, { lastRunAt: now, runCount: t.runCount + 1, enabled: false, lastResult: "ok", lastRunLog: `⏰ ${new Date(now).toISOString()} 闹钟触发` });
+          // 一次性：先禁用，避免与 runNow / 下轮 tick 重入
+          this.inFlight.add(t.id);
+          this.update(t.id, {
+            lastRunAt: now,
+            runCount: t.runCount + 1,
+            enabled: false,
+            lastResult: t.runPrompt ? "running" : "ok",
+            lastRunLog: `⏰ ${new Date(now).toISOString()} 闹钟触发`,
+          });
           if (t.notifyPet && this.onAlarm) this.onAlarm(t);
-          if (t.runPrompt && this.onRun) {
-            try { await this.onRun(t); } catch (e) { this.update(t.id, { lastResult: "error", lastError: e instanceof Error ? e.message : String(e) }); }
+          try {
+            if (t.runPrompt && this.onRun) {
+              try {
+                await this.onRun(t);
+                this.pushHistory(t, { taskId: t.id, ranAt: now, ok: true, prompt: t.prompt ?? t.name });
+                this.update(t.id, { lastResult: "ok", lastError: undefined, lastRunLog: `⏰ ${new Date(now).toISOString()} 成功` });
+              } catch (e) {
+                const err = e instanceof Error ? e.message : String(e);
+                this.pushHistory(t, { taskId: t.id, ranAt: now, ok: false, error: err, prompt: t.prompt ?? t.name });
+                this.update(t.id, { lastResult: "error", lastError: err, lastRunLog: `⏰ ${new Date(now).toISOString()} 失败: ${err.slice(0, 120)}` });
+              }
+            } else {
+              this.pushHistory(t, { taskId: t.id, ranAt: now, ok: true, prompt: t.prompt ?? t.name });
+            }
+            if (t.deleteAfterRun) this.delete(t.id);
+            else this.onChange?.();
+          } finally {
+            this.inFlight.delete(t.id);
           }
-          if (t.deleteAfterRun) this.delete(t.id);
-          else this.onChange?.(); // 一次性已触发（enabled=false），面板同步
           continue;
         }
-        const next = nextCronTime(t.cron, now);
+        this.inFlight.add(t.id);
+        const next = nextCronTime(t.cron, now, t.timezone);
         this.update(t.id, { lastRunAt: now, nextRunAt: next, runCount: t.runCount + 1, lastResult: "running" });
-        if (this.onRun) {
-          try {
-            await this.onRun(t);
-            this.update(t.id, { lastResult: "ok", retryCount: 0, lastError: undefined, lastRunLog: `✅ ${new Date(now).toISOString()} 成功` });
-          } catch (e) {
-            const err = e instanceof Error ? e.message : String(e);
-            const retries = (t.retryCount ?? 0) + 1;
-            const max = t.maxRetries ?? 2;
-            this.update(t.id, {
-              lastResult: "error",
-              lastError: err,
-              retryCount: retries,
-              lastRunLog: `❌ ${new Date(now).toISOString()} 失败: ${err.slice(0, 120)}`,
-              nextRunAt: retries <= max ? now + [5, 15, 30][Math.min(retries - 1, 2)] * 60_000 : next,
-            });
+        try {
+          if (this.onRun) {
+            try {
+              await this.onRun(t);
+              this.pushHistory(t, { taskId: t.id, ranAt: now, ok: true, prompt: t.prompt ?? t.name });
+              this.update(t.id, { lastResult: "ok", retryCount: 0, lastError: undefined, lastRunLog: `✅ ${new Date(now).toISOString()} 成功` });
+            } catch (e) {
+              const err = e instanceof Error ? e.message : String(e);
+              const retries = (t.retryCount ?? 0) + 1;
+              const max = t.maxRetries ?? 2;
+              this.pushHistory(t, { taskId: t.id, ranAt: now, ok: false, error: err, prompt: t.prompt ?? t.name });
+              this.update(t.id, {
+                lastResult: "error",
+                lastError: err,
+                retryCount: retries,
+                lastRunLog: `❌ ${new Date(now).toISOString()} 失败: ${err.slice(0, 120)}`,
+                nextRunAt: retries <= max ? now + [5, 15, 30][Math.min(retries - 1, 2)] * 60_000 : next,
+              });
+            }
           }
+          this.onChange?.();
+        } finally {
+          this.inFlight.delete(t.id);
         }
-        this.onChange?.();
       }
     } finally {
       this.running = false;
     }
   }
 
-  /** 手动触发一次（测试/调试用） */
-  async runNow(id: string) {
+  /**
+   * 手动 / Webhook 试跑一次。
+   * - cron：不改 nextRunAt
+   * - once：立即消费（disable；deleteAfterRun 则删除），避免与 tick 双触发
+   * - wait:false：立刻返回「执行中」，后台跑完（UI 点闪电图标不卡界面）
+   */
+  async runNow(id: string, opts?: { wait?: boolean }): Promise<ScheduledTask | null> {
+    const wait = opts?.wait !== false;
     const t = this.tasks.find((x) => x.id === id);
-    if (!t || !this.onRun) return;
-    await this.onRun(t);
+    if (!t) return null;
+    if (!this.onRun) return t;
+    if (this.inFlight.has(t.id)) {
+      return this.update(t.id, { lastResult: "running", lastError: "已在执行中" });
+    }
+    const now = Date.now();
+    this.inFlight.add(t.id);
+    // once 先禁用，杜绝 tick 再入
+    if (t.kind === "once") this.update(t.id, { enabled: false, lastRunAt: now, runCount: t.runCount + 1, lastResult: "running" });
+    else this.update(t.id, { lastRunAt: now, runCount: t.runCount + 1, lastResult: "running" });
+
+    const finish = async () => {
+      try {
+        await this.onRun!(t);
+        this.pushHistory(t, { taskId: t.id, ranAt: now, ok: true, prompt: t.prompt ?? t.name });
+        this.update(t.id, {
+          lastResult: "ok",
+          lastError: undefined,
+          lastRunLog: `⚡ ${new Date(now).toISOString()} 试跑成功`,
+          retryCount: 0,
+        });
+        if (t.kind === "once" && t.deleteAfterRun) this.delete(t.id);
+      } catch (e) {
+        const err = e instanceof Error ? e.message : String(e);
+        this.pushHistory(t, { taskId: t.id, ranAt: now, ok: false, error: err, prompt: t.prompt ?? t.name });
+        this.update(t.id, {
+          lastResult: "error",
+          lastError: err,
+          lastRunLog: `⚡ ${new Date(now).toISOString()} 试跑失败: ${err.slice(0, 120)}`,
+        });
+        if (t.kind === "once" && t.deleteAfterRun) this.delete(t.id);
+      } finally {
+        this.inFlight.delete(id);
+      }
+    };
+
+    if (!wait) {
+      void finish();
+      return this.get(id);
+    }
+    await finish();
+    return this.get(id);
   }
+}
+
+function newWebhookToken(): string {
+  return randomBytes(18).toString("base64url");
 }
 
 const CRON_RANGES: [number, number][] = [[0, 59], [0, 23], [1, 31], [1, 12], [0, 7]];
@@ -178,17 +375,57 @@ function parseCron(cron: string) {
   return { min, hour, dom, mon, dow };
 }
 
-/** 5 段 cron → 下一个触发时间戳（分钟级精度）；日和周都限定时按标准 cron 取「任一满足」 */
-export function nextCronTime(cron: string, from = Date.now()): number {
+/** 空 / 非法 → ""（本机墙钟）；合法 IANA 原样返回 */
+export function normalizeTimezone(tz?: string | null): string {
+  const s = String(tz ?? "").trim();
+  if (!s) return "";
+  try {
+    Intl.DateTimeFormat("en-US", { timeZone: s }).format(new Date());
+    return s;
+  } catch {
+    return "";
+  }
+}
+
+const WEEKDAY_TO_NUM: Record<string, number> = {
+  Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6,
+};
+
+/** 某时刻在指定时区（或本机）的日历分量 */
+export function zonedParts(ms: number, timeZone?: string): { y: number; mo: number; d: number; h: number; mi: number; dow: number } {
+  if (!timeZone) {
+    const d = new Date(ms);
+    return { y: d.getFullYear(), mo: d.getMonth() + 1, d: d.getDate(), h: d.getHours(), mi: d.getMinutes(), dow: d.getDay() };
+  }
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", hour12: false, weekday: "short",
+  }).formatToParts(new Date(ms));
+  const get = (t: string) => parts.find((p) => p.type === t)?.value ?? "0";
+  let h = Number(get("hour"));
+  if (h === 24) h = 0; // 部分环境午夜标 24
+  return {
+    y: Number(get("year")),
+    mo: Number(get("month")),
+    d: Number(get("day")),
+    h,
+    mi: Number(get("minute")),
+    dow: WEEKDAY_TO_NUM[get("weekday")] ?? 0,
+  };
+}
+
+/** 5 段 cron → 下一个触发时间戳（分钟级精度）；可按 IANA 时区解释墙钟 */
+export function nextCronTime(cron: string, from = Date.now(), timeZone?: string): number {
   const { min, hour, dom, mon, dow } = parseCron(cron);
   const ok = (s: Set<number> | null, v: number) => !s || s.has(v);
-  const d = new Date(from);
-  d.setSeconds(0, 0);
-  d.setMinutes(d.getMinutes() + 1);
+  const tz = normalizeTimezone(timeZone) || undefined;
+  let ms = from - (from % 60_000) + 60_000;
   for (let i = 0; i < 60 * 24 * 370; i++) {
-    const dayOk = dom && dow ? dom.has(d.getDate()) || dow.has(d.getDay()) : ok(dom, d.getDate()) && ok(dow, d.getDay());
-    if (ok(mon, d.getMonth() + 1) && dayOk && ok(hour, d.getHours()) && ok(min, d.getMinutes())) return d.getTime();
-    d.setMinutes(d.getMinutes() + 1);
+    const p = zonedParts(ms, tz);
+    const dayOk = dom && dow ? dom.has(p.d) || dow.has(p.dow) : ok(dom, p.d) && ok(dow, p.dow);
+    if (ok(mon, p.mo) && dayOk && ok(hour, p.h) && ok(min, p.mi)) return ms;
+    ms += 60_000;
   }
   return from + 3600_000;
 }
@@ -200,4 +437,20 @@ export function isValidCron(cron: string): boolean {
   } catch {
     return false;
   }
+}
+
+/** UI：把 5 段 cron 说成人话 */
+export function describeCron(cron: string): string {
+  const WEEK = ["日", "一", "二", "三", "四", "五", "六"];
+  const [mi, h, d, mo, w] = String(cron).trim().split(/\s+/);
+  if (!mi) return cron;
+  const t = /^\d+$/.test(h) && /^\d+$/.test(mi) ? `${h.padStart(2, "0")}:${mi.padStart(2, "0")}` : null;
+  if (mi === "*" && h === "*" && d === "*" && mo === "*" && w === "*") return "每分钟";
+  if (/^\*\/\d+$/.test(mi) && h === "*" && d === "*" && w === "*") return `每 ${mi.slice(2)} 分钟`;
+  if (/^\d+$/.test(mi) && h === "*" && d === "*" && w === "*") return `每小时第 ${mi} 分`;
+  if (t && d === "*" && mo === "*" && w === "*") return `每天 ${t}`;
+  if (t && d === "*" && mo === "*" && w === "1-5") return `工作日 ${t}`;
+  if (t && d === "*" && mo === "*" && /^\d$/.test(w)) return `每周${WEEK[Number(w) % 7]} ${t}`;
+  if (t && /^\d+$/.test(d) && mo === "*" && w === "*") return `每月 ${d} 日 ${t}`;
+  return cron;
 }

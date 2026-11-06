@@ -5,6 +5,7 @@
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: file: https:; frame-src 'self' file:; media-src 'self' file: data:;" />
 <title>Harness Bot</title>
 <link rel="stylesheet" href="./style.css" />
+<link rel="stylesheet" href="./xterm.css" />
 <link rel="stylesheet" href="./avatar-shapes.css" />
 </head>
 <body>
@@ -12,14 +13,21 @@
   <aside id="sidebar">
     <div class="side-top">
       <button id="search-toggle" class="icon-btn" title="搜索会话/消息">⌕</button>
-      <button id="new-bot-btn" class="icon-btn" title="新建 bot">＋</button>
+      <button id="new-bot-btn" class="icon-btn" title="新建 bot；也可导入别人分享的模板">＋</button>
     </div>
     <div id="search-box" class="hidden">
       <input id="search-input" placeholder="搜索会话/消息…" />
       <div id="search-results" class="hidden"></div>
     </div>
-    <div id="side-hero"></div>
-    <div id="bot-list" class="bot-list"></div>
+    <div id="side-hero"><div class="hero-avatar sk-av"></div><div class="hero-name sk-line"></div></div>
+    <div id="bot-list" class="bot-list" aria-busy="true">
+      <div class="mx-h bot-list-h"><span>Bot</span></div>
+      <div class="bot-item sk" aria-hidden="true"><div class="bot-avatar"></div><div class="bot-meta"><div class="bot-name sk-line"></div><div class="bot-preview sk-line"></div></div></div>
+      <div class="bot-item sk" aria-hidden="true"><div class="bot-avatar"></div><div class="bot-meta"><div class="bot-name sk-line"></div><div class="bot-preview sk-line"></div></div></div>
+      <div class="bot-item sk" aria-hidden="true"><div class="bot-avatar"></div><div class="bot-meta"><div class="bot-name sk-line"></div><div class="bot-preview sk-line"></div></div></div>
+      <div class="bot-item sk" aria-hidden="true"><div class="bot-avatar"></div><div class="bot-meta"><div class="bot-name sk-line"></div><div class="bot-preview sk-line"></div></div></div>
+      <div class="bot-item sk" aria-hidden="true"><div class="bot-avatar"></div><div class="bot-meta"><div class="bot-name sk-line"></div><div class="bot-preview sk-line"></div></div></div>
+    </div>
     <div class="side-foot">
       <button id="more-btn" class="foot-btn">⚙ 工具与设置</button>
       <div id="more-menu" class="pop-menu hidden">
@@ -27,12 +35,14 @@
         <button id="memory-btn">🧠 记忆</button>
         <button id="skills-btn">🛠 技能</button>
         <button id="mcp-btn">🔌 MCP</button>
-        <button id="tasks-btn">⏰ 定时任务</button>
+        <button id="tasks-btn">⏰ 例行</button>
         <button id="groups-btn">👥 群组</button>
-        <button id="plans-btn">🧩 编排</button>
         <button id="env-btn">🔑 环境配置</button>
-        <button id="vault-btn">🛡 保险库</button>
+        <button id="vault-btn">🔗 Connect</button>
+        <button id="import-bot-btn">📥 导入 bot</button>
+        <button id="templates-btn">📦 本地模板</button>
         <button id="sysaccess-btn">🛡 系统授权</button>
+        <button id="sysmanage-btn">🖥 系统能力</button>
         <button id="pet-smart-btn">🐾 桌面宠物智能</button>
         <button id="realm-btn">🕯 灵境</button>
         <button id="projects-btn">📁 项目与自定义指令</button>
@@ -43,21 +53,69 @@
     </div>
   </aside>
   <main id="chat">
+    <!-- 无原生标题栏时，顶条作为窗口拖动区（chat-bar 隐藏时仍可用） -->
+    <div id="win-drag" aria-hidden="true"></div>
     <header id="chat-bar" class="hidden">
       <div id="chat-title"></div>
       <div id="chat-actions">
+        <button id="watch-chip" class="watch-chip hidden" type="button" title="打开详情 · 系统监听">监听</button>
+        <button id="ct-toggle" class="icon-btn" title="终端">›_</button>
         <button id="wb-toggle" class="icon-btn" title="工作台：预览和编辑 bot 写的文档 / 网页">▤</button>
         <button id="share-btn" class="icon-btn" title="分享对话（长图 / 网页）">⇪</button>
       </div>
     </header>
     <div id="empty-state">
       <div class="empty-icon">🦊</div>
-      <p>选一个 bot，或点左上角 ＋ 一句话创建</p>
-      <p class="sub">试着说：「创建 bot：一只负责提醒我的小狐狸，可爱一点」</p>
+      <p id="empty-title">选一个 bot，或点侧栏右上角 ＋ 新建</p>
+      <p class="sub" id="empty-sub">试着说：「创建 bot：一只负责提醒我的小狐狸，可爱一点」</p>
+      <div class="empty-actions" id="empty-actions"></div>
     </div>
+    <div id="setup-banner" class="hidden"></div>
     <div id="messages" class="messages"></div>
     <button id="scroll-down" class="hidden" title="回到底部">↓</button>
+    <section id="coding-term" class="hidden">
+      <button type="button" id="ct-corner-l" class="ct-corner" data-corner="left" title="对角拉伸"></button>
+      <button type="button" id="ct-corner-r" class="ct-corner" data-corner="right" title="对角拉伸"></button>
+      <div id="ct-resize" title="拖动调整高度"></div>
+      <div class="ct-bar">
+        <button id="ct-switch" class="ct-switch" type="button" title="切换目录">
+          <span id="ct-status" class="ct-status"></span>
+          <span id="ct-prog" class="ct-prog"></span>
+          <span class="ct-name">
+            <span id="ct-title">终端</span>
+            <span id="ct-path"></span>
+          </span>
+        </button>
+        <div class="ct-actions">
+          <button id="ct-open" class="ghost-btn" type="button">打开</button>
+          <button id="ct-send" type="button">送出</button>
+          <button id="ct-break" type="button">打断</button>
+          <button id="ct-stop" type="button">结束</button>
+          <button id="ct-pick" type="button" title="切换或添加目录">目录</button>
+          <button id="ct-hide" type="button" title="收起">⌄</button>
+        </div>
+      </div>
+      <div id="ct-dirs"></div>
+      <div id="ct-xterm"></div>
+      <div id="ct-empty" class="ct-empty">
+        <p id="ct-empty-text">先选择一个工程目录。</p>
+        <button id="ct-empty-act" type="button" data-act="pick">选择目录</button>
+      </div>
+      <pre id="ct-screen" tabindex="0"></pre>
+    </section>
     <div id="composer">
+      <div id="ct-dock" class="hidden">
+        <button type="button" id="ct-dock-main" class="ct-dock-main">
+          <span class="ct-mark" aria-hidden="true"></span>
+          <span class="ct-dock-copy">
+            <span id="ct-dock-name">工程终端</span>
+            <span id="ct-dock-sub">选一个目录，你和 Bot 看同一块屏幕</span>
+          </span>
+          <span id="ct-dock-act" class="ct-dock-act">选择</span>
+        </button>
+        <button type="button" id="ct-dock-more" class="ct-dock-more" title="切换或添加目录">▾</button>
+        <button type="button" id="ct-dock-hide" class="ct-dock-more" title="隐藏">×</button>
+      </div>
       <div id="relay-bar" class="hidden"></div>
       <div id="voice-bar" class="hidden"></div>
       <div class="composer-box">
@@ -77,11 +135,13 @@
 <script src="./common-render.js"></script>
 <script src="./avatar-shapes.js"></script>
 <script src="./renderer.js"></script>
-<script src="./chat-blocks.js"></script>
-<script src="./settings-pages.js"></script>
-<script src="./side-panels.js"></script>
-<script src="./composer.js"></script>
-<script src="./workbench.js"></script>
-<script src="./realm.js"></script>
+<script defer src="./chat-blocks.js"></script>
+<script defer src="./settings-pages.js"></script>
+<script defer src="./side-panels.js"></script>
+<script defer src="./composer.js"></script>
+<script defer src="./workbench.js"></script>
+<script defer src="./xterm-bundle.js"></script>
+<script defer src="./coding-term.js"></script>
+<script defer src="./realm.js"></script>
 </body>
 </html>

@@ -93,11 +93,14 @@ export function memoryFromText(text: string): MemoryDraft[] {
   const isQuestion = (s: string) => /[?？]\s*$|什么|吗[。！!]?$|谁|哪/.test(s);
   const scopeOf = (s: string): MemoryDraft["scope"] => (/(所有|全部|每个)\s*(bot|助手|成员|人)|大家都/.test(s) ? "all" : "bot");
   const person = (s: string) => s.replace(/^我/, "用户");
+  /** 关于用户本人的稳定事实 → 默认全局共享（对齐 Grok shared user facts） */
+  const userFact = (c: string) => /^(我|用户)|时区|称呼|叫我|名字|姓|喜欢|不喜欢|习惯|偏好/.test(c);
 
   const explicit = t.match(/^[^。！？!?\n]{0,8}?(?:记住这个|记住|记一下|记下|以后记得|别忘了)\s*[:：,，]?\s*(.+)$/s);
   if (explicit && !isQuestion(explicit[1])) {
     const c = explicit[1].trim();
-    return [{ kind: /^我/.test(c) ? "fact" : "rule", scope: scopeOf(t), content: person(c) }];
+    const fact = /^我/.test(c) || userFact(c);
+    return [{ kind: fact ? "fact" : "rule", scope: fact ? "all" : scopeOf(t), content: person(c) }];
   }
   const rule = t.match(/^(?:(?:定下?|加|新增|添加|补充)?(?:一?(?:个|条))?新?(?:规范|规矩|规则|要求))\s*[:：]\s*(.+)$/s)
     ?? t.match(/^(?:定下?(?:个)?(?:规范|规矩|规则)|约定|规定)\s*[:：,，]?\s*(.+)$/s)
@@ -112,7 +115,7 @@ export function memoryFromText(text: string): MemoryDraft[] {
     if (c.length >= 4 && !oneOff && normative && !isQuestion(c)) return [{ kind: "rule", scope: scopeOf(t), content: `用户定下的规范：${t}` }];
   }
   const self = t.match(/^(我叫|我喜欢|我偏好|我习惯)\s*[:：]?\s*(.+)$/s);
-  if (self && !isQuestion(self[2])) return [{ kind: "fact", scope: scopeOf(t), content: `用户${self[1].slice(1)}${self[2].trim()}` }];
+  if (self && !isQuestion(self[2])) return [{ kind: "fact", scope: "all", content: `用户${self[1].slice(1)}${self[2].trim()}` }];
   return [];
 }
 

@@ -12,28 +12,140 @@ export function addSource(ctx: TurnCtx, s: SourceItem): number {
 }
 
 /** 不在对话里显示工具卡片的工具：结果本身就是界面元素 */
-export const QUIET_TOOLS = new Set(["file.send", "ui.ask", "ui.confirm", "ui.secret"]);
+export const QUIET_TOOLS = new Set(["file.send", "ui.ask", "ui.confirm", "ui.secret", "ui.form"]);
+
+/** 模型常叫错的工具名 → 正式名（静默纠正，不烧检查轮） */
+export const TOOL_ALIASES: Record<string, string> = {
+  "ui.choice": "ui.ask",
+  "ui.choices": "ui.ask",
+  "ui.select": "ui.ask",
+  "ui.options": "ui.ask",
+  "ui.pick": "ui.ask",
+  "ui.question": "ui.ask",
+};
+
+export function canonicalizeTool(tool: string): string {
+  const t = String(tool ?? "").trim();
+  if (!t) return t;
+  return TOOL_ALIASES[t] ?? TOOL_ALIASES[t.toLowerCase()] ?? t;
+}
 
 export const CONTINUE_HINT = "[继续：根据上面工具执行结果生成最终回复或再次调用工具；还要调用工具时先用一句话说明下一步]";
 export const THINK_PROMPT = "【深度思考】先在 <think> 和 </think> 之间一步步分析：拆解问题、列出关键事实、比较可能的方案、检查漏洞；然后在标签外给出清晰的最终回答。";
 
-/** 模型偶尔漏掉 ```tool 围栏，单独一行写 {"tool":...} */
+/** 模型偶尔漏掉 ```tool 围栏，单独一行写 {"tool":...}（兼容旧测试 / 简单场景） */
 export const BARE_TOOL_LINE_RE = /^[ \t]*(\{[ \t]*"tool"[ \t]*:.*\})[ \t]*$/gm;
 
+/** 像不像一次真工具调用（排除文档里的 {"tool": 1} 之类） */
+export function looksLikeToolPayload(data: unknown): boolean {
+  if (!data || typeof data !== "object" || Array.isArray(data)) return false;
+  const tool = (data as { tool?: unknown }).tool;
+  if (typeof tool !== "string" || !tool.trim()) return false;
+  if (!/^[A-Za-z][\w./:-]*$/.test(tool.trim())) return false;
+  const args = (data as { args?: unknown }).args;
+  if (args !== undefined && (typeof args !== "object" || args === null || Array.isArray(args))) return false;
+  return true;
+}
+
+/**
+ * 正文里夹着的裸 {"tool":...}（不要求独占一行；按括号配对，避开字符串里的花括号）。
+ * 只收能 JSON.parse 且像真工具调用的片段。
+ */
+export function findBareToolSpans(text: string): { start: number; end: number; json: string }[] {
+  const out: { start: number; end: number; json: string }[] = [];
+  let i = 0;
+  while (i < text.length) {
+    const key = text.indexOf('"tool"', i);
+    if (key < 0) break;
+    let start = key - 1;
+    while (start >= 0 && /\s/.test(text[start]!)) start--;
+    if (start < 0 || text[start] !== "{" || !/^\{\s*"tool"/.test(text.slice(start, key + 6))) {
+      i = key + 6;
+      continue;
+    }
+    let depth = 0, inStr = false, esc = false, end = -1;
+    for (let j = start; j < text.length; j++) {
+      const c = text[j]!;
+      if (inStr) {
+        if (esc) esc = false;
+        else if (c === "\\") esc = true;
+        else if (c === '"') inStr = false;
+        continue;
+      }
+      if (c === '"') { inStr = true; continue; }
+      if (c === "{") depth++;
+      else if (c === "}") {
+        depth--;
+        if (depth === 0) { end = j + 1; break; }
+      }
+    }
+    if (end < 0) { i = key + 6; continue; }
+    const json = text.slice(start, end);
+    try {
+      if (looksLikeToolPayload(JSON.parse(json))) out.push({ start, end, json });
+    } catch { /* 残缺 JSON 跳过 */ }
+    i = end;
+  }
+  return out;
+}
+
 export function stripToolBlocks(text: string): string {
-  return text.replace(/```tool[\s\S]*?(```|$)/g, "").replace(BARE_TOOL_LINE_RE, "").trim();
+  let s = text.replace(/```tool[\s\S]*?(```|$)/g, "");
+  // 与 parseToolBlocks 对齐：顶格或紧跟句末；「建议：{...}」这种句中举例不剥
+  const spans = findBareToolSpans(s).filter((sp) => isCallableBareSpan(s, sp.start));
+  for (let k = spans.length - 1; k >= 0; k--) {
+    const { start, end } = spans[k]!;
+    s = `${s.slice(0, start)}${s.slice(end)}`;
+  }
+  return s
+    // 工具块剥掉后偶发残留的空围栏，避免渲染成灰色空气泡
+    .replace(/```[\w]*\s*\n\s*```/g, "")
+    .replace(/^\s*```+\s*$/gm, "")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+/** 裸 {"tool":…} 是否顶格在一行（行首仅空白）——举例夹在句子里的不算真调用 */
+export function isLineLeadingSpan(text: string, start: number): boolean {
+  let i = start - 1;
+  while (i >= 0 && text[i] !== "\n") {
+    if (!/[ \t]/.test(text[i]!)) return false;
+    i--;
+  }
+  return true;
+}
+
+/**
+ * 可当真实工具调用：顶格一行，或紧跟句末标点（模型常漏换行写成「…它。{"tool":…}」）。
+ * 不认冒号后的举例（「建议：{"tool":…}」），避免误执行。
+ */
+export function isCallableBareSpan(text: string, start: number): boolean {
+  if (isLineLeadingSpan(text, start)) return true;
+  let i = start - 1;
+  while (i >= 0 && /[ \t]/.test(text[i]!)) i--;
+  if (i < 0) return true;
+  return /[。！？.!?]/.test(text[i]!);
 }
 
 /**
  * 文本工具块写完后模型还在往下写（不是下一个工具块）时返回截断位置：
  * 模型拿不到真实结果，继续写只会自己编结果、反复重试。
+ * 围栏 ```tool 与顶格裸 JSON 都算。
  */
 export function toolBlockCutoff(text: string): number | null {
   let end = -1;
-  for (const m of text.matchAll(TOOL_BLOCK_RE)) end = m.index! + m[0].length;
+  for (const m of text.matchAll(TOOL_BLOCK_RE)) end = Math.max(end, m.index! + m[0].length);
+  if (end < 0) {
+    for (const s of findBareToolSpans(text)) {
+      if (!isCallableBareSpan(text, s.start)) continue;
+      end = Math.max(end, s.end);
+    }
+  }
   if (end < 0) return null;
   const tail = text.slice(end).trimStart();
   if (!tail || "```tool".startsWith(tail) || tail.startsWith("```tool")) return null;
+  if (/^\{\s*"tool"/.test(tail)) return null;
   return end;
 }
 
@@ -132,31 +244,89 @@ export function looksLikeRule(content: string): boolean {
   return /称呼|叫我|每次|总是|一律|务必|必须|不要|别再|都要|都用|(回复|回答|输出|写).{0,8}(用|要|加|带|署名|不超过)/.test(content);
 }
 
-/** 回复里声称消息已经发到群里（提议、提问不算） */
+/**
+ * @deprecated 词表启发式已弃用：改由 BotRuntime.actionGrounding 让模型对照事实判断。
+ * 测试若仍引用，仅作兼容；新逻辑勿用。
+ */
 export function claimsGroupSend(text: string): boolean {
   return text.split(/(?<=[。！!？?\n])/).some((s) =>
     /(已经?|成功)(发|发送|转发|发布)(到|至|进|在)?(了)?[^。\n]{0,16}群|(发|发送)(到|进)了?[^。\n]{0,16}群(聊|里)?[^。\n]{0,4}(了|啦)|消息已发/.test(s)
     && !/要不要|需要我|要我|可以帮你|如果|[？?]\s*$/.test(s));
 }
 
-/** 回复里声称已创建/改好技能（提议不算）；常伴随捏造的 app:skill/ 链接 */
+/** @deprecated 见 claimsGroupSend；动作落空改由 actionGrounding 判定 */
 export function claimsSkillWrite(text: string): boolean {
-  // 「建好了：[名字](app:skill/xxx)」里不一定再出现「技能」二字
   if (/app:skill\//.test(text) && /(建好了|已创建|已新建|新建了|创建了|写进了|已写进|已更新|已保存|写好了)/.test(text)) return true;
   return text.split(/(?<=[。！!？?\n])/).some((s) =>
     /(建好了|已创建|已新建|新建了|创建了|写进了|已写进).{0,10}(私有|共享)?技能|技能.{0,8}(已|已经)?(创建|建好|写好|保存|更新)(了|啦)?/.test(s)
     && !/要不要|需要我|要我|可以帮你|如果|打算|准备|[？?]\s*$/.test(s));
 }
 
-/** 自检结论：{"ok":true} 或 {"ok":false,"issues":[...]}；解析不了按通过处理 */
-export function parseVerdict(raw: string): { ok: boolean; issues: string[] } {
+/** 高风险副作用工具：出现时才值得跑 actionGrounding（闲聊跳过） */
+export const GROUNDING_RISK_TOOLS = new Set([
+  "cli.agent", "group.send", "skill.save", "skill.update", "skill.delete",
+  "term.open", "bot.ask", "memory.add", "memory.update",
+]);
+
+/** 是否值得花一轮模型做动作落地核对 */
+export function shouldActionGround(textReply: string, toolsThisRound: string[], priorTools: string[]): boolean {
+  const text = textReply.trim();
+  if (!text) return false;
+  const hit = (t: string) => GROUNDING_RISK_TOOLS.has(t);
+  if (toolsThisRound.some(hit) || priorTools.some(hit)) return true;
+  // 收尾轮：过短寒暄跳过；其余仍核对（防空口完成态）
+  if (!toolsThisRound.length && text.length >= 24) return true;
+  return false;
+}
+
+/** 动作落地核对：交给模型的事实块（无词表） */
+export function buildActionGroundingFacts(input: {
+  toolsThisRound: string[];
+  priorTools: string[];
+  terminal?: { phase?: string; program?: string; cli?: string; cwd?: string; notice?: string } | null;
+  otherTerminals?: Array<{ cwd?: string; program?: string; cli?: string; phase?: string }>;
+}): string {
+  const round = input.toolsThisRound.length ? input.toolsThisRound.join("、") : "（无）";
+  const prior = input.priorTools.length ? [...new Set(input.priorTools)].join("、") : "（无）";
+  const t = input.terminal;
+  const term = !t || (!t.phase && !t.notice)
+    ? "未打开或已退出"
+    : t.phase === "exited" && !t.notice
+      ? "未打开或已退出"
+      : t.program === "agent" || (t.cli && t.cli !== "shell")
+        ? `Coding CLI 开着（${t.cli || "agent"}）· ${t.cwd || ""} · ${t.phase || ""}`
+        : `shell 开着 · ${t.cwd || ""} · ${t.phase || ""}`;
+  const note = t?.notice ? `\n终端说明：${t.notice}` : "";
+  const others = input.otherTerminals?.length
+    ? `\n另外还开着：${input.otherTerminals.map((o) => `${o.cwd}（${o.program === "agent" ? o.cli || "agent" : "shell"} · ${o.phase}）`).join("、")}`
+    : "";
+  return [
+    `本轮即将调用的工具：${round}`,
+    `本回合此前已调用的工具：${prior}`,
+    `终端现状：${term}${note}${others}`,
+    "说明：点「打开」或 term.open 只起 shell，不等于已进入 Cursor/Claude/Codex；进 Coding CLI 必须成功调用 cli.agent。",
+  ].join("\n");
+}
+
+export const ACTION_GROUNDING_SYSTEM =
+  "你是动作落地核对员。对照【事实】检查【待发出的回复】：是否把尚未发生、或事实不支持的事说成已经完成（例如已进 Cursor/Coding CLI、已发到群、技能已建好）。" +
+  "提议、询问、计划、假设不算违规。措辞风格不论。" +
+  "只输出 JSON：{\"ok\":true} 或 {\"ok\":false,\"issues\":[\"具体哪句与事实不符\"]}";
+
+/**
+ * 自检结论：{"ok":true} 或 {"ok":false,"issues":[...]}。
+ * 默认解析失败按通过（fail-open，避免误伤闲聊）；高风险动作可传 failClosed。
+ */
+export function parseVerdict(raw: string, opts?: { failClosed?: boolean }): { ok: boolean; issues: string[] } {
   const m = raw.match(/\{[\s\S]*\}/);
   try {
     const v = JSON.parse(m?.[0] ?? "");
     const issues = Array.isArray(v.issues) ? v.issues.map(String).filter(Boolean).slice(0, 5) : [];
     return { ok: v.ok !== false || !issues.length, issues };
   } catch {
-    return { ok: true, issues: [] };
+    return opts?.failClosed
+      ? { ok: false, issues: ["核对结果无法解析"] }
+      : { ok: true, issues: [] };
   }
 }
 
@@ -186,19 +356,36 @@ export function toolRoundEcho(say: string, tools: ToolInvocation[]): string {
   return [say, ...blocks].filter(Boolean).join("\n\n");
 }
 
-/** 解析回复中的 ```tool``` 块 */
+/** 解析回复中的 ```tool``` 块；没有围栏时只收「顶格一行」的裸 {"tool":...}（防举例被当真） */
 export function parseToolBlocks(reply: string): ToolInvocation[] {
   const out: ToolInvocation[] = [];
   const fenced = [...reply.matchAll(TOOL_BLOCK_RE)];
-  for (const m of fenced.length ? fenced : reply.matchAll(BARE_TOOL_LINE_RE)) {
+  const raws = fenced.length
+    ? fenced.map((m) => m[1] ?? "")
+    : findBareToolSpans(reply).filter((s) => isCallableBareSpan(reply, s.start)).map((s) => s.json);
+  for (const raw of raws) {
     try {
-      const data = JSON.parse(m[1]);
-      out.push({ callId: data.callId ?? `c${Date.now()}-${out.length}`, tool: String(data.tool), args: (data.args ?? {}) as Record<string, unknown> });
+      const data = JSON.parse(raw);
+      if (!looksLikeToolPayload(data)) continue;
+      const rawArgs = (data.args ?? {}) as Record<string, unknown>;
+      const tool = canonicalizeTool(String(data.tool ?? ""));
+      const args = tool === "ui.ask" && !rawArgs.options && (rawArgs.choices || rawArgs.items)
+        ? { ...rawArgs, options: rawArgs.choices ?? rawArgs.items }
+        : rawArgs;
+      out.push({ callId: data.callId ?? `c${Date.now()}-${out.length}`, tool, args });
     } catch {
       // 忽略无法解析的工具块
     }
   }
   return out;
+}
+
+/** mcp.add stdio 常用启动器；其它命令要二次强确认 */
+export const MCP_STDIO_ALLOW = ["npx", "uvx", "uv", "bun", "node", "deno", "python", "python3", "pipx"] as const;
+
+export function checkMcpStdioCommand(command: string): { ok: true; allowed: boolean; base: string } {
+  const base = String(command || "").trim().split(/[/\\]/).pop()?.replace(/\.(exe|cmd|bat)$/i, "") || "";
+  return { ok: true, allowed: !!base && (MCP_STDIO_ALLOW as readonly string[]).includes(base), base };
 }
 
 export function formatNow(d: Date): string {

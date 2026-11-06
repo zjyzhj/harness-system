@@ -35,6 +35,13 @@ function setup(reply: (user: string, n: number) => string) {
       posted.push({ group, message });
       return { ok: true as const, group, replies: [{ name: "写作助手", text: "收到，欢迎！" }], reason: "没有人再被点名" };
     },
+    // 单测替身：生产由模型对照事实判决；这里用同一套事实块 + 旧词表只验证打回链路
+    judgeAction: async ({ reply, facts }) => {
+      if (claimsGroupSend(reply) && !facts.includes("group.send")) {
+        return { ok: false, issues: ["声称消息已发到群，但事实里没有 group.send"] };
+      }
+      return { ok: true, issues: [] };
+    },
   });
   return { rt, posted };
 }
@@ -61,12 +68,12 @@ describe("bot 在群里发言，成员真的回应", () => {
   const runner = new GroupSessionRunner({ store, groups, runtime: runtime as any, providers: new ProviderCenter(store) });
   const hooks = { onProgress: () => {}, onStream: () => {}, setRunning: () => {}, setIdle: () => {} };
 
-  test("没 @ 人：其他成员各回一次，回复写进群聊并带回给发言者，发言者不被重新叫起", async () => {
+  test("没 @ 人：只让下一位回一句，不默认全员齐声；发言者不被重新叫起", async () => {
     const r = await runner.post(g.id, store.getBot("m")!, "大家好，我是灵感助手", hooks);
-    expect(spoken).toEqual(["w", "t"]);
-    expect(r.replies.map((x) => x.name)).toEqual(["写作助手", "翻译助手"]);
+    expect(spoken).toEqual(["w"]);
+    expect(r.replies.map((x) => x.name)).toEqual(["写作助手"]);
     const msgs = store.listMessages(`group-${g.id}`).filter((m) => m.kind !== "event");
-    expect(msgs.map((m) => m.from)).toEqual(["m", "w", "t"]);
+    expect(msgs.map((m) => m.from)).toEqual(["m", "w"]);
   });
 
   test("@ 了谁就只有谁先回", async () => {
@@ -74,6 +81,13 @@ describe("bot 在群里发言，成员真的回应", () => {
     const r = await runner.post(g.id, store.getBot("m")!, "@翻译助手 这句怎么翻", hooks);
     expect(spoken).toEqual(["t"]);
     expect(r.replies).toEqual([{ name: "翻译助手", text: "收到，我是翻译助手" }]);
+  });
+
+  test("@所有人：按显式点名展开全员，不靠口语关键词", async () => {
+    spoken.length = 0;
+    const r = await runner.post(g.id, store.getBot("m")!, "@所有人 看一下这句", hooks);
+    expect(spoken).toEqual(["w", "t"]);
+    expect(r.replies.map((x) => x.name)).toEqual(["写作助手", "翻译助手"]);
   });
 });
 
@@ -89,7 +103,9 @@ describe("往群聊发消息", () => {
   });
 
   test("没调用 group.send 却说已发到群里：打回去真的发", async () => {
-    const { rt, posted } = setup((u, n) => (n === 0 ? "消息已发到群聊测试：大家好" : u.includes("[系统检查]") ? send("测试", "大家好") : "发好了"));
+    // 收尾轮 actionGrounding 要求文案 ≥24 字；短寒暄会跳过核对
+    const fake = "消息已经发到群聊「测试」里了，大家好，请查收这一条。";
+    const { rt, posted } = setup((u, n) => (n === 0 ? fake : u.includes("[系统检查]") ? send("测试", "大家好") : "发好了"));
     const r = await rt.handleStream({ bot, from: "user", text: "向群聊测试说一句大家好", sessionId: "s2" }, { onBlock: () => {} });
     expect(posted.length).toBe(1);
     expect(r.text).toBe("发好了");
