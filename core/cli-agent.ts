@@ -8,7 +8,7 @@ import { existsSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve, sep } from "node:path";
 import { randomUUID } from "node:crypto";
-import { strippedCliEnv } from "./adapters/cli";
+import { overlayCliEnv } from "./adapters/cli";
 import {
   agentBin,
   buildCodingAgentArgs,
@@ -47,6 +47,8 @@ export interface CliAgentRequest {
   promptText?: string;
   /** 测试可注入 */
   spawnImpl?: typeof spawn;
+  /** 已信任时带上的配置和密钥。只进子进程环境，不写审计。 */
+  env?: Record<string, string>;
   home?: string;
   harnessHome?: string;
 }
@@ -214,6 +216,7 @@ export async function runCliAgent(botId: string, req: CliAgentRequest): Promise<
       useProcessGroup,
       resumeId: req.resumeId,
       createSessionId: req.createSessionId,
+      extraEnv: req.env,
     });
     if (first.resumeMissing && req.resumeId && req.fallbackPrompt && !req.signal?.aborted) {
       const freshId = req.cli === "claude" ? randomUUID() : undefined;
@@ -228,6 +231,7 @@ export async function runCliAgent(botId: string, req: CliAgentRequest): Promise<
         onProgress: req.onProgress,
         useProcessGroup,
         createSessionId: freshId,
+        extraEnv: req.env,
       });
       return { ...second, resumedThenFresh: true, output: `（上次 CLI 会话续不上，已新开并带上工作线）\n${second.output}` };
     }
@@ -254,12 +258,13 @@ function spawnAgent(opts: {
   useProcessGroup?: boolean;
   resumeId?: string;
   createSessionId?: string;
+  extraEnv?: Record<string, string>;
 }): Promise<CliAgentResult> {
-  const { cli, bin, cwd, args, timeoutMs, signal, spawnFn, onProgress, useProcessGroup, resumeId, createSessionId } = opts;
+  const { cli, bin, cwd, args, timeoutMs, signal, spawnFn, onProgress, useProcessGroup, resumeId, createSessionId, extraEnv } = opts;
   return new Promise((resolvePromise) => {
     let proc: ChildProcess;
     try {
-      const env = strippedCliEnv();
+      const env = overlayCliEnv(extraEnv);
       proc = spawnFn(bin, args, {
         stdio: ["ignore", "pipe", "pipe"],
         env,

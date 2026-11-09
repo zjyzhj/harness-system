@@ -5,7 +5,7 @@ import { mkdtempSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { CliAgentRequest } from "../core/cli-agent";
-import { CodingPresence, decodeTermKeys, dropCodingDir, formatCodingDirLine, formatPresenceLine, gazeCodingDir, terminalPosture } from "../core/coding-presence";
+import { CodingPresence, decodeTermKeys, dropCodingDir, formatCodingDirLine, formatPresenceLine, gazeCodingDir, presenceTaskLine, terminalPosture } from "../core/coding-presence";
 import { FrameDecoder, TermScreen, encodeFrame } from "../core/term-screen";
 
 function req(over: Partial<CliAgentRequest> & { spawnImpl?: unknown }): CliAgentRequest {
@@ -312,7 +312,7 @@ describe("编码终端", () => {
     p.stopAll();
   });
 
-  test("规范不进输入框，多行任务收成一行再回车", async () => {
+  test("多行任务收成一行；终端层不自己追加 constraints 字段", async () => {
     const live = echoSpawn();
     const p = presence();
     const result = await p.dispatch("b", req({
@@ -326,6 +326,38 @@ describe("编码终端", () => {
     expect(result.output).not.toContain("必须加表情");
     expect(result.output).not.toContain("约束：");
     expect(result.output).toContain("不要说终端不在线");
+    p.stopAll();
+  });
+
+  test("打进终端的第一句只有任务和上次摘要，不带规范", () => {
+    const line = presenceTaskLine("看这个项目\n然后启动", { brief: "上次改了按钮" });
+    expect(line).toBe("接着上次：上次改了按钮 看这个项目 然后启动");
+    expect(line).not.toContain("【规范】");
+  });
+
+  test("派工把配置放进子进程环境，不覆盖 PATH", async () => {
+    const live = echoSpawn();
+    let seen: NodeJS.ProcessEnv | undefined;
+    const spawnImpl = ((...args: unknown[]) => {
+      seen = (args[2] as { env?: NodeJS.ProcessEnv } | undefined)?.env;
+      return (live.spawnImpl as () => unknown)();
+    }) as CliAgentRequest["spawnImpl"];
+    const p = presence();
+    const result = await p.dispatch("b", req({ spawnImpl, env: { FEISHU_TOKEN: "sek", PATH: "/evil" } }));
+    expect(result.ok).toBe(true);
+    expect(seen?.FEISHU_TOKEN).toBe("sek");
+    expect(seen?.PATH).toBe(process.env.PATH);
+    expect(String(seen?.PTY_BIN || "")).not.toBe("");
+    p.stopAll();
+  });
+
+  test("打进终端的一行可以超过 500 字", async () => {
+    const live = echoSpawn();
+    const p = presence();
+    const text = "守".repeat(520);
+    const result = await p.dispatch("b", req({ spawnImpl: live.spawnImpl, task: text, promptText: text }));
+    expect(result.ok).toBe(true);
+    expect((result.output.match(/守/g) ?? []).length).toBeGreaterThanOrEqual(520);
     p.stopAll();
   });
 

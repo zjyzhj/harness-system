@@ -8,7 +8,7 @@ import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { copyFileSync, existsSync, mkdirSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { strippedCliEnv } from "./adapters/cli";
+import { overlayCliEnv } from "./adapters/cli";
 import { agentBin, pickCodingAgent, probeCodingAgents } from "./coding-agents";
 import type { CliAgentRequest, CliAgentResult } from "./cli-agent";
 import { FrameDecoder, XtermScreen, encodeFrame } from "./term-screen";
@@ -142,8 +142,18 @@ function faceWord(phase: PresencePhase, posture?: TerminalPosture): string {
   return "等下一句";
 }
 
+/** 打进常驻终端的一行上限。 */
+export const TERMINAL_LINE_MAX = 4000;
+
 function taskLine(raw: string): string {
-  return raw.replace(/\s+/g, " ").trim().slice(0, 500);
+  return raw.replace(/\s+/g, " ").trim().slice(0, TERMINAL_LINE_MAX);
+}
+
+/** 新开 Coding CLI 的第一句：上次摘要加这次任务。规范留在 bot 侧，不打进终端。 */
+export function presenceTaskLine(task: string, opts?: { brief?: string }): string {
+  const brief = opts?.brief?.replace(/\s+/g, " ").trim();
+  const body = task.replace(/\s+/g, " ").trim();
+  return [brief ? `接着上次：${brief}` : "", body].filter(Boolean).join(" ").slice(0, TERMINAL_LINE_MAX);
 }
 
 const TERM_KEYS: Record<string, string> = {
@@ -265,9 +275,9 @@ class TermSession {
     return this.aliveFlag;
   }
 
-  start(opts: { bin: string; cwd: string; bridge: string; python?: string; spawnFn?: SpawnLike }): void {
+  start(opts: { bin: string; cwd: string; bridge: string; python?: string; spawnFn?: SpawnLike; extraEnv?: Record<string, string> }): void {
     const env: NodeJS.ProcessEnv = {
-      ...strippedCliEnv(),
+      ...overlayCliEnv(opts.extraEnv),
       TERM: "xterm-256color",
       COLORTERM: "truecolor",
       PTY_BIN: opts.bin,
@@ -443,6 +453,7 @@ export class CodingPresence {
     mode?: "shell" | "agent";
     cli?: string;
     spawnImpl?: CliAgentRequest["spawnImpl"];
+    env?: Record<string, string>;
   }): Promise<CodingPresenceView | { error: string }> {
     const dir = canonCodingCwd(cwd);
     const mode = opts?.mode === "agent" ? "agent" : "shell";
@@ -468,8 +479,8 @@ export class CodingPresence {
       this.stopSlot(existing, "这一步要换成 Coding CLI");
     }
     const opened = mode === "shell"
-      ? await this.openProgram(botId, { kind: "shell", cwd: dir, spawnImpl: opts?.spawnImpl })
-      : await this.openAgentSlot(botId, dir, opts?.cli, opts?.spawnImpl);
+      ? await this.openProgram(botId, { kind: "shell", cwd: dir, spawnImpl: opts?.spawnImpl, env: opts?.env })
+      : await this.openAgentSlot(botId, dir, opts?.cli, opts?.spawnImpl, opts?.env);
     if (!opened.ok) return { error: opened.output };
     const slot = this.slots.get(slotKey(botId, dir));
     if (!slot?.session?.alive) {
@@ -591,7 +602,7 @@ export class CodingPresence {
       const result = await this.submitLine(live, req.task, req);
       return { ...result, reused: true };
     }
-    const opened = await this.openProgram(botId, { kind: "agent", cli: req.cli, cwd, task: req.task, spawnImpl: req.spawnImpl, signal: req.signal });
+    const opened = await this.openProgram(botId, { kind: "agent", cli: req.cli, cwd, task: req.task, spawnImpl: req.spawnImpl, signal: req.signal, env: req.env });
     if (!opened.ok || opened.cancelled) return opened;
     const slot = this.slots.get(key);
     if (!slot?.session?.alive) return opened;
@@ -600,7 +611,7 @@ export class CodingPresence {
     return { ...result, reused: false };
   }
 
-  /** 任务打成一行，回车单独送。规范不进输入框。 */
+  /** 任务打成一行，回车单独送。 */
   private async submitLine(
     slot: Slot,
     raw: string,
@@ -633,12 +644,13 @@ export class CodingPresence {
     cwd: string,
     preferCli?: string,
     spawnImpl?: CliAgentRequest["spawnImpl"],
+    env?: Record<string, string>,
   ): Promise<CliAgentResult> {
     const cli = spawnImpl ? (preferCli || "claude") : await pickCodingAgent(preferCli);
     if (!cli) {
       return { ok: false, cli: (preferCli || "claude") as CliAgentResult["cli"], cwd, output: "❌ 没有就绪的编码 CLI。到设置 → 模型刷新探测。", exitCode: -1 };
     }
-    return this.openProgram(botId, { kind: "agent", cli: cli as CliAgentRequest["cli"], cwd, spawnImpl });
+    return this.openProgram(botId, { kind: "agent", cli: cli as CliAgentRequest["cli"], cwd, spawnImpl, env });
   }
 
   private async openProgram(botId: string, req: {
@@ -648,6 +660,7 @@ export class CodingPresence {
     task?: string;
     spawnImpl?: CliAgentRequest["spawnImpl"];
     signal?: AbortSignal;
+    env?: Record<string, string>;
   }): Promise<CliAgentResult> {
     const cwd = canonCodingCwd(req.cwd);
     const program: TermProgram = req.kind === "shell" ? { kind: "shell" } : { kind: "agent", cli: req.cli || "claude" };
@@ -711,13 +724,14 @@ export class CodingPresence {
           };
         }
         const bridge = this.bridgeFile();
-        session.start({ bin, cwd, bridge, python: py });
+        session.start({ bin, cwd, bridge, python: py, extraEnv: req.env });
       } else {
         session.start({
           bin,
           cwd,
           bridge: "",
           spawnFn: req.spawnImpl as unknown as SpawnLike | undefined,
+          extraEnv: req.env,
         });
       }
     } catch (e) {

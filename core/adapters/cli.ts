@@ -26,7 +26,8 @@ export interface CliCapability {
 }
 
 export async function detectCli(name: CliName): Promise<CliCapability> {
-  const v = await runQuiet(CLI_BIN[name], ["--version"]);
+  // 探测路径要快：详情栏会调；默认 60s 会把「正在打开…」卡死
+  const v = await runQuiet(CLI_BIN[name], ["--version"], { timeoutMs: 4_000 });
   if (v.code === 0 && v.stdout.trim()) {
     const account = await cliAccount(name);
     return { installed: true, version: v.stdout.trim().split("\n")[0], chat: true, account };
@@ -49,7 +50,7 @@ function readCursorCliAuthEmail(): string | undefined {
 /** 读本机 CLI 登录身份（每次现查；Electron 不缓存） */
 async function cliAccount(name: CliName): Promise<string | undefined> {
   if (name !== "cursor") return undefined;
-  const r = await runQuiet(CLI_BIN.cursor, ["status"], { timeoutMs: 10_000 });
+  const r = await runQuiet(CLI_BIN.cursor, ["status"], { timeoutMs: 3_500 });
   const text = `${r.stdout}\n${r.stderr}`.trim();
   if (/not logged in|未登录/i.test(text)) return "未登录";
   const m = text.match(/Logged in as\s+(\S+)/i) || text.match(/登录(?:为|成)\s*(\S+)/);
@@ -262,10 +263,24 @@ const STRIP_CLI_ENV = [
   "CODEX_SANDBOX",
 ];
 
-/** 派工/聊天 spawn 共用：剥掉会劫持本机 CLI 登录的变量。不注入 Vault。 */
+/** 派工/聊天 spawn 共用：剥掉会劫持本机 CLI 登录的变量。 */
 export function strippedCliEnv(): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...process.env };
   for (const k of STRIP_CLI_ENV) delete env[k];
+  return env;
+}
+
+/** 叠上 bot 的配置 / 已信任密钥。不覆盖 PATH、HOME 和会劫持进程的变量。 */
+export function overlayCliEnv(extra?: Record<string, string>): NodeJS.ProcessEnv {
+  const env = strippedCliEnv();
+  if (!extra) return env;
+  for (const [k, v] of Object.entries(extra)) {
+    if (typeof v !== "string" || !v) continue;
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(k)) continue;
+    if (/^(PATH|HOME|TERM|COLORTERM|SHELL|PWD|TMPDIR|NODE_OPTIONS)$/.test(k)) continue;
+    if (k.startsWith("LD_") || k.startsWith("DYLD_") || k.startsWith("PTY_")) continue;
+    env[k] = v;
+  }
   return env;
 }
 

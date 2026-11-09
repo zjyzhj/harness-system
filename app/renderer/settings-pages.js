@@ -18,15 +18,34 @@ const PERM_MODE_HINT = {
   always: "工具默认全过（含危险命令）；禁止规则仍生效",
 };
 
+function codingTrustDirs(termPaths = [], cliPaths = []) {
+  const seen = new Set();
+  const out = [];
+  for (const p of [...termPaths, ...cliPaths]) {
+    const prefix = typeof p === "string" ? p : p?.prefix;
+    if (!prefix || seen.has(prefix)) continue;
+    seen.add(prefix);
+    out.push(typeof p === "string" ? { prefix } : p);
+  }
+  return out;
+}
+
+async function revokeCodingDir(botId, prefix) {
+  await Promise.all([
+    api.consent.revokeTermPath?.(botId, prefix),
+    api.consent.revokeCliPath(botId, prefix),
+  ]);
+}
+
 /** 单个 bot 的权限区：Ask / Auto / Always + 能力批准 + 目录信任 */
 function botPermSection(botId, grants, caps, mode = "ask", { linkSys = true, cliPaths = [], termPaths = [] } = {}) {
   const label = (id) => caps.find((c) => c.id === id)?.label || id;
   const m = mode === "auto" || mode === "always" ? mode : "ask";
+  const dirs = codingTrustDirs(termPaths, cliPaths);
   const bits = [
     m === "always" ? "Always 全放行" : m === "auto" ? "Auto 安全自动过" : "Ask 逐次问",
     grants.length ? `${grants.length} 项能力` : "无单独能力",
-    termPaths.length ? `${termPaths.length} 个终端目录` : "",
-    cliPaths.length ? `${cliPaths.length} 个 CLI 目录` : "",
+    dirs.length ? `${dirs.length} 个信任目录` : "",
   ].filter(Boolean);
   return `
     <div class="d-sec bot-perm" data-bot="${esc(botId)}">
@@ -53,14 +72,10 @@ function botPermSection(botId, grants, caps, mode = "ask", { linkSys = true, cli
         <div class="d-card bp-stack"><div class="c-main"><div class="c-title">${esc(label(g.cap))}</div>
           <div class="c-sub">${g.once ? "仅一次" : g.expiresAt ? `到 ${esc(fmtTime(g.expiresAt))}` : "长期"}${g.grantedAt ? ` · ${esc(fmtTime(g.grantedAt))}` : ""}</div></div>
           <button class="ghost-btn danger-text" data-revoke="${esc(g.cap)}">撤销</button></div>`).join("") || `<div class="d-empty">尚未单独批准任何能力</div>`}
-      ${termPaths.length ? `<div class="hint" style="margin-top:8px">终端已信任目录</div>${termPaths.map((p) => `
+      ${dirs.length ? `<div class="hint" style="margin-top:8px">信任目录（开终端、打字、派 Coding CLI）</div>${dirs.map((p) => `
         <div class="d-card bp-stack"><div class="c-main"><div class="c-title" title="${esc(p.prefix)}">${esc(p.prefix)}</div>
-          <div class="c-sub">开终端${p.createdAt ? ` · ${esc(fmtTime(p.createdAt))}` : ""}</div></div>
-          <button class="ghost-btn danger-text" data-revoke-termpath="${esc(p.prefix)}">撤销</button></div>`).join("")}` : ""}
-      ${cliPaths.length ? `<div class="hint" style="margin-top:8px">Coding CLI 已信任目录</div>${cliPaths.map((p) => `
-        <div class="d-card bp-stack"><div class="c-main"><div class="c-title" title="${esc(p.prefix)}">${esc(p.prefix)}</div>
-          <div class="c-sub">派 Coding CLI${p.createdAt ? ` · ${esc(fmtTime(p.createdAt))}` : ""}</div></div>
-          <button class="ghost-btn danger-text" data-revoke-clipath="${esc(p.prefix)}">撤销</button></div>`).join("")}` : ""}
+          <div class="c-sub">开终端、打字、派工${p.createdAt ? ` · ${esc(fmtTime(p.createdAt))}` : ""}</div></div>
+          <button class="ghost-btn danger-text" data-revoke-codingpath="${esc(p.prefix)}">撤销</button></div>`).join("")}` : ""}
       <div class="mx-inline sa-grant bot-perm-grant">
         <select class="skin-select bp-cap">${caps.map((c) => `<option value="${esc(c.id)}">${esc(c.label)}</option>`).join("")}</select>
         <select class="skin-select bp-ttl"><option value="0">长期</option><option value="3600000">1 小时</option><option value="86400000">1 天</option><option value="once">仅一次</option></select>
@@ -76,12 +91,9 @@ function bindBotPerm(root, botId, onChange) {
     await api.consent.revoke(botId, btn.dataset.revoke);
     onChange?.();
   }));
-  sec.querySelectorAll("[data-revoke-clipath]").forEach((btn) => (btn.onclick = async () => {
-    await api.consent.revokeCliPath(botId, btn.dataset.revokeClipath);
-    onChange?.();
-  }));
-  sec.querySelectorAll("[data-revoke-termpath]").forEach((btn) => (btn.onclick = async () => {
-    await api.consent.revokeTermPath(botId, btn.dataset.revokeTermpath);
+  sec.querySelectorAll("[data-revoke-codingpath], [data-revoke-clipath], [data-revoke-termpath]").forEach((btn) => (btn.onclick = async () => {
+    const prefix = btn.dataset.revokeCodingpath || btn.dataset.revokeClipath || btn.dataset.revokeTermpath;
+    await revokeCodingDir(botId, prefix);
     onChange?.();
   }));
   const grantBtn = sec.querySelector(".bp-grant");
@@ -157,13 +169,10 @@ async function botAccessFlow(botId) {
         <button class="ghost-btn" id="ba-rules" style="margin-top:6px">管理命令规则…</button>
       </div>
       <div class="d-sec"><h4>信任目录</h4>
-        ${(ov.termPaths || []).map((p) => `
-          <div class="d-card"><div class="c-main"><div class="c-title" title="${esc(p)}">${esc(p)}</div><div class="c-sub">开终端</div></div>
-            <button class="ghost-btn danger-text" data-ba-term="${esc(p)}">撤销</button></div>`).join("")}
-        ${(ov.cliPaths || []).map((p) => `
-          <div class="d-card"><div class="c-main"><div class="c-title" title="${esc(p)}">${esc(p)}</div><div class="c-sub">派 Coding CLI</div></div>
-            <button class="ghost-btn danger-text" data-ba-cli="${esc(p)}">撤销</button></div>`).join("")}
-        ${!(ov.termPaths || []).length && !(ov.cliPaths || []).length ? `<div class="d-empty">还没有目录信任</div>` : ""}
+        ${codingTrustDirs(ov.termPaths || [], ov.cliPaths || []).map((p) => `
+          <div class="d-card"><div class="c-main"><div class="c-title" title="${esc(p.prefix)}">${esc(p.prefix)}</div><div class="c-sub">开终端、打字、派工</div></div>
+            <button class="ghost-btn danger-text" data-ba-coding="${esc(p.prefix)}">撤销</button></div>`).join("")
+          || `<div class="d-empty">还没有目录信任</div>`}
       </div>
       <div class="d-sec"><h4>例行能力 URL · ${hooks.length}</h4>
         <div class="hint">POST 即可触发；优先用云服务公网链接（例行 🪝）。本机网关仅备用：${ov.gateway?.enabled
@@ -193,13 +202,9 @@ async function botAccessFlow(botId) {
       render();
       if (currentBot?.id === botId) renderDetails(currentBot);
     }));
-    body.querySelectorAll("[data-ba-term]").forEach((btn) => (btn.onclick = async () => {
-      await api.consent.revokeTermPath(botId, btn.dataset.baTerm);
-      render();
-      if (currentBot?.id === botId) renderDetails(currentBot);
-    }));
-    body.querySelectorAll("[data-ba-cli]").forEach((btn) => (btn.onclick = async () => {
-      await api.consent.revokeCliPath(botId, btn.dataset.baCli);
+    body.querySelectorAll("[data-ba-coding], [data-ba-term], [data-ba-cli]").forEach((btn) => (btn.onclick = async () => {
+      const prefix = btn.dataset.baCoding || btn.dataset.baTerm || btn.dataset.baCli;
+      await revokeCodingDir(botId, prefix);
       render();
       if (currentBot?.id === botId) renderDetails(currentBot);
     }));
@@ -1061,7 +1066,7 @@ async function tasksFlow() {
             <select id="tk-wd" class="skin-select">${WEEK.map((w, i) => `<option value="${i}" ${i === 1 ? "selected" : ""}>周${w}</option>`).join("")}</select>
             <input id="tk-md" type="number" min="1" max="28" value="1" class="mx-num" title="几号" />
             <input id="tk-time" type="time" value="09:00" />
-            <input id="tk-min" type="number" min="1" max="59" value="30" class="mx-num" title="分钟" />
+            <input id="tk-min" type="number" min="5" max="59" value="30" class="mx-num" title="每隔几分钟（至少 5）" />
             <input id="tk-cron" placeholder="0 9 * * *" />
           </span>
           <label>任务名</label><input id="tk-name" placeholder="每日早报" />
@@ -1078,13 +1083,11 @@ async function tasksFlow() {
       </div>
       <div class="d-sec"><h4>全部例行 · ${tasks.length}</h4>
         <div class="hint" style="margin-bottom:8px">对齐 Grok：<b>定时</b>与 <b>Webhook</b> 分开建。定时默认没有入站链接；Webhook 页签才生成。<br/>
-          ⚡ 试跑 · 📋 历史 · 🪝 仅已开通时显示 · 开关＝整条例行暂停</div>
+          ⚡ 试跑 · 📋 历史（成功 / 失败）· 🪝 仅已开通时显示 · 开关＝整条例行暂停<br/>
+          每个 bot 最多 50 条。定时至少隔 5 分钟。每小时单条 200 次、全部合计 300 次，超了这次不做、也不自动重试。离开超过 14 天会先暂停，打开开关即可继续。</div>
         ${tasks.map((t) => {
           const hist = (t.history || []).slice(-5).reverse();
-          const lastLabel = t.lastResult === "ok" ? "上次成功"
-            : t.lastResult === "error" ? "上次失败"
-            : t.lastResult === "running" ? "正在执行…"
-            : t.lastResult ? `上次 ${t.lastResult}` : "";
+          const lastLabel = routineResultLabel(t);
           const kindTag = t.webhookToken
             ? (t.schedule === false ? "仅 Webhook" : "定时+Webhook")
             : "定时";
@@ -1100,7 +1103,7 @@ async function tasksFlow() {
             <button class="icon-btn" data-op="del" title="删除这条例行">✕</button>
             <label class="switch" title="${t.enabled ? "暂停整条例行" : "启用"}"><input type="checkbox" data-op="toggle" ${t.enabled ? "checked" : ""}/><span></span></label>
             <div class="routine-hist hidden" data-hist="${esc(t.id)}">${hist.length
-              ? hist.map((h) => `<div class="hint">${esc(fmtTime(h.ranAt))} · ${h.ok ? "✅" : "❌"}${h.error ? ` ${esc(h.error.slice(0, 80))}` : ""}</div>`).join("")
+              ? hist.map((h) => `<div class="hint">${esc(fmtTime(h.ranAt))} · ${esc(routineHistLabel(h))}</div>`).join("")
               : `<div class="hint">还没有运行记录</div>`}</div>
           </div>`;
         }).join("") || `<div class="d-empty">还没有例行。也可以直接对 bot 说「每天早上 9 点给我发早报」</div>`}
@@ -1113,7 +1116,9 @@ async function tasksFlow() {
       const show = (id, on) => (body.querySelector(id).style.display = on ? "" : "none");
       show("#tk-wd", v === "week"); show("#tk-md", v === "month"); show("#tk-time", ["day", "work", "week", "month"].includes(v));
       show("#tk-min", v === "every" || v === "hour"); show("#tk-cron", v === "cron");
-      body.querySelector("#tk-min").title = v === "hour" ? "每小时的第几分" : "每隔几分钟";
+      const minEl = body.querySelector("#tk-min");
+      minEl.title = v === "hour" ? "每小时的第几分" : "每隔几分钟（至少 5）";
+      minEl.min = v === "every" ? "5" : "0";
     };
     if (freq) { freq.onchange = syncFreq; syncFreq(); }
     const err = body.querySelector(".tk-err");
@@ -1122,8 +1127,9 @@ async function tasksFlow() {
       try {
         if (mode === "repeat") {
           const [hh, mm] = body.querySelector("#tk-time").value.split(":").map(Number);
-          const m = Number(body.querySelector("#tk-min").value) || 30;
-          const cron = { day: `${mm} ${hh} * * *`, work: `${mm} ${hh} * * 1-5`, week: `${mm} ${hh} * * ${body.querySelector("#tk-wd").value}`, month: `${mm} ${hh} ${body.querySelector("#tk-md").value} * *`, hour: `${m % 60} * * * *`, every: `*/${m} * * * *`, cron: body.querySelector("#tk-cron").value.trim() }[freq.value];
+          const rawMin = Number(body.querySelector("#tk-min").value);
+          const m = freq.value === "every" ? Math.max(5, rawMin || 30) : (Number.isFinite(rawMin) ? rawMin : 30);
+          const cron = { day: `${mm} ${hh} * * *`, work: `${mm} ${hh} * * 1-5`, week: `${mm} ${hh} * * ${body.querySelector("#tk-wd").value}`, month: `${mm} ${hh} ${body.querySelector("#tk-md").value} * *`, hour: `${((m % 60) + 60) % 60} * * * *`, every: `*/${m} * * * *`, cron: body.querySelector("#tk-cron").value.trim() }[freq.value];
           const prompt = body.querySelector("#tk-prompt").value.trim();
           if (!prompt) { err.textContent = "写一下要做什么"; return; }
           // 纯定时：绝不带 webhook
@@ -1629,6 +1635,9 @@ async function sysaccessFlow() {
     const capLabel = (id) => caps.find((c) => c.id === id)?.label || id;
     const shown = events.filter((ev) => !auditBot || ev.botId === auditBot).slice(0, 60);
     body.innerHTML = `
+      <div class="d-sec"><h4>Bot 浏览器</h4>
+        <div class="hint">每个 bot 有一块内部浏览器（顶栏 🌐），登录态按 bot 隔离。网页登录、填表用它；电脑操控只留给本机 App，不要去点你的 Chrome。</div>
+      </div>
       <div class="d-sec"><h4>电脑操控</h4>
         <div class="d-card"><div class="c-main"><div class="c-title">一键启用</div><div class="c-sub">自动安装运行时并连接；再到下面勾系统权限即可</div></div>
           <button class="primary-btn" id="sa-cu">打开 MCP 里的开关</button></div>

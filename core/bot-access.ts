@@ -122,8 +122,8 @@ export function buildBotAccessOverview(input: {
     canDo.push(`命令禁止：${denyCommands.join("、")}`);
     warnings.push(`禁止规则对 Always 仍生效：${denyCommands.join("、")}`);
   }
-  if (termPaths.length) canDo.push(`可免问开终端的目录：${termPaths.map(shortPath).join("、")}`);
-  if (cliPaths.length) canDo.push(`可免问派 Coding CLI 的目录：${cliPaths.map(shortPath).join("、")}`);
+  const codingDirs = [...new Set([...termPaths, ...cliPaths])];
+  if (codingDirs.length) canDo.push(`可免问开终端、打字和派 Coding CLI 的目录：${codingDirs.map(shortPath).join("、")}`);
   const hookRoutines = routines.filter((r) => r.hasWebhook);
   if (hookRoutines.length) {
     canDo.push(`入站例行 Webhook：${hookRoutines.map((r) => r.name).join("、")}${gw.enabled ? "" : "（网关未开，仅有令牌）"}`);

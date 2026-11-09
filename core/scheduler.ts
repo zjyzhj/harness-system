@@ -4,6 +4,18 @@ import { readJsonSafe, writeJsonAtomic } from "./atomic-fs";
 import { join } from "node:path";
 
 const HISTORY_CAP = 20;
+/** 对齐 Grok：一个 bot 最多 50 条例行 */
+export const MAX_ROUTINES_PER_BOT = 50;
+/** 周期例行两次触发至少隔 5 分钟 */
+export const MIN_CRON_GAP_MS = 5 * 60_000;
+/** 单条例行每小时最多开跑次数 */
+export const ROUTINE_HOURLY_CAP = 200;
+/** 全部例行合计每小时最多开跑次数 */
+export const ACCOUNT_HOURLY_CAP = 300;
+export const RATE_LIMIT_ERROR = "Automation run rate limit exceeded";
+/** 离开超过 14 天，周期例行先暂停 */
+export const AWAY_PAUSE_MS = 14 * 24 * 3600_000;
+export const AWAY_PAUSE_NOTE = "离开较久，例行已暂停。回来后打开开关即可继续。";
 
 /** IPC / 表单可改字段；不含 webhookToken / history / runCount / botId 等 */
 export const TASK_PUBLIC_PATCH_KEYS = [
@@ -33,6 +45,10 @@ export class Scheduler {
   onAlarm: ((task: ScheduledTask) => void) | null = null;
   /** 任务列表有增删改时通知 UI 刷新（如一次性任务执行后自动删除） */
   onChange: (() => void) | null = null;
+  /** 最近一次用户开口的时间；空则不判断「离开太久」 */
+  lastUserAt: (() => number) | null = null;
+  /** 因离开太久暂停了一批周期例行 */
+  onAwayPause: ((tasks: ScheduledTask[]) => void) | null = null;
 
   constructor(private home: string) {
     this.file = join(home, "tasks.json");
@@ -102,6 +118,9 @@ export class Scheduler {
     if (kind === "cron" && !isValidCron(input.cron)) throw new Error(`cron 表达式无效: ${input.cron}（应为 5 段：分 时 日 月 周）`);
     const timezone = normalizeTimezone(input.timezone);
     const schedule = input.schedule !== false;
+    if (kind === "cron" && schedule) assertSchedulable(input.cron, timezone);
+    const owned = this.tasks.filter((x) => x.botId === input.botId).length;
+    if (owned >= MAX_ROUTINES_PER_BOT) throw new Error(`这个 bot 最多 ${MAX_ROUTINES_PER_BOT} 条例行`);
     const t: ScheduledTask = {
       id: randomUUID(),
       botId: input.botId,
@@ -166,7 +185,16 @@ export class Scheduler {
   }
 
   setEnabled(id: string, enabled: boolean) {
-    return this.update(id, { enabled });
+    const t = this.tasks.find((x) => x.id === id);
+    if (!t) return null;
+    t.enabled = enabled;
+    if (enabled && t.pausedReason === "away") {
+      delete t.pausedReason;
+      if (t.lastError === AWAY_PAUSE_NOTE) delete t.lastError;
+    }
+    this.persist();
+    this.onChange?.();
+    return t;
   }
 
   /** 为已有例行开通入站 webhook 令牌 */
@@ -223,9 +251,17 @@ export class Scheduler {
     if (this.running) return;
     this.running = true;
     try {
+      this.pauseIfAway(now);
       // schedule===false：仅 Webhook 例行，到点不跑（对齐 Grok：定时与 Webhook 分家）
       const due = this.tasks.filter((t) => t.enabled && t.schedule !== false && t.nextRunAt && t.nextRunAt <= now && !this.inFlight.has(t.id));
       for (const t of due) {
+        if (this.rateLimitReason(t, now)) {
+          const next = t.kind === "once" ? t.nextRunAt : nextCronTime(t.cron, now, t.timezone);
+          this.recordLimited(t, now, next);
+          if (t.kind === "once") this.update(t.id, { enabled: false });
+          continue;
+        }
+        this.stampRun(t, now);
         if (t.kind === "once") {
           // 一次性：先禁用，避免与 runNow / 下轮 tick 重入
           this.inFlight.add(t.id);
@@ -271,13 +307,14 @@ export class Scheduler {
               const err = e instanceof Error ? e.message : String(e);
               const retries = (t.retryCount ?? 0) + 1;
               const max = t.maxRetries ?? 2;
+              const noRetry = err.includes(RATE_LIMIT_ERROR);
               this.pushHistory(t, { taskId: t.id, ranAt: now, ok: false, error: err, prompt: t.prompt ?? t.name });
               this.update(t.id, {
                 lastResult: "error",
                 lastError: err,
-                retryCount: retries,
+                retryCount: noRetry ? 0 : retries,
                 lastRunLog: `❌ ${new Date(now).toISOString()} 失败: ${err.slice(0, 120)}`,
-                nextRunAt: retries <= max ? now + [5, 15, 30][Math.min(retries - 1, 2)] * 60_000 : next,
+                nextRunAt: noRetry || retries > max ? next : now + [5, 15, 30][Math.min(retries - 1, 2)] * 60_000,
               });
             }
           }
@@ -306,6 +343,11 @@ export class Scheduler {
       return this.update(t.id, { lastResult: "running", lastError: "已在执行中" });
     }
     const now = Date.now();
+    if (this.rateLimitReason(t, now)) {
+      this.recordLimited(t, now);
+      return this.get(id);
+    }
+    this.stampRun(t, now);
     this.inFlight.add(t.id);
     // once 先禁用，杜绝 tick 再入
     if (t.kind === "once") this.update(t.id, { enabled: false, lastRunAt: now, runCount: t.runCount + 1, lastResult: "running" });
@@ -342,6 +384,49 @@ export class Scheduler {
     }
     await finish();
     return this.get(id);
+  }
+
+  /** 近一小时已开跑的次数。超限的这次不算开跑，也不自动重试。 */
+  private rateLimitReason(t: ScheduledTask, now: number): string | null {
+    const hour = now - 3_600_000;
+    const count = (stamps?: number[]) => (stamps ?? []).filter((x) => x >= hour).length;
+    if (count(t.runStamps) >= ROUTINE_HOURLY_CAP) return RATE_LIMIT_ERROR;
+    let account = 0;
+    for (const x of this.tasks) account += count(x.runStamps);
+    if (account >= ACCOUNT_HOURLY_CAP) return RATE_LIMIT_ERROR;
+    return null;
+  }
+
+  private stampRun(t: ScheduledTask, now: number) {
+    const hour = now - 3_600_000;
+    t.runStamps = [...(t.runStamps ?? []).filter((x) => x >= hour), now].slice(-ROUTINE_HOURLY_CAP);
+  }
+
+  private recordLimited(t: ScheduledTask, now: number, nextRunAt?: number) {
+    this.pushHistory(t, { taskId: t.id, ranAt: now, ok: false, error: RATE_LIMIT_ERROR, prompt: t.prompt ?? t.name });
+    this.update(t.id, {
+      lastRunAt: now,
+      ...(nextRunAt !== undefined ? { nextRunAt } : {}),
+      lastResult: "error",
+      lastError: RATE_LIMIT_ERROR,
+      retryCount: 0,
+      lastRunLog: `❌ ${new Date(now).toISOString()} ${RATE_LIMIT_ERROR}`,
+    });
+  }
+
+  private pauseIfAway(now: number) {
+    const seen = this.lastUserAt?.() ?? 0;
+    if (!seen || now - seen < AWAY_PAUSE_MS) return;
+    const hit = this.tasks.filter((t) => t.enabled && t.kind !== "once");
+    if (!hit.length) return;
+    for (const t of hit) {
+      t.enabled = false;
+      t.pausedReason = "away";
+      t.lastError = AWAY_PAUSE_NOTE;
+    }
+    this.persist();
+    this.onChange?.();
+    this.onAwayPause?.(hit);
   }
 }
 
@@ -428,6 +513,22 @@ export function nextCronTime(cron: string, from = Date.now(), timeZone?: string)
     ms += 60_000;
   }
   return from + 3600_000;
+}
+
+/** 周期例行两次触发至少隔 5 分钟。看接下来两天里相邻两次的间隔。 */
+export function assertSchedulable(cron: string, timeZone?: string): void {
+  const first = nextCronTime(cron, Date.now(), timeZone);
+  let prev = first;
+  for (let i = 0; i < 32; i++) {
+    const n = nextCronTime(cron, prev, timeZone);
+    if (n <= prev) return;
+    if (n - prev < MIN_CRON_GAP_MS) {
+      const mins = Math.max(1, Math.round((n - prev) / 60_000));
+      throw new Error(`例行两次触发至少隔 5 分钟（这份排期大约隔 ${mins} 分钟）`);
+    }
+    if (n - first >= 48 * 3600_000) return;
+    prev = n;
+  }
 }
 
 export function isValidCron(cron: string): boolean {

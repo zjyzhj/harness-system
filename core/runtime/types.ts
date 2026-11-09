@@ -76,6 +76,8 @@ export interface RuntimeDeps {
   codingThreads?: import("../coding-thread").CodingThreadStore;
   /** 编码进程在不在。无则每次派工都是一次性启动 */
   codingPresence?: import("../coding-presence").CodingPresence;
+  /** bot 内部浏览器。无则 browser.* 不可用 */
+  browserPresence?: import("../browser-presence").BrowserPresence;
   /** 语义回想：返回注入上下文的一节（没开 / 没命中返回空串）；excludeSession 是当前会话（已在历史里） */
   recall?: (bot: Bot, query: string, excludeSession?: string) => Promise<string>;
   /** 每轮结束时上报这一轮的模型用量（主进程汇总成每日统计） */

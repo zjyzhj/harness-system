@@ -137,7 +137,7 @@ describe("bash 沙箱与子命令", () => {
     expect(pathsOutsideRoots("cat ~/.ssh/id_rsa", [root]).length).toBeGreaterThan(0);
   });
 
-  test("信任模式可跳过白名单外读；无人值守仍直接拒绝", async () => {
+  test("信任模式可跳过白名单外读；无人执行也同样过", async () => {
     const dir = mkdtempSync(join(tmpdir(), "harness-trust-"));
     const secret = join(dir, "..", `secret-${Date.now()}.txt`);
     writeFileSync(secret, "top-secret");
@@ -155,8 +155,8 @@ describe("bash 沙箱与子命令", () => {
     expect(asked).toBe(0);
     asked = 0;
     const u = await ex.run("bash.run", { command: `cat ${secret}`, botId: "bot", unattended: true });
-    expect(u.ok).toBe(false);
-    expect(u.output).toContain("无人值守");
+    expect(u.ok).toBe(true);
+    expect(u.output).toContain("top-secret");
     expect(asked).toBe(0);
   });
 });

@@ -421,6 +421,10 @@ export interface ScheduledTask {
   schedule?: boolean;
   /** 最近运行历史（上限由 Scheduler 裁剪） */
   history?: TaskRunLog[];
+  /** 近一小时内真正开跑的时间戳，用来卡住每小时次数 */
+  runStamps?: number[];
+  /** away = 用户离开太久，调度器主动暂停 */
+  pausedReason?: "away";
   /** IANA 时区（如 Asia/Shanghai）；空=本机墙钟 */
   timezone?: string;
 }

@@ -18,6 +18,7 @@ import type { RuntimeDeps, ToolOutcome, RuntimeOptions, TurnCtx } from "./runtim
 import { addSource, QUIET_TOOLS, CONTINUE_HINT, THINK_PROMPT, stripToolBlocks, toolBlockCutoff, BOT_ASK_CONCURRENCY, abortable, mapPool, untrusted, thinkingModelOf, needsReasoning, contextWindowOf, historyBudgetOf, turnBudgetOf, shrinkToolResults, looksLikeRule, buildActionGroundingFacts, ACTION_GROUNDING_SYSTEM, shouldActionGround, parseVerdict, CALL_TOOL, toolRoundEcho, parseToolBlocks, canonicalizeTool, TOOL_ALIASES, GROUNDING_RISK_TOOLS, MCP_STDIO_ALLOW, checkMcpStdioCommand } from "./runtime/turn-helpers";
 import { memoryLink, appendSkillRules, isDuplicateRule, type MemoryDraft, CLAIMS_SAVED, memoryFromText } from "./runtime/rules-text";
 import { runTaskTool, sendFiles, uiTool, ownHistoryText, isSensitivePath, parseRunAt } from "./runtime/tool-helpers";
+import { unattendedApprovalKind } from "./routine-boundary";
 import { PromptBuilder, type PromptExtras } from "./runtime/prompt";
 import {
   buildAgentPrompt,
@@ -31,7 +32,7 @@ import {
 } from "./cli-agent";
 import { cliAgentToolDescription, probeCodingAgents } from "./coding-agents";
 import { nextCodingThread, shouldResume, threadBrief, wantsFreshTask } from "./coding-thread";
-import { codingDirList, decodeTermKeys, gazeCodingDir, postureSentence, terminalPosture } from "./coding-presence";
+import { codingDirList, decodeTermKeys, gazeCodingDir, postureSentence, presenceTaskLine, terminalPosture } from "./coding-presence";
 import { detectChoiceOffer } from "./choice-offer";
 import { summarizeCodingActivity } from "./coding-activity";
 import {
@@ -833,12 +834,40 @@ export class BotRuntime {
     if (turn.unattended && t.tool.startsWith("ui.")) {
       return { output: "❌ 现在是无人值守的自动执行，没有用户能回答或确认。不要再提问，信息不全就自己做合理假设（在产出开头写明假设），直接完成任务。" };
     }
-    // 外部 Coding CLI 看不到 Vault：不要把 {{secret:}} 填进派工参数
-    if ((t.tool === "cli.agent" || t.tool === "cli.term" || t.tool.startsWith("term.")) && JSON.stringify(args).includes("{{secret:")) {
-      return { output: "❌ 终端 / Coding CLI 不会把保险库密钥交出去。任务里去掉 {{secret:}}，让 Coding CLI 用它自己的登录态。" };
+    if (turn.unattended) {
+      const kind = unattendedApprovalKind(t.tool);
+      if (kind && this.deps.consent?.permissionMode(bot.id) !== "always") {
+        return { output: `例行停在批准点：这一步是${kind}（${t.tool}）。bot 不是 Always 时，没人在场不能做。把待批准的事写进回复，不要假装已经完成。` };
+      }
     }
-    // ui.* 需要看到未替换的密钥占位，所以不预填；其它工具执行前替换
-    if (t.tool !== "cli.agent" && t.tool !== "cli.term" && !t.tool.startsWith("ui.") && this.deps.secrets && JSON.stringify(args).includes("{{")) {
+    const terminalTool = t.tool === "cli.agent" || t.tool === "cli.term" || t.tool.startsWith("term.");
+    const browserTool = t.tool.startsWith("browser.");
+    if (terminalTool && JSON.stringify(args).includes("{{secret:")) {
+      if (!turn.unattended && !this.terminalSecretsReady(bot, args)) {
+        return { output: "❌ 这个目录还没信任，密钥不会进终端。对该目录点「总是允许」，或把 bot 设为 Auto / Always 之后，再用 {{secret:名字}} 或 $名字。" };
+      }
+      if (!this.deps.secrets) return { output: "❌ 密钥库未启用" };
+      const filled = this.deps.secrets.fill(args, bot.id);
+      if (filled.missing.length) {
+        return { output: `❌ 密钥未设置：${filled.missing.join("、")}。用 ui.secret 请用户填写（账号级保险库，保存后所有 bot 都能用）` };
+      }
+      args = filled.args;
+      this.deps.audit?.append({ botId: bot.id, cap: "secret", action: `use:${t.tool}`, args: filled.used.join(","), granted: true, ok: true });
+    }
+    if (browserTool && t.tool === "browser.type" && JSON.stringify(args).includes("{{secret:")) {
+      if (!turn.unattended && !this.browserSecretsReady(bot)) {
+        return { output: "❌ 还没批准开浏览器，密钥不会填进去。先 browser.open 并点「以后不再问」，或把 bot 设为 Auto / Always。" };
+      }
+      if (!this.deps.secrets) return { output: "❌ 密钥库未启用" };
+      const filled = this.deps.secrets.fill(args, bot.id);
+      if (filled.missing.length) {
+        return { output: `❌ 密钥未设置：${filled.missing.join("、")}。用 ui.secret 请用户填写` };
+      }
+      args = filled.args;
+      this.deps.audit?.append({ botId: bot.id, cap: "secret", action: `use:${t.tool}`, args: filled.used.join(","), granted: true, ok: true });
+    }
+    // ui.* 需要看到未替换的密钥占位，所以不预填；其它工具执行前替换。终端/浏览器在上面已按信任填过。
+    if (!terminalTool && !browserTool && !t.tool.startsWith("ui.") && this.deps.secrets && JSON.stringify(args).includes("{{")) {
       // 网址会被对方服务器记录：密钥不能拼进联网请求
       if (t.tool === "web.search" || t.tool === "web.fetch") return { output: "❌ 联网搜索 / 打开网页不能带 {{secret:}} 密钥。需要用密钥调接口时用 bash.run（会请用户确认）" };
       const filled = this.deps.secrets.fill(args, bot.id);
@@ -958,6 +987,14 @@ export class BotRuntime {
     R.register("term.keys", "往终端送按键。参数: data（down/up/enter/tab/esc/space/ctrl-c）, cwd?", (ctx) => this.termTool(ctx.bot, { action: "keys", ...ctx.args }, turn(ctx)));
     R.register("term.stop", "关掉终端。参数: cwd?（默认正在看的这块）", (ctx) => this.termTool(ctx.bot, { action: "stop", ...ctx.args }, turn(ctx)));
     R.register("cli.term", termHelp, (ctx) => this.termTool(ctx.bot, ctx.args, turn(ctx)));
+    R.register("browser.open", "打开这个 bot 的内部浏览器面板（登录态按 bot 隔离）。参数: url?", (ctx) => this.browserTool(ctx.bot, "open", ctx.args, turn(ctx)));
+    R.register("browser.goto", "在 bot 浏览器里打开网址。参数: url", (ctx) => this.browserTool(ctx.bot, "goto", ctx.args, turn(ctx)));
+    R.register("browser.snapshot", "看当前页可交互元素（带 e1/e2… ref，供 click/type）", (ctx) => this.browserTool(ctx.bot, "snapshot", ctx.args, turn(ctx)));
+    R.register("browser.click", "点击页面元素。参数: ref（来自 snapshot）或 selector", (ctx) => this.browserTool(ctx.bot, "click", ctx.args, turn(ctx)));
+    R.register("browser.type", "往输入框打字。参数: text, ref|selector, submit?；已批准时可用 {{secret:名字}}", (ctx) => this.browserTool(ctx.bot, "type", ctx.args, turn(ctx)));
+    R.register("browser.keys", "送按键。参数: keys（enter/tab/escape/backspace 或组合）", (ctx) => this.browserTool(ctx.bot, "keys", ctx.args, turn(ctx)));
+    R.register("browser.read", "读当前页 url、标题和可见正文摘录", (ctx) => this.browserTool(ctx.bot, "read", ctx.args, turn(ctx)));
+    R.register("browser.stop", "关掉浏览器面板（登录态仍保留）", (ctx) => this.browserTool(ctx.bot, "stop", ctx.args, turn(ctx)));
     // 后台暖探测缓存，让工具说明 / 提示词能跟上本机安装变化
     void probeCodingAgents().catch(() => {});
     builtin("memory.list", "列出某个 bot 已存的规范/事实单条。用户问「你记得什么 / 关于我知道些什么」时用。参数: bot?（bot 名，默认你自己）, kind?（rule=规范 / fact=事实，默认全部）");
@@ -967,7 +1004,7 @@ export class BotRuntime {
     builtin("remember", "同 memory.add");
     builtin("bot.list", "列出团队其他 bot");
     builtin("bot.ask", "向另一个 bot 提一个有实质内容的问题并拿回复。密钥 / 环境是账号级共用的，不必为凭据再转问。需要多人在群里露脸或接力时用 group.send（要全员就在 message 里写 @所有人），不要对多人轮流发同一句空提示。参数: to, message");
-    builtin("task.create", "建例行/定时任务。参数: name, prompt, cron|at|in；webhook:true 开通入站（外系统 POST JSON：message=用户话；priority=normal|urgent）。紧急可打断并通知。入站 URL 让用户到例行面板 🪝 复制，勿把令牌写进聊天。一次性可设 runPrompt:false 仅宠物闹钟。");
+    builtin("task.create", "建例行/定时任务。参数: name, prompt, cron|at|in；webhook:true 开通入站（外系统 POST JSON：message=用户话；priority=normal|urgent）。紧急可打断并通知。入站 URL 让用户到例行面板 🪝 复制，勿把令牌写进聊天。一次性可设 runPrompt:false 仅宠物闹钟。每个 bot 最多 50 条；周期两次至少隔 5 分钟。");
     builtin("task.list", "列出定时任务");
     builtin("task.delete", "删定时任务。参数: id 或 name");
     for (const n of ["apple.openApp", "apple.activate", "apple.type", "apple.click", "apple.hotkey", "apple.tellApp"]) {
@@ -1906,13 +1943,13 @@ export class BotRuntime {
       };
     }
     if (t.tool === "sys.observe" || t.tool === "sys.processes" || t.tool === "sys.disk" || t.tool === "sys.activity" || t.tool === "sys.scan" || t.tool === "sys.purge") {
-      return this.sysObserveTool(bot, t.tool, args);
+      return this.sysObserveTool(bot, t.tool, args, !!turn?.unattended);
     }
     return { output: `未知工具 ${t.tool}` };
   }
 
   /** 系统行为观察 / 浅扫 / 受控删除——场景由 bot + task.create 组合 */
-  private async sysObserveTool(bot: Bot, tool: string, args: Record<string, unknown>): Promise<ToolOutcome> {
+  private async sysObserveTool(bot: Bot, tool: string, args: Record<string, unknown>, unattended = false): Promise<ToolOutcome> {
     const home = this.deps.harnessHome;
     if (tool === "sys.purge") {
       const paths = Array.isArray(args.paths) ? args.paths.map((x) => String(x ?? "").trim()).filter(Boolean) : [];
@@ -1920,8 +1957,8 @@ export class BotRuntime {
       if (!this.deps.consent) return { output: "❌ 授权中心未启用，拒绝删除" };
       const r = await this.deps.consent.request(bot.id, "bash:io", `删除 ${paths.length} 个文件：\n${paths.slice(0, 12).join("\n")}${paths.length > 12 ? "\n…" : ""}`, {
         requiresStrongConsent: true,
-        onceOnly: true,
-        reasons: ["不可恢复", "仅允许家目录下的真实路径（拒绝符号链接逃逸）"],
+        unattended,
+        reasons: ["不可恢复", "仅允许家目录下的真实路径（拒绝符号链接逃逸）", "点「以后不再问」就记住，不用每次确认"],
       });
       if (!r.granted) {
         this.deps.audit?.append({ botId: bot.id, cap: "bash:io", action: "sys.purge", args: paths.slice(0, 8).join(","), granted: false });
@@ -2036,10 +2073,6 @@ export class BotRuntime {
   async runCodingJob(bot: Bot, args: Record<string, unknown>, turn: TurnCtx): Promise<{ ok: boolean; output: string; cwd?: string }> {
     const task = String(args.task ?? args.prompt ?? args.message ?? "").trim();
     if (!task) return { ok: false, output: "cli.agent 需要 task（要改什么、验收标准）" };
-    if (turn.unattended) return { ok: false, output: "❌ 无人值守（定时任务）不能派 cli.agent 改仓库，需要用户在场批准。" };
-    if (task.includes("{{secret:") || JSON.stringify(args).includes("{{secret:")) {
-      return { ok: false, output: "❌ Coding CLI 不会把保险库密钥交出去。任务里去掉 {{secret:}}，让它用自己的登录态。" };
-    }
     if (!this.deps.consent) return { ok: false, output: "❌ 没有授权中心，拒绝派工 Coding CLI。" };
     if (isCliAgentBusy(bot.id)) return { ok: false, output: "❌ 该 bot 已有一个 cli.agent 在跑，等它结束再派" };
 
@@ -2077,21 +2110,19 @@ export class BotRuntime {
     } catch (e) {
       return { ok: false, output: `❌ ${e instanceof Error ? e.message : String(e)}` };
     }
-
     const desc =
       `派本机 ${cli} CLI（可写 Agent）改工程\n目录：${cwd}\n任务：${task.slice(0, 500)}${task.length > 500 ? "…" : ""}`;
 
     let viaPathGrant = false;
-    let shallowOnce = false;
     const r = await this.deps.consent.requestCliAgent(bot.id, cwd, desc, {
-      reasons: ["将启动外部 Coding CLI，可在该目录读写文件并执行命令", "可选「总是允许此目录」以免同工程反复确认；密钥不会从 Vault 自动注入"],
+      reasons: ["将启动外部 Coding CLI，可在该目录读写文件并执行命令", "「总是允许此目录」后，开终端、打字和派工都不再问；普通配置和保险库密钥会进入这个终端的环境"],
+      unattended: !!turn.unattended,
     });
     if (!r.granted) {
       this.deps.audit?.append({ botId: bot.id, cap: "cli:agent", action: "cli.agent", args: `${cli} ${cwd}`, granted: false });
       return { ok: false, output: "❌ 用户没有批准派工 Coding CLI，不要换别的 CLI 重试绕过，直接告诉用户" };
     }
     viaPathGrant = !!r.viaPathGrant;
-    shallowOnce = !!r.shallow;
 
     // 目录信任二次派工：不再弹窗，但仍给模型/用户一条可见摘要（避免完全静默）
     if (viaPathGrant) {
@@ -2115,7 +2146,7 @@ export class BotRuntime {
     const freshPrompt = buildAgentPrompt({ ...promptBase, brief: threadBrief(thread) });
     const brief = threadBrief(thread);
     const promptText = this.deps.codingPresence
-      ? [brief ? `接着上次：${brief}` : "", task].filter(Boolean).join(" ").replace(/\s+/g, " ").trim().slice(0, 500)
+      ? presenceTaskLine(task, { brief })
       : resume ? buildAgentPrompt({ ...promptBase, resume: true }) : freshPrompt;
 
     const t0 = Date.now();
@@ -2134,6 +2165,7 @@ export class BotRuntime {
         signal: turn.signal,
         harnessHome,
         onProgress: turn.onToolProgress,
+        env: this.terminalEnv(bot, cwd, !!turn.unattended),
       };
       const result = this.deps.codingPresence
         ? await this.deps.codingPresence.dispatch(bot.id, agentReq)
@@ -2171,12 +2203,12 @@ export class BotRuntime {
       }
       const head = [
         viaPathGrant ? `（目录已信任，本次未再弹窗 · ${cli}）` : "",
-        shallowOnce ? `（目录层级太浅，只批准这一次，没有记成长期信任 · ${cli}）` : "",
         resume && !this.deps.codingPresence && !result.resumedThenFresh ? `（续 ${cli} 会话）` : "",
         result.reused ? `（打进还开着的 ${cli} 终端，没有重新启动）` : "",
         result.keptAlive && !result.reused ? `（${cli} 终端已打开，屏幕和界面上是同一块）` : "",
       ].filter(Boolean).join("\n");
-      const output = head ? `${head}\n${result.output}` : result.output;
+      const envNote = this.terminalEnvNote(bot, cwd, !!result.reused);
+      const output = [head, envNote, result.output].filter(Boolean).join("\n");
       return { ok: result.ok && !result.cancelled && !result.timedOut, output, cwd };
     } catch (e) {
       const msg = e instanceof CliAgentPathError ? e.message : e instanceof Error ? e.message : String(e);
@@ -2194,6 +2226,49 @@ export class BotRuntime {
     }
   }
 
+  /** 目录已信任，或 bot 为 Auto / Always 时，终端可以拿到保险库密钥。 */
+  private terminalSecretsReady(bot: Bot, args: Record<string, unknown>): boolean {
+    if (!this.deps.consent) return false;
+    if (this.deps.consent.isTrusted(bot.id)) return true;
+    const raw = String(args.cwd ?? bot.agentCwd ?? "").trim();
+    if (!raw) return false;
+    try {
+      const harnessHome = this.deps.workspaceRoot ? join(this.deps.workspaceRoot, "..") : undefined;
+      return this.deps.consent.hasCodingDir(bot.id, resolveAgentCwd(raw, { harnessHome }));
+    } catch {
+      return false;
+    }
+  }
+
+  /** 普通配置始终进入终端。密钥在目录已信任，或这次是例行吩咐时进入。 */
+  private terminalEnv(bot: Bot, cwd: string, standingOrder = false): Record<string, string> {
+    const env: Record<string, string> = { ...(this.deps.env?.envFor(bot.id) ?? {}) };
+    if (standingOrder || this.codingDirReady(bot.id, cwd)) {
+      for (const s of this.deps.secrets?.list(bot.id) ?? []) {
+        if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(s.name)) continue;
+        const v = this.deps.secrets?.get(s.name, bot.id);
+        if (v) env[s.name] = v;
+      }
+    }
+    return env;
+  }
+
+  private terminalEnvNote(bot: Bot, cwd: string, reused: boolean): string {
+    const trusted = this.codingDirReady(bot.id, cwd);
+    const hasEnv = Object.keys(this.deps.env?.envFor(bot.id) ?? {}).length > 0;
+    if (!trusted && !hasEnv) return "";
+    if (trusted && reused) return "（这块终端是之前打开的。若信任是后来才给的，关掉再开一次，$名字 才会是保险库里的值。）";
+    if (trusted) return "（普通配置和保险库密钥已在这个终端的环境里，用 $名字。）";
+    return "（普通配置已在这个终端的环境里。密钥要等这个目录被信任后重新打开才进入。）";
+  }
+
+  /** 目录已「总是允许」，或 bot 为 Auto / Always。无人值守只走这条。 */
+  private codingDirReady(botId: string, cwd: string): boolean {
+    const consent = this.deps.consent;
+    if (!consent) return false;
+    return consent.isTrusted(botId) || consent.hasCodingDir(botId, cwd);
+  }
+
   /** 解析终端工具的 cwd：显式 args → PROJECT_ROOT → agentCwd；失败返回可读错误。 */
   private resolveTermCwd(bot: Bot, args: Record<string, unknown>): { cwd: string } | { error: string } {
     const projectRoot = this.deps.env?.visibleTo(bot.id).find((e) => e.key === "PROJECT_ROOT")?.value;
@@ -2207,6 +2282,103 @@ export class BotRuntime {
     }
   }
 
+  private browserSecretsReady(bot: Bot): boolean {
+    if (!this.deps.consent) return false;
+    if (this.deps.consent.isTrusted(bot.id)) return true;
+    return this.deps.consent.has(bot.id, "browser:open");
+  }
+
+  private async ensureBrowserConsent(bot: Bot, url: string | undefined, turn: TurnCtx): Promise<{ ok: true } | { ok: false; output: string }> {
+    if (!this.deps.consent) return { ok: false, output: "❌ 没有授权中心，拒绝打开浏览器。" };
+    const where = url ? `\n地址：${url}` : "";
+    const r = await this.deps.consent.requestBrowserOpen(bot.id, `打开 bot 内部浏览器${where}`, {
+      reasons: [
+        "界面会打开这个 bot 自己的浏览器面板（不是你的 Chrome）",
+        "登录态按 bot 隔离，可留作以后例行使用",
+        "点「以后不再问」后，开浏览器和导航不再弹卡",
+        "验证码等需要本人操作时，在面板里接手即可",
+      ],
+      unattended: !!turn.unattended,
+    });
+    if (!r.granted) {
+      this.deps.audit?.append({ botId: bot.id, cap: "browser:open", action: "browser.open", args: url ?? "", granted: false });
+      return { ok: false, output: "❌ 用户没有批准打开浏览器" };
+    }
+    if (url) {
+      try {
+        const host = new URL(url).hostname;
+        if (await isPrivateHost(host)) {
+          const local = await this.deps.consent.request(bot.id, "net:local", `bot 浏览器打开本机 / 局域网地址 ${url}`, { unattended: !!turn.unattended });
+          if (!local.granted) {
+            this.deps.audit?.append({ botId: bot.id, cap: "net:local", action: "browser.goto", args: url, granted: false });
+            return { ok: false, output: "❌ 用户未允许访问本机 / 局域网地址" };
+          }
+        }
+      } catch { /* 无效 URL 交给宿主报错 */ }
+    }
+    return { ok: true };
+  }
+
+  /** bot 内部浏览器：open / goto / snapshot / click / type / keys / read / stop */
+  private async browserTool(bot: Bot, action: string, args: Record<string, unknown>, turn: TurnCtx): Promise<ToolOutcome> {
+    const presence = this.deps.browserPresence;
+    if (!presence) return { output: "❌ 内部浏览器未启用。" };
+    const url = typeof args.url === "string" ? args.url.trim() : undefined;
+    if (action === "open" || action === "goto") {
+      if (action === "goto" && !url) return { output: "browser.goto 需要 url" };
+      const gate = await this.ensureBrowserConsent(bot, url, turn);
+      if (!gate.ok) return { output: gate.output };
+      const r = action === "open" ? await presence.open(bot.id, url) : await presence.goto(bot.id, url!);
+      this.deps.audit?.append({
+        botId: bot.id,
+        cap: "browser:open",
+        action: `browser.${action}`,
+        args: (url ?? "").slice(0, 200),
+        granted: true,
+        ok: r.ok,
+        detail: r.ok ? r.output.slice(0, 200) : r.error.slice(0, 200),
+      });
+      return { output: r.ok ? r.output : `❌ ${r.error}` };
+    }
+    if (action === "stop") {
+      const r = await presence.stop(bot.id);
+      return { output: r.output };
+    }
+    if (action === "snapshot") {
+      const r = await presence.takeSnapshot(bot.id);
+      return { output: r.ok ? r.output : `❌ ${r.error}` };
+    }
+    if (action === "read") {
+      const r = await presence.read(bot.id);
+      return { output: r.ok ? r.output : `❌ ${r.error}` };
+    }
+    if (action === "click") {
+      const r = await presence.click(bot.id, {
+        ref: typeof args.ref === "string" ? args.ref : undefined,
+        selector: typeof args.selector === "string" ? args.selector : undefined,
+      });
+      return { output: r.ok ? r.output : `❌ ${r.error}` };
+    }
+    if (action === "type") {
+      const text = String(args.text ?? args.data ?? "");
+      if (!text) return { output: "browser.type 需要 text" };
+      const r = await presence.type(bot.id, {
+        text,
+        ref: typeof args.ref === "string" ? args.ref : undefined,
+        selector: typeof args.selector === "string" ? args.selector : undefined,
+        submit: args.submit === true || args.submit === "true",
+      });
+      return { output: r.ok ? r.output : `❌ ${r.error}` };
+    }
+    if (action === "keys") {
+      const keys = String(args.keys ?? args.data ?? args.text ?? "").trim();
+      if (!keys) return { output: "browser.keys 需要 keys（如 enter / tab / escape）" };
+      const r = await presence.keys(bot.id, keys);
+      return { output: r.ok ? r.output : `❌ ${r.error}` };
+    }
+    return { output: "browser 支持 open / goto / snapshot / click / type / keys / read / stop" };
+  }
+
   /** 终端：open / read / write / keys / stop（cli.term 别名也走这里）。可带 cwd 指定目录。 */
   private async termTool(bot: Bot, args: Record<string, unknown>, turn: TurnCtx): Promise<ToolOutcome> {
     const presence = this.deps.codingPresence;
@@ -2214,7 +2386,6 @@ export class BotRuntime {
     const action = String(args.action ?? "read").trim();
     const wantCwd = args.cwd != null && String(args.cwd).trim() !== "";
     if (action === "open") {
-      if (turn.unattended) return { output: "❌ 无人值守不能打开终端。" };
       if (!this.deps.consent) return { output: "❌ 没有授权中心，拒绝打开终端。" };
       const resolved = this.resolveTermCwd(bot, args);
       if ("error" in resolved) return { output: resolved.error };
@@ -2224,15 +2395,16 @@ export class BotRuntime {
         reasons: [
           "界面会打开终端面板，你和 Bot 看同一块屏幕",
           "该目录会进入工程名单，作为终端槽位 / 派工默认目录",
-          "不会因此获得 fs.write，也不会批准改仓库；派 Coding CLI 仍需单独确认",
-          "你自己点「打开」不需确认；Bot 打开要确认。可选「总是允许此目录」",
+          "点「总是允许此目录」后，开终端、打字和派 Coding CLI 都不再问",
+          "你自己点「打开」不需确认；Bot 第一次打开要确认",
         ],
+        unattended: !!turn.unattended,
       });
       if (!r.granted) {
         this.deps.audit?.append({ botId: bot.id, cap: "term:open", action: "term.open", args: cwd, granted: false });
         return { output: "❌ 用户没有批准打开终端" };
       }
-      const opened = await presence.openShell(bot.id, cwd);
+      const opened = await presence.openShell(bot.id, cwd, { env: this.terminalEnv(bot, cwd, !!turn.unattended) });
       if ("error" in opened) {
         this.deps.audit?.append({ botId: bot.id, cap: "term:open", action: "term.open", args: cwd, granted: true, ok: false, detail: opened.error.slice(0, 200) });
         return { output: `❌ ${opened.error}` };
@@ -2247,7 +2419,8 @@ export class BotRuntime {
       const prog = opened.program?.kind === "agent" ? opened.cli : "shell";
       const note = opened.notice ? `\n${opened.notice}` : "";
       const openedWord = opened.notice ? "已切到现有终端" : "已打开";
-      return { output: `${head}【终端】${prog} · ${opened.cwd} · ${openedWord}（界面终端面板已亮起）。人机同屏。改仓库再调 cli.agent。${note}` };
+      const envNote = this.terminalEnvNote(bot, cwd, !!opened.notice);
+      return { output: `${head}【终端】${prog} · ${opened.cwd} · ${openedWord}（界面终端面板已亮起）。人机同屏。改仓库再调 cli.agent。${envNote ? `\n${envNote}` : ""}${note}` };
     }
     let cwd: string | undefined;
     if (wantCwd || action === "stop") {
@@ -2273,7 +2446,6 @@ export class BotRuntime {
       return { output: `【终端屏幕 · ${prog} · ${view.cwd}】\n${pose}\n${screen}` };
     }
     if (action !== "write" && action !== "keys") return { output: "终端 action 是 open、read、write、keys 或 stop。可带 cwd 指定工程目录。" };
-    if (turn.unattended) return { output: "❌ 无人值守不能往终端里输入。" };
     const data = String(args.data ?? args.text ?? "");
     if (!data.trim() && action === "write") return { output: "term.write 需要 data（要打进去的内容）。" };
     if (action === "keys") {

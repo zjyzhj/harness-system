@@ -60,6 +60,7 @@
       <div id="chat-actions">
         <button id="watch-chip" class="watch-chip hidden" type="button" title="打开详情 · 系统监听">监听</button>
         <button id="ct-toggle" class="icon-btn" title="终端">›_</button>
+        <button id="bb-toggle" class="icon-btn" title="Bot 浏览器">🌐</button>
         <button id="wb-toggle" class="icon-btn" title="工作台：预览和编辑 bot 写的文档 / 网页">▤</button>
         <button id="share-btn" class="icon-btn" title="分享对话（长图 / 网页）">⇪</button>
       </div>
@@ -103,6 +104,20 @@
       </div>
       <pre id="ct-screen" tabindex="0"></pre>
     </section>
+    <section id="bot-browser" class="hidden">
+      <div id="bb-resize" title="拖动调整高度"></div>
+      <div class="bb-bar">
+        <button id="bb-back" type="button" title="后退">←</button>
+        <button id="bb-reload" type="button" title="刷新">↻</button>
+        <input id="bb-url" type="text" spellcheck="false" placeholder="输入网址，回车打开" />
+        <button id="bb-go" type="button" class="ghost-btn">前往</button>
+        <span id="bb-status" class="bb-status"></span>
+        <button id="bb-stop" type="button" title="关掉浏览器">结束</button>
+        <button id="bb-hide" type="button" title="收起">⌄</button>
+      </div>
+      <div id="bb-hint" class="bb-hint">验证码或本人登录时，直接在下方页面操作；完成后在聊天里说「继续」。</div>
+      <div id="bb-stage"></div>
+    </section>
     <div id="composer">
       <div id="ct-dock" class="hidden">
         <button type="button" id="ct-dock-main" class="ct-dock-main">
@@ -142,6 +157,7 @@
 <script defer src="./workbench.js"></script>
 <script defer src="./xterm-bundle.js"></script>
 <script defer src="./coding-term.js"></script>
+<script defer src="./bot-browser.js"></script>
 <script defer src="./realm.js"></script>
 </body>
 </html>

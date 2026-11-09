@@ -143,25 +143,47 @@ function isReady(cap: CliCapability, agentCapable: boolean): boolean {
   return true;
 }
 
+let probeInFlight: Promise<CodingAgentStatus[]> | null = null;
+
 export async function probeCodingAgents(opts?: { force?: boolean }): Promise<CodingAgentStatus[]> {
   if (!opts?.force && cache && Date.now() - cache.at < TTL_MS) return cache.items;
-  const items: CodingAgentStatus[] = [];
-  for (const b of listCodingAgentBackends()) {
-    const known = b.id === "cursor" || b.id === "claude" || b.id === "codex";
-    const cap: CliCapability = known ? await detectCli(b.id as CliName) : await detectBinVersion(b.bin);
-    const ready = isReady(cap, b.agent);
-    items.push({
-      id: b.id,
-      bin: b.bin,
-      label: b.label,
-      installed: cap.installed,
-      version: cap.version,
-      account: cap.account,
-      chat: b.chat && cap.installed,
-      agent: b.agent,
-      ready,
-    });
+  // TTL 过期但还有旧结果：先返回旧的，后台刷新（详情栏别被 CLI 探测卡住）
+  if (!opts?.force && cache?.items?.length) {
+    if (!probeInFlight) {
+      probeInFlight = refreshCodingAgentsProbe()
+        .catch(() => cache!.items)
+        .finally(() => {
+          probeInFlight = null;
+        });
+    }
+    return cache.items;
   }
+  if (probeInFlight && !opts?.force) return probeInFlight;
+  probeInFlight = refreshCodingAgentsProbe().finally(() => {
+    probeInFlight = null;
+  });
+  return probeInFlight;
+}
+
+async function refreshCodingAgentsProbe(): Promise<CodingAgentStatus[]> {
+  const items = await Promise.all(
+    listCodingAgentBackends().map(async (b) => {
+      const known = b.id === "cursor" || b.id === "claude" || b.id === "codex";
+      const cap: CliCapability = known ? await detectCli(b.id as CliName) : await detectBinVersion(b.bin);
+      const ready = isReady(cap, b.agent);
+      return {
+        id: b.id,
+        bin: b.bin,
+        label: b.label,
+        installed: cap.installed,
+        version: cap.version,
+        account: cap.account,
+        chat: b.chat && cap.installed,
+        agent: b.agent,
+        ready,
+      } satisfies CodingAgentStatus;
+    }),
+  );
   cache = { at: Date.now(), items };
   return items;
 }
@@ -178,7 +200,7 @@ async function detectBinVersion(bin: string): Promise<CliCapability> {
         /* */
       }
       resolve({ installed: false, chat: false });
-    }, 8_000);
+    }, 3_500);
     p.stdout?.on("data", (d) => {
       out += String(d);
     });
@@ -255,5 +277,5 @@ export function cliAgentToolDescription(items?: CodingAgentStatus[]): string {
         .filter((b) => b.agent)
         .map((b) => b.id)
         .join("|");
-  return `派本机 Coding CLI 改工程（上层动作）。终端底座是 shell：先用 term.open 也能开目录终端。cli.agent 会在该目录把终端切到 Coding CLI 并打进 task。一个目录一块终端，可同时留着几个；没写 cwd 用正在看的工程。屏幕和界面【终端】是同一块。参数: task, cwd?（或 PROJECT_ROOT / bot.agentCwd）, cli?（${names}；省略则自动选已就绪项）, timeoutMin?。会单独弹「派 Coding CLI」确认（已有终端 ≠ 已批准改仓库）；用户拒绝后不要换 CLI 绕过。要再看/打字用 term.read|write|keys（或 cli.term）。`;
+  return `派本机 Coding CLI 改工程（上层动作）。终端底座是 shell：先用 term.open 也能开目录终端。cli.agent 会在该目录把终端切到 Coding CLI 并打进 task。一个目录一块终端，可同时留着几个；没写 cwd 用正在看的工程。屏幕和界面【终端】是同一块。参数: task, cwd?（或 PROJECT_ROOT / bot.agentCwd）, cli?（${names}；省略则自动选已就绪项）, timeoutMin?。该目录第一次要确认；点过「总是允许此目录」后，开终端、打字和派工都不再问，终端环境里可以用 $名字 读取普通配置和保险库密钥。用户拒绝后不要换 CLI 绕过。要再看/打字用 term.read|write|keys（或 cli.term）。`;
 }

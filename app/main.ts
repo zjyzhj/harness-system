@@ -58,6 +58,8 @@ import { PetSkinRegistry } from "../core/pet-skin";
 import { ConsentCenter, capLabel as capLabelOf, type ConsentDecision } from "../core/consent-center";
 import { CodingThreadStore } from "../core/coding-thread";
 import { CodingPresence, dropCodingDir, gazeCodingDir, type CodingPresenceView } from "../core/coding-presence";
+import { BrowserPresence } from "../core/browser-presence";
+import { ElectronBrowserHost } from "./host/browser-host";
 import { appendCodingActivity } from "../core/coding-activity";
 import { codingCliIdentity, resolveAppIdentity, type AppIdentity } from "../core/app-identity";
 import { formatObserveText, observeDiskAsync, observeFrontmostAsync, observeProcessesAsync, observeSystem, type ProcessHit } from "../core/system-observe";
@@ -398,6 +400,14 @@ const codingPresence = new CodingPresence({
   home,
   bridgePath: join(APP_ROOT, "assets", "pty-bridge.py"),
 });
+let browserPresence!: BrowserPresence;
+const browserHost = new ElectronBrowserHost({
+  getMainWindow: () => mainWin,
+  onState: (botId, patch) => {
+    browserPresence?.applyHostState(botId, patch as any);
+  },
+});
+browserPresence = new BrowserPresence(browserHost);
 const audit = new AuditLog(home);
 const systemAccess = new SystemAccess(consent, audit, { workDir: workspace, screenshotDir: join(workspace, "screenshots") });
 const executor = new ToolExecutor({
@@ -795,7 +805,7 @@ const petHost: PetHost = {
 const demoSkills = new DemoSkillEngine();
 const runtime: BotRuntime = new BotRuntime({
   store, providers, memory, skills, system, systemAccess, executor, offline: new OfflinePersona(), mcp, mcpManage, askBot, tasks: scheduler, notifyCheck,
-  groups, secrets, env, workspaceRoot: workspace, harnessHome: home, demo: demoSkills, vault, connectors, codingThreads, codingPresence,
+  groups, secrets, env, workspaceRoot: workspace, harnessHome: home, demo: demoSkills, vault, connectors, codingThreads, codingPresence, browserPresence,
   groupPost: async (from, name, message, signal) => {
     const all = groups.list();
     const g = all.find((x) => x.name === name) ?? all.find((x) => x.name.includes(name) || name.includes(x.name));
@@ -2315,12 +2325,11 @@ app.whenReady().then(() => {
     const bot = store.getBot(req.botId);
     const name = bot?.name || req.botId;
     const capLabel = capLabelOf(req.cap);
-    const strong = !!req.requiresStrongConsent;
     if (!mainWin || mainWin.isDestroyed()) {
       const choices: [string, ConsentDecision][] = [["批准一次", "allow-once"]];
       if (req.rememberPath) choices.push(["总是允许此目录", "allow-command"]);
-      else if (!strong && !req.onceOnly && req.command) choices.push([`总是允许 ${req.command}`, "allow-command"]);
-      if (!strong && !req.command && !req.rememberPath && req.cap !== "bash:other") choices.push(["长期批准", "allow"]);
+      else if (!req.onceOnly && req.command) choices.push([`总是允许 ${req.command}`, "allow-command"]);
+      if (!req.command && !req.rememberPath && !req.onceOnly && req.cap !== "bash:other") choices.push(["以后不再问", "allow"]);
       choices.push(["拒绝", "deny"]);
       const detail = `${req.description}${req.reasons?.length ? `\n\n需要注意：${req.reasons.join("；")}` : ""}`;
       const btn = dialog.showMessageBoxSync({ type: "question", title: `系统授权请求 — ${name}`, message: `${name} 请求使用「${capLabel}」`, detail, buttons: choices.map((c) => c[0]), defaultId: choices.length - 1, cancelId: choices.length - 1, noLink: true });
@@ -2335,13 +2344,13 @@ app.whenReady().then(() => {
       const onAbort = () => done("deny");
       signal?.addEventListener("abort", onAbort);
       pendingConsent.set(id, done);
-      sendUi("consent:request", { id, botId: req.botId, botName: name, cap: req.cap, capLabel, description: req.description, danger: strong, command: req.command, onceOnly: !!req.onceOnly, rememberPath: req.rememberPath, reasons: req.reasons ?? [], sessionId });
+      sendUi("consent:request", { id, botId: req.botId, botName: name, cap: req.cap, capLabel, description: req.description, danger: !!req.requiresStrongConsent, command: req.command, onceOnly: !!req.onceOnly, rememberPath: req.rememberPath, reasons: req.reasons ?? [], sessionId });
     });
     if (sessionId) {
       const action = consentActionLabel(req, capLabel);
       const note = decision === "allow-command"
         ? (req.rememberPath
-          ? `🔐 你允许 ${name} 以后在目录「${req.rememberPath}」${req.cap === "term:open" ? "直接打开终端" : "直接派 Coding CLI"}`
+          ? `🔐 你允许 ${name} 以后在目录「${req.rememberPath}」直接开终端、打字和派 Coding CLI`
           : opaqueConsentCmd(req.command)
             ? `🔐 你允许 ${name} 以后直接${action}`
             : `🔐 你允许 ${name} 以后直接执行 ${String(req.command).trim()}`)
@@ -2621,6 +2630,7 @@ app.whenReady().then(() => {
           {
             signal: ctrl.signal,
             skipUserRecord: true,
+            unattended: true,
             extraSystem: `${extra}\n\n${instructionsFor(sid)}`,
             meta: { webhook: true, priority },
           },
@@ -2773,6 +2783,11 @@ app.whenReady().then(() => {
     if (mainWin && !mainWin.isDestroyed()) mainWin.webContents.send("app:changed", "tasks");
   };
   if (EVAL_MODE) { void runEvalMode({ home, store, groups, providers, runtime, consent, exit: (code) => app.exit(code) }); return; }
+  scheduler.lastUserAt = () => lastUserAt;
+  scheduler.onAwayPause = (paused) => {
+    const names = paused.slice(0, 4).map((t) => t.name).join("、");
+    void system.notify("例行已暂停", `离开超过 14 天，已暂停 ${paused.length} 条${names ? `：${names}` : ""}。回来后在例行面板打开开关即可继续。`);
+  };
   scheduler.start();
 
   // 主动跟进：有真实的悬而未决的事才开口（prefs.pet.proactiveFollowup 可关）
@@ -4088,6 +4103,8 @@ ipcMain.handle("computerUse:setEnabled", async (_e, on: boolean) => {
 app.on("window-all-closed", () => {});
 app.on("before-quit", () => {
   codingPresence.stopAll();
+  browserPresence.stopAll();
+  browserHost.stopAll();
   runtime.flushInflight();
 });
 /** Coding 终端：仅 open→exited 记一会话，忽略 idle↔busy 抖动 */
@@ -4158,4 +4175,40 @@ ipcMain.handle("coding:pickDir", async () => {
   const r = await dialog.showOpenDialog(mainWin!, { title: "选择工程目录", properties: ["openDirectory"] });
   if (r.canceled || !r.filePaths[0]) return null;
   try { return realpathSync(r.filePaths[0]); } catch { return r.filePaths[0]; }
+});
+
+browserPresence.setStateListener((state) => {
+  if (mainWin && !mainWin.isDestroyed()) mainWin.webContents.send("browser:state", state);
+});
+ipcMain.handle("browser:state", (_e, botId: string) => browserPresence.snapshot(String(botId ?? "")) ?? null);
+ipcMain.handle("browser:list", () => browserPresence.list());
+ipcMain.handle("browser:open", async (_e, botId: string, url?: string) => {
+  const id = String(botId ?? "");
+  if (!id) return { ok: false, error: "缺少 botId" };
+  // 用户点开面板：不经 consent（对齐 coding:open）
+  return browserPresence.open(id, url ? String(url) : undefined);
+});
+ipcMain.handle("browser:goto", async (_e, botId: string, url: string) => browserPresence.goto(String(botId ?? ""), String(url ?? "")));
+ipcMain.handle("browser:stop", async (_e, botId: string) => browserPresence.stop(String(botId ?? "")));
+ipcMain.handle("browser:focus", (_e, botId: string) => browserPresence.focus(String(botId ?? "")));
+ipcMain.handle("browser:show", (_e, botId: string, on: boolean) => {
+  browserPresence.show(String(botId ?? ""), !!on);
+  return { ok: true as const };
+});
+ipcMain.handle("browser:bounds", (_e, botId: string, bounds: { x: number; y: number; width: number; height: number }) => {
+  browserPresence.setBounds(String(botId ?? ""), {
+    x: Math.round(Number(bounds?.x) || 0),
+    y: Math.round(Number(bounds?.y) || 0),
+    width: Math.round(Number(bounds?.width) || 0),
+    height: Math.round(Number(bounds?.height) || 0),
+  });
+  return { ok: true as const };
+});
+ipcMain.handle("browser:back", async (_e, botId: string) => {
+  const r = await browserHost.back?.(String(botId ?? ""));
+  return r ?? { ok: false, error: "不支持后退" };
+});
+ipcMain.handle("browser:reload", async (_e, botId: string) => {
+  const r = await browserHost.reload?.(String(botId ?? ""));
+  return r ?? { ok: false, error: "不支持刷新" };
 });

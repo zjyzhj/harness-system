@@ -31,6 +31,22 @@ function setComposerInput(text, { focus = false, caret } = {}) {
   else if (caret === "end") el.setSelectionRange(el.value.length, el.value.length);
 }
 
+/** 例行最近一次：执行中 / 成功 / 失败 / 离开较久已暂停 */
+function routineResultLabel(t) {
+  if (t && t.pausedReason === "away" && t.enabled === false) return "已暂停 · 离开较久";
+  if (!t || !t.lastResult) return "";
+  if (t.lastResult === "running") return "执行中";
+  if (t.lastResult === "ok") return "成功";
+  if (t.lastResult === "error") return t.lastError ? `失败：${String(t.lastError).slice(0, 40)}` : "失败";
+  return "";
+}
+
+/** 一条运行记录：成功 / 失败 */
+function routineHistLabel(h) {
+  if (!h) return "";
+  return h.ok ? "成功" : `失败${h.error ? `：${String(h.error).slice(0, 80)}` : ""}`;
+}
+
 /** 5 段 cron → 人话（例行 / 定时任务共用） */
 function describeCron(cron) {
   const WEEK = ["日", "一", "二", "三", "四", "五", "六"];

@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Scheduler, describeCron } from "../core/scheduler";
+import { AWAY_PAUSE_MS, AWAY_PAUSE_NOTE, MAX_ROUTINES_PER_BOT, RATE_LIMIT_ERROR, Scheduler, describeCron, nextCronTime } from "../core/scheduler";
 import { GatewayServer } from "../core/gateway-server";
 import { MessageBus } from "../core/message-bus";
 import { Store } from "../core/store";
@@ -207,6 +207,81 @@ describe("例行产品化", () => {
     const miss = await fetch(`http://127.0.0.1:${port}/routines/nope`, { method: "POST", body: "{}" });
     expect(miss.status).toBe(404);
     await g.stop();
+  });
+
+  test("周期至少隔 5 分钟；一次性和仅 Webhook 不受这条限制", () => {
+    const s = new Scheduler(mkdtempSync(join(tmpdir(), "harness-rt-")));
+    expect(() => s.create({ botId: "b", name: "太密", cron: "*/1 * * * *" })).toThrow(/5 分钟/);
+    expect(s.create({ botId: "b", name: "五分钟", cron: "*/5 * * * *" }).id).toBeTruthy();
+    expect(s.create({ botId: "b", name: "一次", cron: "* * * * *", kind: "once", alarmAt: Date.now() + 60_000 }).kind).toBe("once");
+    expect(s.create({ botId: "b", name: "钩", cron: "* * * * *", webhook: true, schedule: false }).schedule).toBe(false);
+  });
+
+  test("一个 bot 最多 50 条例行", () => {
+    const s = new Scheduler(mkdtempSync(join(tmpdir(), "harness-rt-")));
+    for (let i = 0; i < MAX_ROUTINES_PER_BOT; i++) s.create({ botId: "b", name: `r${i}`, cron: "0 9 * * *" });
+    expect(() => s.create({ botId: "b", name: "超出", cron: "0 9 * * *" })).toThrow(/50/);
+    expect(s.create({ botId: "other", name: "别人的", cron: "0 9 * * *" }).botId).toBe("other");
+  });
+
+  test("每小时超限不跑，过期记录不占名额", async () => {
+    const s = new Scheduler(mkdtempSync(join(tmpdir(), "harness-rt-")));
+    const t = s.create({ botId: "b", name: "x", cron: "0 9 * * *" });
+    const now = Date.now();
+    s.update(t.id, { runStamps: Array.from({ length: 200 }, () => now) });
+    let ran = 0;
+    s.onRun = async () => { ran++; };
+    await s.runNow(t.id);
+    expect(ran).toBe(0);
+    expect(s.get(t.id)!.lastError).toBe(RATE_LIMIT_ERROR);
+    expect(s.get(t.id)!.retryCount ?? 0).toBe(0);
+
+    s.update(t.id, { runStamps: Array.from({ length: 200 }, () => now - 2 * 3_600_000), lastError: undefined });
+    await s.runNow(t.id);
+    expect(ran).toBe(1);
+  });
+
+  test("全部例行合计每小时 300 次", async () => {
+    const s = new Scheduler(mkdtempSync(join(tmpdir(), "harness-rt-")));
+    const a = s.create({ botId: "b", name: "a", cron: "0 9 * * *" });
+    const b = s.create({ botId: "b", name: "b", cron: "0 10 * * *" });
+    s.update(a.id, { runStamps: Array.from({ length: 300 }, () => Date.now()) });
+    let ran = 0;
+    s.onRun = async () => { ran++; };
+    await s.runNow(b.id);
+    expect(ran).toBe(0);
+    expect(s.get(b.id)!.lastError).toBe(RATE_LIMIT_ERROR);
+  });
+
+  test("超限失败不提前重试，下次仍按原排期", async () => {
+    const s = new Scheduler(mkdtempSync(join(tmpdir(), "harness-rt-")));
+    const cron = "*/5 * * * *";
+    const t = s.create({ botId: "b", name: "x", cron });
+    const now = Date.now();
+    s.update(t.id, { nextRunAt: now - 1000 });
+    s.onRun = async () => { throw new Error(RATE_LIMIT_ERROR); };
+    await s.tick(now);
+    expect(s.get(t.id)!.retryCount).toBe(0);
+    expect(s.get(t.id)!.nextRunAt).toBe(nextCronTime(cron, now));
+  });
+
+  test("离开超过 14 天暂停周期例行，打开开关后恢复", async () => {
+    const s = new Scheduler(mkdtempSync(join(tmpdir(), "harness-rt-")));
+    const cron = s.create({ botId: "b", name: "早报", cron: "0 9 * * *" });
+    const once = s.create({ botId: "b", name: "喝水", cron: "* * * * *", kind: "once", alarmAt: Date.now() + 60_000 });
+    const paused: string[] = [];
+    s.onAwayPause = (tasks) => paused.push(...tasks.map((t) => t.name));
+    s.lastUserAt = () => Date.now() - AWAY_PAUSE_MS - 1000;
+    await s.tick(Date.now());
+    expect(s.get(cron.id)!.enabled).toBe(false);
+    expect(s.get(cron.id)!.pausedReason).toBe("away");
+    expect(s.get(cron.id)!.lastError).toBe(AWAY_PAUSE_NOTE);
+    expect(s.get(once.id)!.enabled).toBe(true);
+    expect(paused).toEqual(["早报"]);
+    s.setEnabled(cron.id, true);
+    expect(s.get(cron.id)!.enabled).toBe(true);
+    expect(s.get(cron.id)!.pausedReason).toBeUndefined();
+    expect(s.get(cron.id)!.lastError).toBeUndefined();
   });
 
   test("Connect 安装卡片目录非空", () => {

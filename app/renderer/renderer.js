@@ -621,7 +621,11 @@ function paintGroupShell(g) {
   panel.innerHTML = `
     <button class="icon-btn d-close" title="关闭">✕</button>
     <div class="d-hero"><div class="d-name">${esc(g.name)}</div></div>
-    <div class="d-sec"><div class="d-empty">正在打开…</div></div>`;
+    <div class="d-tabs">
+      <button class="on" disabled>详情</button>
+      <button disabled>会话</button>
+    </div>
+    <div class="d-sec d-skel"><div class="d-skel-line"></div><div class="d-skel-line short"></div><div class="d-skel-line"></div></div>`;
   const close = panel.querySelector(".d-close");
   if (close) close.onclick = () => { if (typeof toggleDetails === "function") toggleDetails(false); };
 }
@@ -638,7 +642,15 @@ function paintDetailsShell(b) {
       <div class="d-name">${esc(b.name)}</div>
       <div class="d-role">${esc(b.role || "通用助手")}</div>
     </div>
-    <div class="d-sec"><div class="d-empty">正在打开…</div></div>`;
+    <div class="d-tabs">
+      <button class="on" disabled>详情</button>
+      <button disabled>会话</button>
+      <button disabled>产出</button>
+      <button disabled>工作区</button>
+      <button disabled>记忆</button>
+    </div>
+    <div class="d-sec"><h4>例行</h4><div class="d-skel"><div class="d-skel-line"></div><div class="d-skel-line short"></div></div></div>
+    <div class="d-sec"><h4>技能</h4><div class="d-skel"><div class="d-skel-line"></div><div class="d-skel-line short"></div></div></div>`;
   const close = panel.querySelector(".d-close");
   if (close) close.onclick = () => { if (typeof toggleDetails === "function") toggleDetails(false); };
 }
@@ -705,6 +717,7 @@ async function selectBot(b) {
     if (sameBot && currentSession === latest.id && $("#messages")?.children?.length) {
       rememberView();
       if (typeof syncCodingTerm === "function") syncCodingTerm();
+      if (typeof syncBotBrowser === "function") syncBotBrowser();
       return;
     }
     if (prefetch && latest.id === sidHint) {
@@ -720,6 +733,7 @@ async function selectBot(b) {
         rememberView();
         if (typeof setSending === "function") setSending();
         if (typeof syncCodingTerm === "function") syncCodingTerm();
+        if (typeof syncBotBrowser === "function") syncBotBrowser();
         return;
       } else {
         currentSession = latest.id;
@@ -736,6 +750,7 @@ async function selectBot(b) {
   }
   if (gen !== viewGen) return;
   if (typeof syncCodingTerm === "function") syncCodingTerm();
+  if (typeof syncBotBrowser === "function") syncBotBrowser();
 }
 
 /** 记住上次打开的 bot / 群聊和会话，重开软件时直接回到那里 */

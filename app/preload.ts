@@ -103,6 +103,19 @@ const api = {
     write: (botId: string, data: string, cwd?: string) => ipcRenderer.invoke("coding:write", botId, data, cwd),
     pickDir: () => ipcRenderer.invoke("coding:pickDir"),
   },
+  browser: {
+    state: (botId: string) => ipcRenderer.invoke("browser:state", botId),
+    list: () => ipcRenderer.invoke("browser:list"),
+    open: (botId: string, url?: string) => ipcRenderer.invoke("browser:open", botId, url),
+    goto: (botId: string, url: string) => ipcRenderer.invoke("browser:goto", botId, url),
+    stop: (botId: string) => ipcRenderer.invoke("browser:stop", botId),
+    focus: (botId: string) => ipcRenderer.invoke("browser:focus", botId),
+    show: (botId: string, on: boolean) => ipcRenderer.invoke("browser:show", botId, on),
+    bounds: (botId: string, bounds: { x: number; y: number; width: number; height: number }) =>
+      ipcRenderer.invoke("browser:bounds", botId, bounds),
+    back: (botId: string) => ipcRenderer.invoke("browser:back", botId),
+    reload: (botId: string) => ipcRenderer.invoke("browser:reload", botId),
+  },
   audit: {
     list: (opts?: any) => ipcRenderer.invoke("audit:list", opts),
     export: (filePath: string) => ipcRenderer.invoke("audit:export", filePath),
@@ -433,6 +446,7 @@ contextBridge.exposeInMainWorld("harness", {
   onOpenAbout: on("app:openAbout"),
   onCodingScreen: on("coding:screen"),
   onCodingBytes: on("coding:bytes"),
+  onBrowserState: on("browser:state"),
 });
 export type { StreamBlock };
 export type HarnessApi = typeof api;

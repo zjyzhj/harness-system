@@ -10,6 +10,7 @@ import { diffNeeds, hasAnyGaps, onboardPromptSection } from "../bot-share-needs"
 import { formatCodingAgentsPromptLine } from "../coding-agents";
 import { threadStub } from "../coding-thread";
 import { formatCodingDirLine, formatPresenceLine } from "../coding-presence";
+import { formatBrowserPresenceLine } from "../browser-presence";
 import { readBotWatch } from "../system-watch";
 
 /** 可选提示词附加（娱乐侧车等挂载；默认空 = Bot 完整设计不受干扰） */
@@ -38,7 +39,7 @@ export class PromptBuilder {
     parts.push(bot.systemPrompt || `${bot.name}（${bot.role}）：${bot.persona}`);
     parts.push(`你是 ${bot.name}，角色：${bot.role}。人设：${bot.persona}`);
     if (opts?.extraSystem?.trim()) parts.push(opts.extraSystem.trim());
-    if (opts?.unattended) parts.push("【无人值守】这是自动执行的例行，没有用户在场：不要反问、不要让用户选择或确认，也不要说「等你确认」。信息不全时自己做合理假设，在开头用一句话写明假设，然后直接交付完整产出。默认只做准备 / 起草 / 汇总 / 本机只读查询；不要对外发信、付费、删除生产数据、改仓库或执行危险 shell。若指令触及这些，在产出里写明「待你批准：…」并停下，不要硬做。");
+    if (opts?.unattended) parts.push("【例行】这是用户已经定下的吩咐，现在到点了，没有人在场。不要反问，不要 ui.ask / ui.confirm / ui.secret。信息不全就写明假设，然后把准备、核对、草稿做完。查阅、整理、写草稿、在已指定目录里改代码可以直接做。出站 webhook.post，以及 secret.delete / skill.delete / sys.purge / task.delete / webhook.remove / env.delete，会停在批准点，除非这个 bot 是 Always。工具返回「停在批准点」时，把待批准的事写进回复，不要假装已经完成。没有新数据就报告失败，不要拿旧数据凑。用户明确禁止的命令不要做。");
     // 软件真实状态放在交互约定前面，优先于对话里说过的旧话
     // 娱乐侧车事实（若有）经 PromptExtras.stableFact 注入，不进 Bot 核心
     parts.push(this.selfFacts(bot, opts));
@@ -79,6 +80,8 @@ export class PromptBuilder {
     }
     const presence = formatPresenceLine(this.deps.codingPresence?.snapshot(bot.id) ?? null);
     if (presence) parts.push(presence);
+    const browserLine = formatBrowserPresenceLine(this.deps.browserPresence?.snapshot(bot.id) ?? null);
+    if (browserLine) parts.push(browserLine);
     try {
       const watch = readBotWatch(this.deps.store.readConfig(), bot.id);
       if (watch.enabled && watch.apps.length) {
@@ -117,21 +120,22 @@ export class PromptBuilder {
     parts.push(`【交互】
 - 调用工具前先用一句话告诉用户你要做什么（这句话会单独显示成一条消息），然后再调用工具。
 - 只要你打算让用户「选一个 / 挑一个 / 决定走哪条路」，就必须调用 ui.ask（不要写 ui.choice / ui.select，没有这些工具），把每个方案写成一个简短选项（界面显示成可点击按钮）；不要在正文里用列表让用户回复编号。可以先用一两句话说明背景，再调用 ui.ask，调用后这一轮就结束，等用户点选。
-- 对外或不可逆的操作（发消息/通知到飞书、钉钉、Slack、邮件等外部渠道、上传、发布、提交、删除、付费、改线上数据）执行前，必须先调用 ui.confirm 工具（不要用文字代替），说明要做什么并等用户点「确认」，用户确认后再执行。软件里的群聊（[群名](app:group/…)）是内部的：用户让你往群里发话，直接用 group.send 发，不用确认，也不要转托别的 bot 代发。
+- 只有拿不准、而且用户在场时才停下来问。对外或不可逆的操作（发到飞书、钉钉、Slack、邮件、上传、发布、提交、删除、付费、改线上数据），用户没说过「不要再问」、bot 也不是 Auto / Always 时，先 ui.confirm。用户定过规范不要再问，或 bot 是 Auto / Always，就直接做。软件里的群聊（[群名](app:group/…)）直接 group.send，不用确认。
 - 只有工具结果里写明成功的事才能说「已发送 / 已完成」；没有对应工具就如实说做不到。
-- 需要密码 / Token / App Secret 等敏感信息时，用 ui.secret（name, label, note 写清用途）让用户在加密输入框里填写，不要让用户直接发在聊天里；保存后 bash.run 写 $名字、其它工具写 {{secret:名字}}，你看不到真值。密钥与普通配置默认是**账号级保险库**（对齐 Grok Vault）：本机所有 bot 都能用，交接不必再传凭据。已经配置过的看【已配置的环境】，不要重复要。
-- 碰用户电脑按三条路径选工具（与意图卡选项对齐；不要发明第四条糊路）：
+- 需要密码 / Token / App Secret 等敏感信息时，用 ui.secret（name, label, note 写清用途）让用户在加密输入框里填写，不要让用户直接发在聊天里。密钥与普通配置默认是**账号级保险库**（对齐 Grok Vault）：本机所有 bot 都能用，交接不必再传凭据。已经配置过的看【已配置的环境】，不要重复要。已经信任的目录（「总是允许此目录」，或 bot 为 Auto / Always）里，新打开的终端环境带上普通配置和保险库密钥，命令里写 $名字；任务里写 {{secret:名字}} 也会换成真值。没信任的目录不会把密钥交进终端。网页搜索和打开网页仍然不能带密钥。
+- 碰用户电脑按路径选工具（意图清晰就直接干；含糊才 ui.ask）：
   1) **看/找/交文件**：fs.list / fs.read / file.send。本机任意可读路径都可以（桌面、下载、任意文件夹；~ 可用）；**不会**打开终端面板。不要 bash ls，也不要因为「不在工程名单」就去 MCP / 绕路。工程名单只表示终端/派工槽，不限制浏览。
-  2) **交互现场（shell）**：term.open 亮起面板并开 shell；用户点「打开」同义。只交互 / 看 PTY，不表示已批准改仓库。
-  3) **派工改仓（Coding CLI）**：cli.agent 同槽切到 Cursor/Claude/Codex 并打任务——**进 Cursor / Coding CLI 必须调 cli.agent**，禁止空口说「已切到 / 已进入」。之后用 term.read/write/keys。fs.write 只写 bot 工作区。
-  短命令（构建、脚本、启动本机面板 / launcher、碰 $HOME / \`Application Support\` / \`~/.claude\` 或 GUI）用 bash.run：只有授权卡片，**绝不**打开终端面板；被拒绝就别换写法重试。
+  2) **交互现场（shell）**：term.open 亮起面板并开 shell；用户点「打开」同义。
+  3) **派工改仓（Coding CLI）**：cli.agent 同槽切到 Cursor/Claude/Codex 并打任务——**进 Cursor / Coding CLI 必须调 cli.agent**，禁止空口说「已切到 / 已进入」。之后用 term.read/write/keys。fs.write 只写 bot 工作区。同一目录点过一次「总是允许此目录」后，开终端、打字和派工都不再问。规范留在你自己这边，不要贴进终端。
+  4) **网页登录与站点操作（bot 自己的浏览器）**：browser.open / goto / snapshot / click / type / keys / read / stop。每个 bot 一块内部浏览器，cookie 按 bot 隔离，不是用户的 Chrome/Safari，也不是电脑操控去点别人的窗口。登录、填表、点按钮走这条；验证码让用户在浏览器面板里接手，聊里再说「继续」。browser.type 在已批准浏览器（或 Auto / Always）时可用 {{secret:名字}}。只读公开页仍用 web.fetch；本机 App 仍用电脑操控 MCP。
+  短命令（构建、脚本、启动本机面板 / launcher、碰 $HOME / \`Application Support\` / \`~/.claude\` 或 GUI）用 bash.run：不抢终端面板。命令已「总是允许」，或 bot 为 Auto / Always 时，普通命令不再弹卡；被拒绝就别换写法重试。
   **不要**先塞进聊天沙箱或 Coding CLI 再因「沙箱拦了」改口「改用 bash.run」——能预见要碰家目录 / Application Support / 弹面板 / 出工程外，**第一下就 bash.run**（或 term）；禁止先撞墙再解释。
 - **两级选择卡**（意图含糊时用 ui.ask，禁止空口猜一条路；意图已清晰则禁止多此一举出卡）：
-  1) 用户话说不清走哪条路径（如「搞一下这个项目」）→ 必须 ui.ask，question 可用「这件事你想怎么做？」，options 语义固定：\`只看/找文件（不打开终端）\`、\`打开终端 shell\`、\`进 Coding CLI 改仓库\`（措辞可微调）。点选后再调用对应工具。
+  1) 用户话说不清走哪条路径（如「搞一下这个项目」）→ 必须 ui.ask，question 可用「这件事你想怎么做？」，options 语义固定：\`只看/找文件（不打开终端）\`、\`打开终端 shell\`、\`进 Coding CLI 改仓库\`、\`用 bot 浏览器打开网页\`（措辞可微调）。点选后再调用对应工具。
   2) 用户选了「进 Coding CLI 改仓库」之后：若【已配置的环境】里可派工/已安装的 Coding CLI ≥2 家、用户未点名、且 bot 无 agentCli 偏好 → 再 ui.ask 一张 CLI 卡，options 只用探测到的已安装项（不要编造未装的）；点选后再 cli.agent，args.cli 对上所选。只有一家、用户已说「用 Cursor/Claude/Codex」、或 bot 已有 agentCli 偏好 → 直接 cli.agent，不出第二张卡。
-  清晰意图示例（直接干、不出卡）：「看看桌面有什么」「列一下 src」「用 Cursor 修登录 bug」「打开终端」。
+  清晰意图示例（直接干、不出卡）：「看看桌面有什么」「列一下 src」「用 Cursor 修登录 bug」「打开终端」「登录 DeepSeek」「在网页里点发送」。
 - 可调哪些 Coding CLI 以【已配置的环境】里实时探测为准。
-- 问到新闻、价格、版本、政策等可能过时或你不确定的事实时，先用 web.search 联网查，必要时再用 web.fetch 打开具体网页；回答里用到网上的信息，就在那句话末尾标上来源序号，如 [1]、[2][3]（序号就是工具结果里给的编号），不要在末尾另列参考链接。
+- 问到新闻、价格、版本、政策等可能过时或你不确定的事实时，先用 web.search 联网查，必要时再用 web.fetch 打开具体网页；回答里用到网上的信息，就在那句话末尾标上来源序号，如 [1]、[2][3]（序号就是工具结果里给的编号），不要在末尾另列参考链接。要登录或交互站点用 browser.*，不要 web.fetch。
 - 用户要画图、生成海报/头像/插画时用 image.generate；要改一张已有的图时用 image.edit。
 - 边界（对齐 Grok）：**能力**（工具 / 技能 / 密钥 / 共用配置）账号级可交接；**情境**（记忆、例行任务、角色规范）跟 bot。群聊共享对话上下文，不自动合并各 bot 私有记忆。
 - 区分一次性任务 vs 长期约定（Grok：ordinary message vs lasting rule）：
@@ -184,8 +188,8 @@ export class PromptBuilder {
     ].join("；");
     const config = [
       `【已配置的环境】用户给过的配置都存在这里，重启后还在；需要时直接用，不要再问用户要。查看 / 修改：[环境配置](app:settings/env)`,
-      envLines.length ? `- 环境变量（bash.run 执行时自动注入，命令里直接写 $KEY）：\n${envLines.join("\n")}` : "- 环境变量：还没有",
-      secretLines.length ? `- 密钥（账号级加密库，所有 bot 共用；你看不到值；bash.run 写 $NAME，其它工具写 {{secret:NAME}}）：\n${secretLines.join("\n")}` : "- 密钥：还没有",
+      envLines.length ? `- 环境变量（终端和 bash.run 里直接写 $KEY）：\n${envLines.join("\n")}` : "- 环境变量：还没有",
+      secretLines.length ? `- 密钥（账号级加密库，所有 bot 共用。已信任的终端里用 $NAME，或在任务里写 {{secret:NAME}}）：\n${secretLines.join("\n")}` : "- 密钥：还没有",
       formatCodingAgentsPromptLine(),
       `  bot 偏好：${agentPref}。改默认用 app.updateSelf（agentCwd / agentCli）。`,
       "用户给你接口地址、账号名、项目 ID 这类普通配置时用 env.set 存；密码 / Token / Secret 用 ui.secret 让用户加密填写，不要明文存，也不要让用户发在聊天里。配置有变化就更新原来那项。\n用户刚给完配置或密钥（用户说已在加密框里填好，或 env.set 成功）后，如果能低成本验证（如调一次只读接口、登录测试），用 bash.run 验证一次并告诉用户结果；验证失败就说明原因，请用户检查后用 ui.secret（overwrite:true）或 env.set 更新。",
@@ -264,7 +268,8 @@ export class PromptBuilder {
       this.deps.tasks
         ? `- 入站 Webhook（外系统触发本 bot）：已开通 ${inbound.length} 个例行 · 用 task.create + webhook:true；POST JSON \`{"message":"…"}\` 注入对话。普通等当前轮结束；\`priority:"urgent"\` 或头 X-Harness-Priority:urgent 可打断并通知。触发 URL 让用户到例行面板 🪝 复制（需 [入站网关](app:settings/gateway)）`
         : "",
-      `- 电脑操控（内置）：用 mcp:computer/macos_snapshot 看界面元素，再用 macos_act / macos_click / macos_type 等操作；先 mcp:computer/macos_doctor 检查辅助功能与屏幕录制权限。不要说「没有 computer use」`,
+      `- bot 内部浏览器：browser.open / goto / snapshot / click / type / keys / read / stop。每个 bot 一块，登录态按 bot 隔离；不是用户 Chrome，也不是电脑操控`,
+      `- 电脑操控（内置）：用 mcp:computer/macos_snapshot 看界面元素，再用 macos_act / macos_click / macos_type 等操作；先 mcp:computer/macos_doctor 检查辅助功能与屏幕录制权限。本机 App 用它；网页登录用 browser.*。不要说「没有 computer use」`,
     ].filter(Boolean);
     const brief = [
       `群聊 ${groups.length} 个${groups.length ? `（${groups.map((g) => g.name).join("、")}）` : ""}`,

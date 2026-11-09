@@ -214,6 +214,10 @@ let showArchived = false;
 let detailsPinned = true;
 /** 详情栏「高级」默认收起，少打扰日常例行/技能 */
 let detailsAdvanced = localStorage.getItem("harness.detailsAdvanced") === "1";
+/** 高级区（CLI 探测 / 权限 / 监听）异步填充，避免整栏卡在「正在打开」 */
+let detailsAdvGen = 0;
+let detailsAdvCache = { botId: null, at: 0, data: null };
+const DETAILS_ADV_TTL_MS = 20_000;
 
 /** 跳转到监听等高级区块前展开折叠 */
 function revealDetailsAdvanced() {
@@ -583,9 +587,41 @@ function dirFace(cwd, presence, lives) {
   return "未打开";
 }
 
-async function renderDetails(b) {
+function emptyDetailsAdv() {
+  return {
+    grants: [],
+    caps: [],
+    cmd: { rules: [], trusted: [], modes: {} },
+    cliPaths: [],
+    termPaths: [],
+    codingCaps: {},
+    presence: null,
+    termLives: [],
+    watchSt: null,
+    pending: true,
+  };
+}
+
+async function fetchDetailsAdvanced(botId) {
+  const [grants, caps, cmd, cliPaths, termPaths, codingCaps, presence, termLives, watchSt] = await Promise.all([
+    api.consent.list(botId).catch(() => []),
+    api.consent.caps().catch(() => []),
+    api.consent.rules().catch(() => ({ rules: [], trusted: [], modes: {} })),
+    api.consent.cliPaths(botId).catch(() => []),
+    api.consent.termPaths ? api.consent.termPaths(botId).catch(() => []) : Promise.resolve([]),
+    api.providers.capabilities().catch(() => ({})),
+    api.coding?.presence ? api.coding.presence(botId).catch(() => null) : Promise.resolve(null),
+    api.coding?.list ? api.coding.list(botId).catch(() => []) : Promise.resolve([]),
+    api.systemWatch?.status ? api.systemWatch.status(botId).catch(() => null) : Promise.resolve(null),
+  ]);
+  return { grants, caps, cmd, cliPaths, termPaths, codingCaps, presence, termLives, watchSt, pending: false };
+}
+
+async function renderDetails(b, opts = {}) {
   const panel = $("#details");
-  const [tasks, providers, mem, sessPage, botSkills, library, ws, grants, caps, cmd, cliPaths, termPaths, codingCaps, presence, termLives, watchSt] = await Promise.all([
+  const skipAdvFetch = !!opts.skipAdvFetch;
+  // 先只拉当前页看得见的轻数据；CLI 探测 / 权限 / 监听放后面，避免整栏空白
+  const [tasks, providers, mem, sessPage, botSkills, library, ws] = await Promise.all([
     api.tasks.list(b.id).catch(() => []),
     api.providers.list().catch(() => []),
     detailsTab === "memory" ? api.memory.list(b.id).catch(() => []) : Promise.resolve([]),
@@ -593,16 +629,27 @@ async function renderDetails(b) {
     detailsTab === "info" ? api.skills.forBot(b.id).catch(() => []) : Promise.resolve([]),
     detailsTab === "library" ? api.system.library(b.id).catch(() => []) : Promise.resolve([]),
     detailsTab === "computer" ? api.system.workspace(b.id).catch(() => null) : Promise.resolve(null),
-    detailsTab === "info" ? api.consent.list(b.id).catch(() => []) : Promise.resolve([]),
-    detailsTab === "info" ? api.consent.caps().catch(() => []) : Promise.resolve([]),
-    detailsTab === "info" ? api.consent.rules().catch(() => ({ rules: [], trusted: [] })) : Promise.resolve({ rules: [], trusted: [] }),
-    detailsTab === "info" ? api.consent.cliPaths(b.id).catch(() => []) : Promise.resolve([]),
-    detailsTab === "info" && api.consent.termPaths ? api.consent.termPaths(b.id).catch(() => []) : Promise.resolve([]),
-    detailsTab === "info" ? api.providers.capabilities().catch(() => ({})) : Promise.resolve({}),
-    detailsTab === "info" && api.coding?.presence ? api.coding.presence(b.id).catch(() => null) : Promise.resolve(null),
-    detailsTab === "info" && api.coding?.list ? api.coding.list(b.id).catch(() => []) : Promise.resolve([]),
-    detailsTab === "info" && api.systemWatch?.status ? api.systemWatch.status(b.id).catch(() => null) : Promise.resolve(null),
   ]);
+  let grants = [];
+  let caps = [];
+  let cmd = { rules: [], trusted: [], modes: {} };
+  let cliPaths = [];
+  let termPaths = [];
+  let codingCaps = {};
+  let presence = null;
+  let termLives = [];
+  let watchSt = null;
+  let advPending = false;
+  if (detailsTab === "info") {
+    const hit = detailsAdvCache.botId === b.id && Date.now() - detailsAdvCache.at < DETAILS_ADV_TTL_MS ? detailsAdvCache.data : null;
+    if (hit) {
+      ({ grants, caps, cmd, cliPaths, termPaths, codingCaps, presence, termLives, watchSt } = hit);
+      advPending = !!hit.pending;
+    } else {
+      advPending = true;
+      ({ grants, caps, cmd, cliPaths, termPaths, codingCaps, presence, termLives, watchSt } = emptyDetailsAdv());
+    }
+  }
   const sessList = sessPage.sessions.filter((x) => !isB2b(x.id) || b2bAsker(x.id, b.id));
   const sessHtml = `
     <div class="d-actions" style="margin-bottom:8px">
@@ -629,7 +676,7 @@ async function renderDetails(b) {
     ...providers.map((p) => `<option value="${esc(p.id)}" ${bound?.id === p.id ? "selected" : ""}>${esc(provLabel(p))}</option>`),
   ].join("");
   const routines = tasks.length ? tasks.map((t) => {
-    const last = t.lastResult === "ok" ? "上次成功" : t.lastResult === "error" ? `上次失败${t.lastError ? `：${t.lastError.slice(0, 40)}` : ""}` : t.lastResult === "running" ? "正在跑" : "";
+    const last = routineResultLabel(t);
     const tags = [
       t.source === "demo" ? "演示" : "",
       t.skillKey ? "技能" : "",
@@ -657,7 +704,7 @@ async function renderDetails(b) {
         <button type="button" data-rop="del" title="删除">🗑</button>
       </div>
       <div class="routine-hist hidden" data-hist="${esc(t.id)}">${hist.length
-        ? hist.map((h) => `<div class="hint">${esc(fmtTime(h.ranAt))} · ${h.ok ? "✅" : "❌"}${h.error ? ` ${esc(h.error.slice(0, 80))}` : ""}</div>`).join("")
+        ? hist.map((h) => `<div class="hint">${esc(fmtTime(h.ranAt))} · ${esc(routineHistLabel(h))}</div>`).join("")
         : `<div class="hint">还没有运行记录</div>`}</div>
     </div>`;
   }).join("") : `<div class="d-empty">还没有例行。对它说「每天 9 点…」，或点 ＋</div>`;
@@ -709,18 +756,22 @@ async function renderDetails(b) {
             <span>人设</span><span>${esc(b.persona || "—")}</span>
           </div>
         </div>
-        ${watchSectionHtml(watchSt)}
+        ${advPending && !watchSt ? `<div class="d-sec" id="d-watch"><h4>系统监听</h4><div class="d-skel"><div class="d-skel-line"></div><div class="d-skel-line short"></div></div></div>` : watchSectionHtml(watchSt)}
         <div class="d-sec"><h4>工程与派工</h4>
           <div id="d-presence-card" class="dir-list">${dirsHtml}</div>
           <button type="button" class="ghost-btn dir-add" id="d-agent-pick">选择目录</button>
           <input id="d-agent-cwd" class="skin-select dir-paste" placeholder="粘贴路径，回车添加" />
-          <div class="mx-chips" style="margin-bottom:8px">${Object.entries(codingCaps).map(([id, c]) => `<span class="mx-chip ${c?.ready ? "ok" : ""}" title="${esc(c?.bin || id)}${c?.account ? ` · ${c.account}` : ""}">${c?.ready ? "✓" : c?.installed ? "○" : "✕"} ${esc(id)}</span>`).join("") || `<span class="hint">探测中…</span>`}</div>
+          <div class="mx-chips" style="margin-bottom:8px">${Object.entries(codingCaps).length
+            ? Object.entries(codingCaps).map(([id, c]) => `<span class="mx-chip ${c?.ready ? "ok" : ""}" title="${esc(c?.bin || id)}${c?.account ? ` · ${c.account}` : ""}">${c?.ready ? "✓" : c?.installed ? "○" : "✕"} ${esc(id)}</span>`).join("")
+            : `<span class="hint">${advPending ? "探测中…" : "未检测到 Coding CLI"}</span>`}</div>
           <div class="d-kv">
             <span title="改仓库用；与上方对话模型无关">派工 CLI</span><span><select id="d-agent-cli" class="skin-select" style="width:100%"><option value="">自动</option>${Object.entries(codingCaps).filter(([, c]) => c?.ready).map(([id, c]) => `<option value="${esc(id)}" ${b.agentCli === id ? "selected" : ""}>${esc(c.label || id)}</option>`).join("")}${b.agentCli && !codingCaps[b.agentCli]?.ready ? `<option value="${esc(b.agentCli)}" selected>${esc(b.agentCli)}（未就绪）</option>` : ""}</select></span>
             <span>连续性</span><span><select id="d-agent-resume" class="skin-select" style="width:100%">${[["auto", "同 CLI 续会话"], ["always", "总是续"], ["once", "下次新开"]].map(([v, l]) => `<option value="${v}" ${(b.agentResume ?? "auto") === v ? "selected" : ""}>${l}</option>`).join("")}</select></span>
           </div>
         </div>
-        ${botPermSection(b.id, grants, caps, cmd.modes?.[b.id] || (cmd.trusted?.includes(b.id) ? "auto" : "ask"), { cliPaths, termPaths })}
+        ${advPending
+          ? `<div class="d-sec bot-perm"><h4>权限</h4><div class="d-skel"><div class="d-skel-line"></div><div class="d-skel-line short"></div></div></div>`
+          : botPermSection(b.id, grants, caps, cmd.modes?.[b.id] || (cmd.trusted?.includes(b.id) ? "auto" : "ask"), { cliPaths, termPaths })}
       </div>
     </details>
     <div class="d-sec d-actions">
@@ -959,6 +1010,16 @@ async function renderDetails(b) {
       renderDetails(b);
     };
   });
+  // 高级区后台补齐：权限 / CLI 探测 / 监听不挡首屏
+  if (detailsTab === "info" && !skipAdvFetch) {
+    const gen = ++detailsAdvGen;
+    void fetchDetailsAdvanced(b.id).then((data) => {
+      if (gen !== detailsAdvGen || currentBot?.id !== b.id) return;
+      detailsAdvCache = { botId: b.id, at: Date.now(), data };
+      if (detailsTab !== "info") return;
+      renderDetails(b, { skipAdvFetch: true });
+    });
+  }
 }
 
 /** bot 详情：系统监听名单（紧凑，不刷全机） */

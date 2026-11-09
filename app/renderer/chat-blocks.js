@@ -1041,12 +1041,12 @@ function consentCard(req, floating) {
   const opaqueCmd = !String(req.command || "").trim() || String(req.command).trim() === "$()";
   const alwaysPath = req.rememberPath ? `<button class="ghost-btn" data-d="allow-command" title="${esc(req.rememberPath)}">总是允许此目录</button>` : "";
   // "$()" 是解析失败占位，不能「总是允许」成一条永久规则
-  const always = !alwaysPath && !req.danger && !req.onceOnly && req.command && !opaqueCmd ? `<button class="ghost-btn" data-d="allow-command">总是允许 ${esc(req.command)}</button>` : "";
-  const group = !req.danger && !req.command && !req.rememberPath && req.cap !== "bash:other" ? `<button class="ghost-btn" data-d="allow" title="以后不再问">长期批准「${esc(req.capLabel)}」</button>` : "";
+  const always = !alwaysPath && !req.onceOnly && req.command && !opaqueCmd ? `<button class="ghost-btn" data-d="allow-command">总是允许 ${esc(req.command)}</button>` : "";
+  const group = !req.command && !req.rememberPath && !req.onceOnly && req.cap !== "bash:other" ? `<button class="ghost-btn" data-d="allow" title="以后不再问">以后不再问</button>` : "";
   const reasons = req.reasons?.length ? `<div class="cs-reasons">${req.reasons.map((r) => `<div>· ${esc(r)}</div>`).join("")}${req.onceOnly && !req.danger ? `<div class="hint">这种写法只能逐次批准</div>` : ""}</div>` : "";
   const typedGate = !!req.danger && req.cap !== "cli:agent" && req.cap !== "term:open";
   const pathHint = (req.cap === "cli:agent" || req.cap === "term:open")
-    ? `<div class="hint">不用填密码，点下面的按钮即可。${req.rememberPath ? "「总是允许此目录」以后这个文件夹不再问。" : ""}</div>`
+    ? `<div class="hint">不用填密码，点下面的按钮即可。${req.rememberPath ? "「总是允许此目录」以后，这个文件夹的开终端、打字和派 Coding CLI 都不再问。" : ""}</div>`
     : "";
   const pathHead = req.cap === "term:open" ? "想在工程目录打开终端"
     : req.cap === "cli:agent" || req.rememberPath ? "想派 Coding CLI 改工程"

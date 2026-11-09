@@ -196,26 +196,26 @@ export class ToolExecutor {
       const capOf = (h: string) => this.bashGroups[h] ?? "bash:other";
       const audit = (cap: Cap, granted: boolean) =>
         this.audit?.append({ botId: callerBotId, cap, action: "bash.run", args: shown.slice(0, 300), granted, ok: undefined, latencyMs: Date.now() - t0 });
+      const absent = unattended
+        ? "例行停在批准点：这一步是发送、删除、改生产或危险命令。没有「总是允许」或 Always，就不能在没人时做。把待批准的事写进回复，不要假装已经完成。"
+        : "";
       if (a.dangerous.length) {
-        if (unattended) throw new Error("无人值守不能执行危险命令，请用户在场时再试");
-        const r = await consent.requestCommand(callerBotId, heads[0] ?? a.heads[0], desc, { cap: capOf(heads[0] ?? ""), requiresStrongConsent: true, reasons: a.dangerous });
+        const r = await consent.requestCommand(callerBotId, heads[0] ?? a.heads[0], desc, { cap: capOf(heads[0] ?? ""), requiresStrongConsent: true, reasons: a.dangerous, unattended });
         audit(capOf(heads[0] ?? ""), r.granted);
-        if (!r.granted) throw new Error("用户没有批准这条危险命令，不要换写法重试，直接告诉用户");
-      } else if (!unattended && consent.isTrusted(callerBotId)) {
-        // Auto / Always：有风险写法一并放行
+        if (!r.granted) throw new Error(absent || "用户没有批准这条危险命令，不要换写法重试，直接告诉用户");
+      } else if (consent.isTrusted(callerBotId)) {
+        // Auto / Always：普通和有风险写法直接过，有没有人在场一样。
         audit(capOf(heads[0] ?? ""), true);
       } else if (a.risks.length) {
-        if (unattended) throw new Error(`无人值守不能执行有风险的命令（${a.risks[0]}），请用户在场时再试`);
-        const r = await consent.requestCommand(callerBotId, heads[0] ?? a.heads[0], desc, { cap: capOf(heads[0] ?? ""), onceOnly: true, reasons: a.risks });
+        const r = await consent.requestCommand(callerBotId, heads[0] ?? a.heads[0], desc, { cap: capOf(heads[0] ?? ""), onceOnly: true, reasons: a.risks, unattended });
         audit(capOf(heads[0] ?? ""), r.granted);
-        if (!r.granted) throw new Error("用户没有批准这条命令，不要换写法重试，直接告诉用户");
+        if (!r.granted) throw new Error(absent || "用户没有批准这条命令，不要换写法重试，直接告诉用户");
       } else {
         for (const h of heads) {
           if (consent.commandRule(callerBotId, h) === "allow") continue;
-          if (unattended) throw new Error(`无人值守未授权执行 ${h}，请用户先「总是允许」或在场批准`);
-          const r = await consent.requestCommand(callerBotId, h, desc, { cap: capOf(h) });
+          const r = await consent.requestCommand(callerBotId, h, desc, { cap: capOf(h), unattended });
           audit(capOf(h), r.granted);
-          if (!r.granted) throw new Error(`用户没有批准执行 ${h}，不要换写法重试，直接告诉用户`);
+          if (!r.granted) throw new Error(absent || `用户没有批准执行 ${h}，不要换写法重试，直接告诉用户`);
         }
       }
     } else {

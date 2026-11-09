@@ -18,6 +18,7 @@ export type Cap =
   | "gui" | "screen" | "apple" | "net:local" | "skill:shared"
   | "cli:agent"
   | "term:open"
+  | "browser:open"
   | "mcp:manage"
   | "webhook:out"
   | "system:observe"
@@ -93,6 +94,7 @@ export const CAP_LABELS: Record<Cap, string> = {
   "skill:shared": "修改共享技能",
   "cli:agent": "派本机 Coding CLI 改工程",
   "term:open": "在工程目录打开终端",
+  "browser:open": "打开 bot 内部浏览器",
   "mcp:manage": "安装 / 移除 MCP server",
   "webhook:out": "出站 Webhook（登记 / POST）",
   "system:observe": "系统观察（进程 / 磁盘 / 活动账本）",
@@ -287,6 +289,14 @@ export class ConsentCenter {
     }
   }
 
+  /**
+   * 同一目录信任同时覆盖开终端、往里打字和派 Coding CLI。
+   * 旧数据可能只记在其中一张表里，命中任意一张即算信任。
+   */
+  hasCodingDir(botId: string, cwd: string): boolean {
+    return this.hasCliAgentPath(botId, cwd) || this.hasTermOpenPath(botId, cwd);
+  }
+
   /** cwd 是否落在该 bot 已信任的前缀下 */
   hasCliAgentPath(botId: string, cwd: string): boolean {
     const real = this.normalizePrefix(cwd);
@@ -305,12 +315,7 @@ export class ConsentCenter {
   }
 
   revokeCliAgentPath(botId: string, cwd?: string) {
-    if (!cwd) this.cliPaths = this.cliPaths.filter((p) => p.botId !== botId);
-    else {
-      const prefix = this.normalizePrefix(cwd);
-      this.cliPaths = this.cliPaths.filter((p) => !(p.botId === botId && (p.prefix === prefix || prefix.startsWith(p.prefix + sep) || p.prefix.startsWith(prefix + sep))));
-    }
-    this.persistRules();
+    this.revokeCodingDir(botId, cwd);
   }
 
   listCliAgentPaths(botId?: string): CliAgentPathGrant[] {
@@ -334,11 +339,19 @@ export class ConsentCenter {
   }
 
   revokeTermOpenPath(botId: string, cwd?: string) {
-    if (!cwd) this.termPaths = this.termPaths.filter((p) => p.botId !== botId);
-    else {
+    this.revokeCodingDir(botId, cwd);
+  }
+
+  /** 撤销目录信任时两张表一起清，避免只撤一边、另一边仍放行。 */
+  private revokeCodingDir(botId: string, cwd?: string) {
+    const drop = (p: { botId: string; prefix: string }) => {
+      if (p.botId !== botId) return false;
+      if (!cwd) return true;
       const prefix = this.normalizePrefix(cwd);
-      this.termPaths = this.termPaths.filter((p) => !(p.botId === botId && (p.prefix === prefix || prefix.startsWith(p.prefix + sep) || p.prefix.startsWith(prefix + sep))));
-    }
+      return p.prefix === prefix || prefix.startsWith(p.prefix + sep) || p.prefix.startsWith(prefix + sep);
+    };
+    this.cliPaths = this.cliPaths.filter((p) => !drop(p));
+    this.termPaths = this.termPaths.filter((p) => !drop(p));
     this.persistRules();
   }
 
@@ -347,84 +360,100 @@ export class ConsentCenter {
   }
 
   /**
-   * cli.agent / term.open：已信任前缀则直接放行；否则弹窗，可选「总是允许此目录」。
-   * 不用整 cap 的长期 grant（避免一次批准任意路径）。
+   * cli.agent / term.open：Auto / Always 直接放行。
+   * Ask 下弹窗，可选「总是允许此目录」。任何具体目录都能记住，包括 /tmp。
    */
-  /** 层级太浅（如 /tmp、/Users/name）不能记成长期前缀，否则等于放开一大片盘 */
-  private isShallowPrefix(prefix: string): boolean {
-    return prefix.split(sep).filter(Boolean).length < 3;
-  }
-
   async requestCliAgent(
     botId: string,
     cwd: string,
     description: string,
-    opts?: { reasons?: string[] },
-  ): Promise<{ granted: boolean; remembered?: boolean; viaPathGrant?: boolean; shallow?: boolean }> {
+    opts?: { reasons?: string[]; unattended?: boolean },
+  ): Promise<{ granted: boolean; remembered?: boolean; viaPathGrant?: boolean }> {
     const prefix = this.normalizePrefix(cwd);
     // 已信任前缀：放行但仍标记 viaPathGrant，调用方须写一条可见摘要（避免完全静默）
-    if (this.hasCliAgentPath(botId, prefix)) return { granted: true, viaPathGrant: true };
+    if (this.hasCodingDir(botId, prefix)) return { granted: true, viaPathGrant: true };
     if (this.isTrusted(botId)) return { granted: true }; // Auto / Always
+    // 例行 / 入站是用户已经定下的吩咐，到点没有人能点卡片，这一次直接做，不写成永久目录信任。
+    if (opts?.unattended) return { granted: true };
     if (!this.decider) return { granted: false };
     const decision = await this.decider({
       botId,
       cap: "cli:agent",
       description,
       requiresStrongConsent: true,
-      rememberPath: this.isShallowPrefix(prefix) ? undefined : prefix,
+      rememberPath: prefix,
       reasons: opts?.reasons,
     });
     if (decision === "deny") return { granted: false };
-    // 仅「总是允许此目录」(allow-command) 写入前缀信任；过浅目录只放行这一次
     if (decision === "allow-command") {
-      if (this.isShallowPrefix(prefix)) return { granted: true, shallow: true };
-      this.grantCliAgentPath(botId, prefix);
+      this.rememberCodingDir(botId, prefix);
       return { granted: true, remembered: true };
     }
     return { granted: true };
   }
 
-  /** term.open：打开 shell 终端。已有终端不等于已批准派 Coding CLI。 */
+  /** 一次「总是允许此目录」同时记下开终端和派工。 */
+  private rememberCodingDir(botId: string, prefix: string) {
+    this.grantCliAgentPath(botId, prefix);
+    this.grantTermOpenPath(botId, prefix);
+  }
+
+  /** term.open：与派工共用目录信任。用户点「打开」不经这里。 */
   async requestTermOpen(
     botId: string,
     cwd: string,
     description: string,
-    opts?: { reasons?: string[] },
-  ): Promise<{ granted: boolean; remembered?: boolean; viaPathGrant?: boolean; shallow?: boolean }> {
+    opts?: { reasons?: string[]; unattended?: boolean },
+  ): Promise<{ granted: boolean; remembered?: boolean; viaPathGrant?: boolean }> {
     const prefix = this.normalizePrefix(cwd);
-    if (this.hasTermOpenPath(botId, prefix)) return { granted: true, viaPathGrant: true };
+    if (this.hasCodingDir(botId, prefix)) return { granted: true, viaPathGrant: true };
     if (this.isTrusted(botId)) return { granted: true }; // Auto / Always
+    if (opts?.unattended) return { granted: true };
     if (!this.decider) return { granted: false };
     const decision = await this.decider({
       botId,
       cap: "term:open",
       description,
-      rememberPath: this.isShallowPrefix(prefix) ? undefined : prefix,
+      rememberPath: prefix,
       reasons: opts?.reasons,
     });
     if (decision === "deny") return { granted: false };
     if (decision === "allow-command") {
-      if (this.isShallowPrefix(prefix)) return { granted: true, shallow: true };
-      this.grantTermOpenPath(botId, prefix);
+      this.rememberCodingDir(botId, prefix);
       return { granted: true, remembered: true };
     }
     return { granted: true };
+  }
+
+  /** bot 内部浏览器：第一次问；「以后不再问」记 browser:open grant；Auto/Always 跳过。 */
+  async requestBrowserOpen(
+    botId: string,
+    description: string,
+    opts?: { reasons?: string[]; unattended?: boolean },
+  ): Promise<{ granted: boolean }> {
+    if (this.isTrusted(botId)) return { granted: true };
+    if (opts?.unattended) return { granted: true };
+    return this.request(botId, "browser:open", description, { reasons: opts?.reasons });
   }
 
   /**
    * 请求授权：有 grant → 消耗 once 并返回 true；无 → 调 decider 弹窗。
    * Always 模式直接放行；Ask/Auto 下危险/onceOnly 不走已有长期授权。
    */
-  async request(botId: string, cap: Cap, description: string, opts?: { requiresStrongConsent?: boolean; onceOnly?: boolean; reasons?: string[] }): Promise<{ granted: boolean }> {
+  async request(botId: string, cap: Cap, description: string, opts?: { requiresStrongConsent?: boolean; onceOnly?: boolean; reasons?: string[]; unattended?: boolean }): Promise<{ granted: boolean }> {
     this.expire();
-    if (this.permissionMode(botId) === "always") return { granted: true };
-    const strong = !!opts?.requiresStrongConsent;
-    const once = strong || !!opts?.onceOnly;
+    const mode = this.permissionMode(botId);
+    if (mode === "always") return { granted: true };
+    // 例行做普通工作。删除这类不可逆操作停在批准点，不弹没人能点的卡。
+    if (opts?.unattended && opts?.requiresStrongConsent) return { granted: false };
+    if (opts?.unattended) return { granted: true };
+    const once = !!opts?.onceOnly;
     const g = this.grants.get(`${botId}:${cap}`);
     if (g && !once) {
       if (g.once) { this.grants.delete(`${botId}:${cap}`); this.persist(); }
       return { granted: true };
     }
+    if (opts?.unattended) return { granted: false };
     if (!this.decider) return { granted: false };
     const decision = await this.decider({ botId, cap, description, requiresStrongConsent: opts?.requiresStrongConsent, onceOnly: once || undefined, reasons: opts?.reasons });
     if (decision === "deny") return { granted: false };
@@ -435,16 +464,18 @@ export class ConsentCenter {
   /** 单个命令的授权：「总是允许」只记成这个 bot 对这一个命令的规则，不会放行整组命令 */
   async requestCommand(
     botId: string, command: string, description: string,
-    opts?: { cap?: Cap; requiresStrongConsent?: boolean; onceOnly?: boolean; reasons?: string[] },
+    opts?: { cap?: Cap; requiresStrongConsent?: boolean; onceOnly?: boolean; reasons?: string[]; unattended?: boolean },
   ): Promise<{ granted: boolean }> {
     const mode = this.permissionMode(botId);
     // Always：含危险命令一并放行（调用方已拦 deny 规则）
     if (mode === "always") return { granted: true };
-    // Auto：非危险直接放行；危险仍走强确认
+    // Auto：非危险直接放行。危险命令有人在场才确认；无人时停在批准点。
     if (mode === "auto" && !opts?.requiresStrongConsent) return { granted: true };
-    const strong = !!opts?.requiresStrongConsent;
-    const once = strong || !!opts?.onceOnly;
+    const once = !!opts?.onceOnly;
     if (!once && this.commandRule(botId, command) === "allow") return { granted: true };
+    // 例行可以做准备和普通命令。发送、删除、改生产、危险命令不偷偷执行。
+    if (opts?.unattended && !opts?.requiresStrongConsent) return { granted: true };
+    if (opts?.unattended) return { granted: false };
     if (!this.decider) return { granted: false };
     const decision = await this.decider({
       botId, cap: opts?.cap ?? "bash:other", description, requiresStrongConsent: opts?.requiresStrongConsent,

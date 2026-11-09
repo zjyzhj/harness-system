@@ -113,7 +113,7 @@ describe("scheduler", () => {
     const sched = new Scheduler(home);
     const ran: string[] = [];
     sched.onRun = async (t) => { ran.push(t.name); };
-    const t = sched.create({ botId: "b1", name: "早报", cron: "*/1 * * * *", prompt: "生成今日早报" });
+    const t = sched.create({ botId: "b1", name: "早报", cron: "*/5 * * * *", prompt: "生成今日早报" });
     expect(t.nextRunAt).toBeGreaterThan(Date.now());
     await sched.tick(t.nextRunAt! + 1);
     expect(ran).toContain("早报");
@@ -147,14 +147,15 @@ describe("bot-runtime", () => {
     const bot = await reg.createBotFromText("创建 bot：记忆助手");
     const r = await runtime.handle({ bot, from: "user", text: "记住：我喜欢喝美式咖啡", sessionId: "s3" });
     expect(r.memoryEvents!.length).toBeGreaterThan(0);
-    expect(memory.list(bot.id).some((m) => m.content.includes("美式咖啡"))).toBe(true);
+    expect(memory.list("global").some((m) => m.content.includes("美式咖啡"))).toBe(true);
   });
   test("记忆抽取：「我叫什么？」是提问不入库，「我叫小周」记成完整的一句", async () => {
     const bot = await reg.createBotFromText("创建 bot：名字助手");
     await runtime.handle({ bot, from: "user", text: "我叫什么？做什么的？", sessionId: "s3q" });
     expect(memory.list(bot.id)).toEqual([]);
+    expect(memory.list("global").some((m) => m.content.includes("什么"))).toBe(false);
     await runtime.handle({ bot, from: "user", text: "我叫小周", sessionId: "s3q" });
-    expect(memory.list(bot.id).map((m) => m.content)).toContain("用户叫小周");
+    expect(memory.list("global").map((m) => m.content)).toContain("用户叫小周");
   });
 });
 
