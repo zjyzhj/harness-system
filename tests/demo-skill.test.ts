@@ -37,6 +37,9 @@ describe("DemoSkillEngine", () => {
     expect(fin.draft.name).toBe("整理日报");
     expect(fin.draft.body).toContain("fs.read");
     expect(fin.draft.body).toContain("bash.run");
+    expect(fin.draft.body).toContain("## 何时使用");
+    expect(fin.draft.body).toContain("## 工作步骤");
+    expect(fin.draft.body).toContain("## 需要批准");
     expect(fin.draft.body).not.toContain("sk-secret-should-hide");
     expect(JSON.stringify(fin.session.steps[0].args)).toContain("[redacted]");
     expect(eng.isRecording("b1")).toBe(false);

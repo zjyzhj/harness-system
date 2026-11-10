@@ -245,20 +245,101 @@ async function exportSession(sid) {
   if (path) api.system.reveal(path);
 }
 
-/* ---- 产出：bot 交付过的图片和文件 ---- */
-function libraryHtml(items) {
-  const images = items.filter((x) => x.type === "image");
-  const files = items.filter((x) => x.type === "file");
-  if (!items.length) return `<div class="d-sec"><div class="d-empty">还没有产出物。bot 用 file.send 交付的图片和文件会汇总在这里</div></div>`;
-  return `
-    ${images.length ? `<div class="d-sec"><h4>图片 · ${images.length}</h4><div class="lib-grid">${images.map((x, i) => `<button class="lib-img" data-i="${i}" title="${esc(x.alt || "")}"><img src="${esc(imgSrc(x))}" loading="lazy" /></button>`).join("")}</div></div>` : ""}
-    ${files.length ? `<div class="d-sec"><h4>文件 · ${files.length}</h4><div class="lib-files"></div></div>` : ""}`;
+/* ---- 产出：bot 交付过的图片和文件（G11：Today / 本周 / 更早 + Pin） ---- */
+function libraryPinKey(botId) {
+  return `harness.lib.pin.${botId || "g"}`;
 }
-function bindLibrary(panel, items) {
+function libraryPins(botId) {
+  try { return JSON.parse(localStorage.getItem(libraryPinKey(botId)) || "[]"); } catch { return []; }
+}
+function librarySetPins(botId, pins) {
+  localStorage.setItem(libraryPinKey(botId), JSON.stringify(pins.slice(0, 40)));
+}
+function libraryBucket(at) {
+  const t = Number(at) || 0;
+  const now = Date.now();
+  const startToday = new Date(); startToday.setHours(0, 0, 0, 0);
+  const weekAgo = startToday.getTime() - 6 * 86400000;
+  if (t >= startToday.getTime()) return "today";
+  if (t >= weekAgo) return "week";
+  return "older";
+}
+function libraryHtml(items, botId) {
+  if (!items.length) return `<div class="d-sec"><div class="d-empty">还没有产出物。bot 用 file.send 交付的图片和文件会汇总在这里</div></div>`;
+  const pins = new Set(libraryPins(botId));
+  const keyOf = (x) => x.path || x.url || x.name || "";
+  const pinned = items.filter((x) => pins.has(keyOf(x)));
+  const rest = items.filter((x) => !pins.has(keyOf(x)));
+  const groups = [
+    ["pinned", "已钉住", pinned],
+    ["today", "今天", rest.filter((x) => libraryBucket(x.createdAt || x.at) === "today")],
+    ["week", "本周", rest.filter((x) => libraryBucket(x.createdAt || x.at) === "week")],
+    ["older", "更早", rest.filter((x) => libraryBucket(x.createdAt || x.at) === "older")],
+  ].filter(([, , xs]) => xs.length);
+  const row = (x, i) => {
+    const k = keyOf(x);
+    const on = pins.has(k);
+    if (x.type === "image") {
+      return `<div class="lib-row"><button class="lib-img" data-i="${i}" title="${esc(x.alt || "")}"><img src="${esc(imgSrc(x))}" loading="lazy" /></button>
+        <button class="ghost-btn lib-pin" data-pin="${esc(k)}" title="${on ? "取消钉住" : "钉住"}">${on ? "📌" : "📍"}</button></div>`;
+    }
+    return `<div class="lib-row" data-file="${esc(k)}"></div>`;
+  };
+  // flat index for lightbox across all images in items order
+  const images = items.filter((x) => x.type === "image");
+  return groups.map(([id, label, xs]) => {
+    const imgs = xs.filter((x) => x.type === "image");
+    const files = xs.filter((x) => x.type === "file");
+    return `<div class="d-sec" data-lib-g="${id}"><h4>${label} · ${xs.length}</h4>
+      ${imgs.length ? `<div class="lib-grid">${imgs.map((x) => {
+        const idx = images.indexOf(x);
+        const k = keyOf(x);
+        const on = pins.has(k);
+        return `<div class="lib-cell"><button class="lib-img" data-i="${idx}" title="${esc(x.alt || "")}"><img src="${esc(imgSrc(x))}" loading="lazy" /></button>
+          <button class="ghost-btn lib-pin" data-pin="${esc(k)}">${on ? "📌" : "📍"}</button></div>`;
+      }).join("")}</div>` : ""}
+      ${files.length ? `<div class="lib-files" data-files="${esc(id)}"></div>` : ""}
+    </div>`;
+  }).join("");
+}
+function bindLibrary(panel, items, botId) {
   const images = items.filter((x) => x.type === "image");
   panel.querySelectorAll(".lib-img").forEach((el) => (el.onclick = () => openLightbox(images, Number(el.dataset.i))));
-  const box = panel.querySelector(".lib-files");
-  if (box) items.filter((x) => x.type === "file").forEach((f) => box.appendChild(fileCard(f)));
+  panel.querySelectorAll(".lib-files").forEach((box) => {
+    const gid = box.dataset.files;
+    const pins = new Set(libraryPins(botId));
+    const keyOf = (x) => x.path || x.url || x.name || "";
+    let pool = items.filter((x) => x.type === "file");
+    if (gid === "pinned") pool = pool.filter((x) => pins.has(keyOf(x)));
+    else {
+      pool = pool.filter((x) => !pins.has(keyOf(x)) && libraryBucket(x.createdAt || x.at) === (gid === "today" ? "today" : gid === "week" ? "week" : "older"));
+    }
+    pool.forEach((f) => {
+      const wrap = document.createElement("div");
+      wrap.className = "lib-row";
+      const pin = document.createElement("button");
+      pin.className = "ghost-btn lib-pin";
+      pin.dataset.pin = keyOf(f);
+      pin.textContent = pins.has(keyOf(f)) ? "📌" : "📍";
+      wrap.appendChild(fileCard(f));
+      wrap.appendChild(pin);
+      box.appendChild(wrap);
+    });
+  });
+  panel.querySelectorAll(".lib-pin").forEach((btn) => (btn.onclick = (e) => {
+    e.stopPropagation();
+    const k = btn.dataset.pin;
+    let pins = libraryPins(botId);
+    if (pins.includes(k)) pins = pins.filter((x) => x !== k);
+    else pins = [k, ...pins];
+    librarySetPins(botId, pins);
+    const host = panel.closest("#details") || panel;
+    // 重新渲染由调用方 refresh；这里就地重画
+    const parent = panel.querySelector("[data-lib-g]")?.parentElement || panel;
+    // 最简：触发 details 重渲
+    if (typeof renderDetails === "function" && currentBot) renderDetails(currentBot);
+    else if (typeof renderGroupDetails === "function" && currentGroup) renderGroupDetails(currentGroup);
+  }));
 }
 
 /* ---- 工作区：工作目录 + 最近操作 + 当前状态 + 已存密钥 ---- */
@@ -310,10 +391,11 @@ function skillEditor(skill, bot, onDone) {
       ${isNew ? "" : `<button class="danger-btn" id="sk-del">删除技能</button>`}
     </div>
     <label class="sk-label">名称</label><input id="sk-name" value="${esc(skill?.name || "")}" placeholder="App Store 商店图规范" />
-    <label class="sk-label">描述 <span class="hint">（bot 根据它决定什么时候用这个技能）</span></label>
+    <label class="sk-label">描述 <span class="hint">（何时使用：bot 靠它决定什么时候调用）</span></label>
     <textarea id="sk-desc" rows="2" placeholder="生成 App Store 商店截图时使用：先满足官方规格…">${esc(skill?.description || "")}</textarea>
-    <label class="sk-label">指令</label>
-    <textarea id="sk-body" class="sk-body" rows="16" placeholder="# 规范&#10;## 官方合规&#10;- 尺寸…">${esc(skill?.body || "")}</textarea>
+    <label class="sk-label">指令 <span class="hint">（Grok 六段：何时使用 / 所需输入与权限 / 工作步骤 / 如何验收 / 交回什么 / 需要批准；缺段保存时会自动补）</span></label>
+    <div class="hint sk-miss" id="sk-miss" style="display:none;color:#b45309"></div>
+    <textarea id="sk-body" class="sk-body" rows="16" placeholder="# 技能名&#10;## 何时使用&#10;- …&#10;## 所需输入与权限&#10;- …&#10;## 工作步骤&#10;1. …&#10;## 如何验收&#10;- …&#10;## 交回什么&#10;- …&#10;## 需要批准&#10;- …">${esc(skill?.body || "")}</textarea>
     <div class="sk-row">
       <label class="sk-label" style="margin:0">可见范围</label>
       <select id="sk-owner" class="skin-select">
@@ -325,7 +407,17 @@ function skillEditor(skill, bot, onDone) {
     <div class="actions"><button class="ghost-btn" id="sk-cancel">取消</button><button class="primary-btn" id="sk-save" disabled>保存</button></div>`);
   modal.classList.add("wide");
   const save = modal.querySelector("#sk-save");
-  modal.querySelectorAll("input, textarea, select").forEach((x) => x.addEventListener("input", () => (save.disabled = false)));
+  const missEl = modal.querySelector("#sk-miss");
+  const SECTIONS = ["何时使用", "所需输入与权限", "工作步骤", "如何验收", "交回什么", "需要批准"];
+  const refreshMiss = () => {
+    const body = modal.querySelector("#sk-body").value || "";
+    const missing = SECTIONS.filter((t) => !new RegExp(`^#{2,3}\\s+${t}`, "m").test(body));
+    if (!missing.length) { missEl.style.display = "none"; missEl.textContent = ""; return; }
+    missEl.style.display = "";
+    missEl.textContent = `待补充：${missing.join("、")}（保存时会自动补骨架，建议写具体内容）`;
+  };
+  refreshMiss();
+  modal.querySelectorAll("input, textarea, select").forEach((x) => x.addEventListener("input", () => { save.disabled = false; if (x.id === "sk-body") refreshMiss(); }));
   modal.querySelector("#sk-on").addEventListener("change", () => (save.disabled = false));
   modal.querySelector("#sk-cancel").onclick = closeModal;
   save.onclick = async () => {
@@ -399,7 +491,7 @@ async function renderGroupDetails(g) {
     </div>
     <div class="d-sec d-actions">
       <button class="ghost-btn" id="g-export">导出对话</button>
-      <button class="ghost-btn" id="g-clear">清空当前会话</button>
+      <button class="ghost-btn" id="g-clear">重置会话</button>
       <button class="danger-btn" id="g-del">解散群聊</button>
     </div>` : groupTab === "settings" ? `
     <div class="d-sec gs-form">
@@ -431,7 +523,7 @@ async function renderGroupDetails(g) {
             <button title="删除" data-op="delete">🗑</button>
           </span>
         </div>`).join("") : `<div class="d-empty">${groupArchived ? "没有归档的会话" : "还没有会话"}</div>`}
-    </div>` : libraryHtml(library);
+    </div>` : libraryHtml(library, g.id);
   panel.innerHTML = `
     <button class="icon-btn d-close" title="关闭">✕</button>
     <button class="icon-btn d-share" title="分享 / 导入 bot">⇪</button>
@@ -483,7 +575,7 @@ async function renderGroupDetails(g) {
   if (exp) exp.onclick = () => exportSession(currentSession);
   const clr = panel.querySelector("#g-clear");
   if (clr) clr.onclick = async () => {
-    if (!currentSession || !confirm("清空当前会话的全部记录？")) return;
+    if (!currentSession || !confirm("重置当前会话？聊天记录会清空；记忆、例行和技能保留。")) return;
     await api.sessions.remove(currentSession);
     clearMessages();
   };
@@ -554,7 +646,7 @@ async function renderGroupDetails(g) {
     renderRelayBar();
     renderGroupDetails(g);
   }));
-  if (groupTab === "library") bindLibrary(panel, library);
+  if (groupTab === "library") bindLibrary(panel, library, g.id);
 }
 
 function termFace(p) {
@@ -684,7 +776,7 @@ async function renderDetails(b, opts = {}) {
       t.kind === "once" ? "一次" : "",
       t.timezone ? t.timezone : "",
     ].filter(Boolean).map((x) => `<span class="tag">${esc(x)}</span>`).join(" ");
-    const hist = (t.history || []).slice(-5).reverse();
+    const hist = (t.history || []).slice(-20).reverse();
     return `
     <div class="d-card routine-card" data-task="${esc(t.id)}">
       <div class="rc-head">
@@ -799,7 +891,7 @@ async function renderDetails(b, opts = {}) {
       <button data-tab="memory" class="${detailsTab === "memory" ? "on" : ""}">记忆</button>
     </div>
     ${detailsTab === "info" ? infoMain : detailsTab === "sessions" ? `<div class="d-sec">${sessHtml}</div>`
-      : detailsTab === "library" ? libraryHtml(library)
+      : detailsTab === "library" ? libraryHtml(library, b.id)
       : detailsTab === "computer" ? workspaceHtml(ws, b)
       : `<div class="d-sec"><h4>最近记忆</h4>${memHtml}</div>`}`;
   panel.querySelector(".d-close").onclick = () => toggleDetails(false);
@@ -980,7 +1072,7 @@ async function renderDetails(b, opts = {}) {
     await refreshBots();
   }));
   if (detailsTab === "info") bindBotPerm(panel, b.id, () => { if (currentBot?.id === b.id) renderDetails(currentBot); });
-  if (detailsTab === "library") bindLibrary(panel, library);
+  if (detailsTab === "library") bindLibrary(panel, library, b.id);
   if (detailsTab === "computer") bindWorkspace(panel, ws, b);
   const arch = panel.querySelector("#d-archived");
   if (arch) arch.onclick = () => { showArchived = !showArchived; renderDetails(b); };

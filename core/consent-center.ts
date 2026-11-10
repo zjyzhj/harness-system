@@ -1,6 +1,7 @@
 import { existsSync, realpathSync } from "node:fs";
 import { join, relative, resolve, sep } from "node:path";
 import { readJsonSafe, writeJsonAtomic } from "./atomic-fs";
+import { ActionRuleStore, actionSummary, type ActionRule } from "./action-rules";
 
 /**
  * G5 授权中心 — 对标 Grok Ask / Auto / Always-approve。
@@ -40,7 +41,7 @@ export interface ConsentRequest {
   requiresStrongConsent?: boolean;
   /** 单个命令的授权请求：卡片多一个「总是允许 <command>」 */
   command?: string;
-  /** 只能批准这一次（有风险的写法 / 解释器），卡片不给「总是允许」 */
+  /** 只能批准这一次（有风险的写法 / 解释器）；若另有 suggestAllowRule 仍可写入自定义 Allow */
   onceOnly?: boolean;
   /** 为什么要单独确认，显示在卡片上 */
   reasons?: string[];
@@ -49,6 +50,14 @@ export interface ConsentRequest {
    * 选 allow-command 时按此前缀记住，二次同前缀可免弹窗。
    */
   rememberPath?: string;
+  /** 命中的自定义规则 id（Ask first）；卡片可「编辑规则」 */
+  actionRuleId?: string;
+  /**
+   * 对齐 Grok Always allow → Custom Rules：
+   * 有值时卡片多「总是允许（写入规则）」；点选后写入账号级 Allow 规则。
+   * 用于白名单外路径等 onceOnly 场景，避免永远只能「允许一次」。
+   */
+  suggestAllowRule?: string;
 }
 
 export interface CliAgentPathGrant {
@@ -113,11 +122,23 @@ export class ConsentCenter {
   private modes = new Map<string, PermissionMode>();
   private cliPaths: CliAgentPathGrant[] = [];
   private termPaths: TermOpenPathGrant[] = [];
+  /** Grok Custom Rules：Ask first / Allow（账号级关键词） */
+  readonly actionRules: ActionRuleStore;
 
   constructor(private home: string) {
     this.file = join(home, "consent.json");
     this.rulesFile = join(home, "command-rules.json");
+    this.actionRules = new ActionRuleStore(home);
     this.load();
+  }
+
+  /** 查自定义规则；Ask first 优先。summary 可用 actionSummary() 生成 */
+  matchActionRule(summary: string): ActionRule | null {
+    return this.actionRules.match(summary);
+  }
+
+  actionSummary(tool: string, description?: string, args?: Record<string, unknown>): string {
+    return actionSummary(tool, description, args);
   }
 
   private load() {
@@ -429,9 +450,19 @@ export class ConsentCenter {
   async requestBrowserOpen(
     botId: string,
     description: string,
-    opts?: { reasons?: string[]; unattended?: boolean },
+    opts?: { reasons?: string[]; unattended?: boolean; tool?: string },
   ): Promise<{ granted: boolean }> {
-    if (this.isTrusted(botId)) return { granted: true };
+    const summary = this.actionSummary(opts?.tool || "browser.open", description);
+    const hit = this.matchActionRule(summary);
+    if (hit?.decision === "ask_first") {
+      if (opts?.unattended) return { granted: false };
+      return this.request(botId, "browser:open", description, {
+        reasons: [...(opts?.reasons ?? []), `自定义规则「${hit.text}」要求先问`],
+        actionRuleId: hit.id,
+        forceAsk: true,
+      });
+    }
+    if (hit?.decision === "allow" || this.isTrusted(botId)) return { granted: true };
     if (opts?.unattended) return { granted: true };
     return this.request(botId, "browser:open", description, { reasons: opts?.reasons });
   }
@@ -439,11 +470,34 @@ export class ConsentCenter {
   /**
    * 请求授权：有 grant → 消耗 once 并返回 true；无 → 调 decider 弹窗。
    * Always 模式直接放行；Ask/Auto 下危险/onceOnly 不走已有长期授权。
+   * Custom Rules：Ask first 强制弹卡；Allow 可跳过常规询问（强确认仍问）。
    */
-  async request(botId: string, cap: Cap, description: string, opts?: { requiresStrongConsent?: boolean; onceOnly?: boolean; reasons?: string[]; unattended?: boolean }): Promise<{ granted: boolean }> {
+  async request(botId: string, cap: Cap, description: string, opts?: {
+    requiresStrongConsent?: boolean; onceOnly?: boolean; reasons?: string[]; unattended?: boolean;
+    tool?: string; args?: Record<string, unknown>; actionRuleId?: string; forceAsk?: boolean;
+  }): Promise<{ granted: boolean }> {
     this.expire();
     const mode = this.permissionMode(botId);
+    const summary = this.actionSummary(opts?.tool || cap, description, opts?.args);
+    const hit = opts?.forceAsk ? (opts.actionRuleId ? this.actionRules.get(opts.actionRuleId) : this.matchActionRule(summary)) : this.matchActionRule(summary);
+    if (hit?.decision === "ask_first" || opts?.forceAsk) {
+      if (opts?.unattended) return { granted: false };
+      if (!this.decider) return { granted: false };
+      const reasons = [...(opts?.reasons ?? [])];
+      if (hit && !reasons.some((r) => r.includes(hit.text))) reasons.push(`自定义规则「${hit.text}」要求先问`);
+      const decision = await this.decider({
+        botId, cap, description,
+        requiresStrongConsent: opts?.requiresStrongConsent,
+        onceOnly: opts?.onceOnly || undefined,
+        reasons: reasons.length ? reasons : undefined,
+        actionRuleId: hit?.id,
+      });
+      if (decision === "deny") return { granted: false };
+      if (decision === "allow" && !opts?.onceOnly) this.grant(botId, cap);
+      return { granted: true };
+    }
     if (mode === "always") return { granted: true };
+    if (hit?.decision === "allow" && !opts?.requiresStrongConsent && !opts?.onceOnly) return { granted: true };
     // 例行做普通工作。删除这类不可逆操作停在批准点，不弹没人能点的卡。
     if (opts?.unattended && opts?.requiresStrongConsent) return { granted: false };
     if (opts?.unattended) return { granted: true };
@@ -461,14 +515,56 @@ export class ConsentCenter {
     return { granted: true };
   }
 
+  /** 卡片「总是允许」：可写命令规则，也可写入账号级 Allow 自定义规则（Grok Custom Rules） */
+  private rememberAllowDecision(
+    botId: string,
+    command: string | undefined,
+    decision: ConsentDecision,
+    opts?: { onceOnly?: boolean; suggestAllowRule?: string },
+  ) {
+    if (decision !== "allow-command" && decision !== "allow") return;
+    if (!opts?.onceOnly && command) this.setCommandRule(botId, command, "allow");
+    const ruleText = (opts?.suggestAllowRule || "").trim();
+    if (!ruleText) return;
+    try {
+      this.actionRules.add(ruleText, "allow");
+    } catch {
+      // Allow 已满 20：挤掉最旧一条再写（对齐 Grok Always allow 挤位）
+      const oldest = this.actionRules.list("allow")[0];
+      if (oldest) this.actionRules.remove(oldest.id);
+      try { this.actionRules.add(ruleText, "allow"); } catch { /* 仍失败就只放行本次 */ }
+    }
+  }
+
   /** 单个命令的授权：「总是允许」只记成这个 bot 对这一个命令的规则，不会放行整组命令 */
   async requestCommand(
     botId: string, command: string, description: string,
-    opts?: { cap?: Cap; requiresStrongConsent?: boolean; onceOnly?: boolean; reasons?: string[]; unattended?: boolean },
+    opts?: {
+      cap?: Cap; requiresStrongConsent?: boolean; onceOnly?: boolean; reasons?: string[];
+      unattended?: boolean; suggestAllowRule?: string;
+    },
   ): Promise<{ granted: boolean }> {
     const mode = this.permissionMode(botId);
+    const summary = this.actionSummary(command, description);
+    const hit = this.matchActionRule(summary);
+    if (hit?.decision === "ask_first") {
+      if (opts?.unattended) return { granted: false };
+      if (!this.decider) return { granted: false };
+      const decision = await this.decider({
+        botId, cap: opts?.cap ?? "bash:other", description, requiresStrongConsent: opts?.requiresStrongConsent,
+        command, onceOnly: opts?.onceOnly || undefined,
+        reasons: [...(opts?.reasons ?? []), `自定义规则「${hit.text}」要求先问`],
+        actionRuleId: hit.id,
+        suggestAllowRule: opts?.suggestAllowRule,
+      });
+      if (decision === "deny") return { granted: false };
+      this.rememberAllowDecision(botId, command, decision, opts);
+      return { granted: true };
+    }
     // Always：含危险命令一并放行（调用方已拦 deny 规则）
     if (mode === "always") return { granted: true };
+    // Allow 规则可跳过常规与路径风险（危险仍问）
+    if (hit?.decision === "allow" && !opts?.requiresStrongConsent) return { granted: true };
     // Auto：非危险直接放行。危险命令有人在场才确认；无人时停在批准点。
     if (mode === "auto" && !opts?.requiresStrongConsent) return { granted: true };
     const once = !!opts?.onceOnly;
@@ -480,9 +576,10 @@ export class ConsentCenter {
     const decision = await this.decider({
       botId, cap: opts?.cap ?? "bash:other", description, requiresStrongConsent: opts?.requiresStrongConsent,
       command, onceOnly: once || undefined, reasons: opts?.reasons,
+      suggestAllowRule: opts?.suggestAllowRule,
     });
     if (decision === "deny") return { granted: false };
-    if (!once && (decision === "allow-command" || decision === "allow")) this.setCommandRule(botId, command, "allow");
+    this.rememberAllowDecision(botId, command, decision, opts);
     return { granted: true };
   }
 

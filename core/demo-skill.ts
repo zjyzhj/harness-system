@@ -138,6 +138,7 @@ export class DemoSkillEngine {
       "开始：demo.start title=…；状态：demo.status；取消：demo.cancel。",
       "录制期间正常调用 fs/bash/mcp/web/bot.ask 等工具即可自动记步骤（查询类与 demo.* 本身不记）。",
       "结束：demo.finish name=… description=…；可选 cron=… 或 in=30m 挂定时重跑。",
+      "browser.*（含 fillLogin / takeover）会记入步骤；验证码步骤在技能「需要批准」里写清。",
       "不要假装跟看了屏幕；不要把密钥原文写进技能。",
     ].join("\n");
   }
@@ -195,12 +196,21 @@ function guessDescription(session: DemoSession, name: string): string {
 }
 
 function buildBody(session: DemoSession, name: string): string {
+  const tools = [...new Set(session.steps.map((s) => s.tool))];
   const lines: string[] = [
     `# ${name}`,
     "",
-    "本技能由「演示→技能」从本机工具轨迹生成。按下列步骤执行；遇到需用户确认的操作先 ui.confirm。",
+    "## 何时使用",
+    `- 用户要求按「${name}」这套本机演示流程复跑时。`,
+    `- 本技能由「演示→技能」从工具轨迹生成（录制 id：${session.id}）。`,
     "",
-    "## 步骤",
+    "## 所需输入与权限",
+    `- 用到的工具：${tools.join("、") || "（无）"}。`,
+    "- 步骤依赖的本机状态（文件是否存在、登录态、目录信任）须先检查。",
+    "- 密钥用 `{{secret:名字}}` 或保险库，不要写死在技能里。",
+    "",
+    "## 工作步骤",
+    "按下列顺序执行；参数按当前任务调整，不要照抄过期路径/临时值。",
   ];
   session.steps.forEach((step, i) => {
     const argsJson = JSON.stringify(step.args, null, 0);
@@ -208,12 +218,20 @@ function buildBody(session: DemoSession, name: string): string {
     lines.push(`### ${i + 1}. \`${step.tool}\`${step.ok ? "" : "（当时失败，复跑时注意）"}`);
     lines.push(`- 参数参考：\`${argsJson.slice(0, 500)}\``);
     lines.push(`- 当时结果摘要：${step.resultSummary}`);
-    lines.push(`- 复跑：调用工具 \`${step.tool}\`，参数按当前任务调整，不要照抄过期路径/临时值。`);
+    lines.push(`- 复跑：调用工具 \`${step.tool}\`。`);
   });
   lines.push("");
-  lines.push("## 注意");
-  lines.push("- 密钥用 `{{secret:名字}}` 或环境变量，不要写死在技能里。");
-  lines.push("- 若步骤依赖用户本机状态（文件是否存在、登录态），先检查再执行。");
-  lines.push(`- 录制 id：${session.id}；开始于 ${new Date(session.startedAt).toISOString()}。`);
+  lines.push("## 如何验收");
+  lines.push("- 各步工具调用成功，或失败原因已写明；不要假装跑完。");
+  lines.push("- 最终状态与演示目标一致（文件/通知/页面等可核对）。");
+  lines.push("");
+  lines.push("## 交回什么");
+  lines.push("- 向用户汇报：完成了哪些步、产出在哪、失败在哪一步。");
+  lines.push("- 有文件产出时用 file.send 交到对话；需要通知时再用 notify。");
+  lines.push("");
+  lines.push("## 需要批准");
+  lines.push("- 发送、删除、对外联系、改生产前先 ui.confirm / 征得用户同意；例行里停在批准点。");
+  lines.push("- 演示里若出现过登录或密钥，复跑时走保险库，不要把密钥写进技能。");
+  lines.push(`- 录制开始于 ${new Date(session.startedAt).toISOString()}。`);
   return lines.join("\n");
 }

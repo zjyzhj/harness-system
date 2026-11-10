@@ -228,7 +228,7 @@ describe("说记住就真的记住", () => {
     const { rt } = make(() => (n++ === 0 ? "```tool\n" + JSON.stringify({ tool: "skill.update", args: { key: sk.key, append: ["y"] } }) + "\n```" : "好"));
     const r = await rt.handleStream({ bot, from: "user", text: "改一下", sessionId: "s6" }, { onBlock: () => {} });
     expect((r.content?.find((b) => b.type === "tool_call") as any).result).toContain("❌");
-    expect(new SkillRegistry(join(home, "skills")).get(sk.key)!.body).toBe("# x\n");
+    expect(new SkillRegistry(join(home, "skills")).get(sk.key)!.body).toBe(sk.body);
   });
 
   test("模型判断没什么要记（[]）时不硬记原话；模型调用失败才兜底", async () => {
@@ -288,7 +288,7 @@ describe("说记住就真的记住", () => {
     const r = await rt.handleStream({ bot, from: "user", text: "加一条", sessionId: "s12" }, { onBlock: () => {} });
     expect(asked[0]).toStartWith("skill:shared|修改共享技能「共享写作」");
     expect((r.content?.find((b) => b.type === "tool_call") as any).result).toContain("没有批准");
-    expect(new SkillRegistry(join(home, "skills")).get(sk.key)!.body).toBe("# x\n- 旧\n");
+    expect(new SkillRegistry(join(home, "skills")).get(sk.key)!.body).toBe(sk.body);
   });
 
   test("普通回复里出现「完成 / 成功」不再自动记成事件", async () => {

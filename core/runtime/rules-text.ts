@@ -119,13 +119,15 @@ export function memoryFromText(text: string): MemoryDraft[] {
   return [];
 }
 
-/** 一句话"创建技能"：从自然语言生成 SKILL.md（规则兜底，LLM 可增强） */
+/** 一句话"创建技能"：从自然语言生成 SKILL.md（规则兜底，LLM 可增强；正文走 Grok 六段） */
 export function skillFromText(text: string): { key: string; markdown: string } | null {
   const m = text.match(/(?:创建|新增|加一个|做一个)\s*(?:技能|skill)\s*[:：为是]?\s*([^\s，。,!?]+)/);
   if (!m) return null;
   const key = m[1].replace(/[^\w\u4e00-\u9fa5-]/g, "");
+  const description = text.replace(/(?:创建|新增|加一个|做一个)\s*(?:技能|skill)\s*[:：为是]?\s*/, "").slice(0, 80) || `技能 ${key}`;
+  // 松散正文交给 SkillRegistry.create → ensureGrokSkillBody 收成六段
   return {
     key,
-    markdown: `---\nname: ${key}\ndescription: ${text.replace(/(?:创建|新增|加一个|做一个)\s*(?:技能|skill)\s*[:：为是]?\s*/, "").slice(0, 80) || `技能 ${key}`}\n---\n# ${key}\n\n${text}\n`,
+    markdown: `---\nname: ${key}\ndescription: ${description}\n---\n# ${key}\n\n${text}\n`,
   };
 }

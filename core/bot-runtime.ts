@@ -955,7 +955,7 @@ export class BotRuntime {
         (ctx) => this.demoTool(ctx.bot, ctx.tool, ctx.args, ctx.sessionId),
       );
     }
-    R.registerPrefix("skill.", "技能管理 skill.list / skill.get(key) / skill.save(name, description, instructions, key?) / skill.update(key, append?: 新规范数组, replace?: [{find, with}] 改掉冲突的旧规则) / skill.delete(key)", (ctx) => this.appTool(ctx.bot, ctx.tool, ctx.args));
+    R.registerPrefix("skill.", "技能管理 skill.list / skill.get(key) / skill.save(name, description, instructions=Grok六段说明书, key?) / skill.update(key, append?: 新规范数组, replace?: [{find, with}] 改掉冲突的旧规则) / skill.delete(key)", (ctx) => this.appTool(ctx.bot, ctx.tool, ctx.args));
     // 编排已全删：保留前缀以免历史对话再调时只得到「未知工具」
     R.registerPrefix("plan.", "已下线勿调用；多步协作改用 group.send / bot.ask", async () => ({
       output: "编排已下线。多步协作请用群聊 @ 或 bot.ask 交接，不要再调用 plan.*。",
@@ -989,12 +989,19 @@ export class BotRuntime {
     R.register("cli.term", termHelp, (ctx) => this.termTool(ctx.bot, ctx.args, turn(ctx)));
     R.register("browser.open", "打开这个 bot 的内部浏览器面板（登录态按 bot 隔离）。参数: url?", (ctx) => this.browserTool(ctx.bot, "open", ctx.args, turn(ctx)));
     R.register("browser.goto", "在 bot 浏览器里打开网址。参数: url", (ctx) => this.browserTool(ctx.bot, "goto", ctx.args, turn(ctx)));
-    R.register("browser.snapshot", "看当前页可交互元素（带 e1/e2… ref，供 click/type）", (ctx) => this.browserTool(ctx.bot, "snapshot", ctx.args, turn(ctx)));
+    R.register("browser.snapshot", "看当前页可交互元素（带 e1/e2… ref，供 click/type）；密码框 value 已脱敏", (ctx) => this.browserTool(ctx.bot, "snapshot", ctx.args, turn(ctx)));
     R.register("browser.click", "点击页面元素。参数: ref（来自 snapshot）或 selector", (ctx) => this.browserTool(ctx.bot, "click", ctx.args, turn(ctx)));
     R.register("browser.type", "往输入框打字。参数: text, ref|selector, submit?；已批准时可用 {{secret:名字}}", (ctx) => this.browserTool(ctx.bot, "type", ctx.args, turn(ctx)));
+    R.register("browser.fillLogin", "用保险库登录项填用户名/密码（模型只见 loginId，不见密码）。参数: loginId（或 website）, userRef?, passRef?", (ctx) => this.browserTool(ctx.bot, "fillLogin", ctx.args, turn(ctx)));
+    R.register("browser.takeover", "验证码/SSO/passkey 时请用户接管浏览器。参数: reason?", (ctx) => this.browserTool(ctx.bot, "takeover", ctx.args, turn(ctx)));
     R.register("browser.keys", "送按键。参数: keys（enter/tab/escape/backspace 或组合）", (ctx) => this.browserTool(ctx.bot, "keys", ctx.args, turn(ctx)));
     R.register("browser.read", "读当前页 url、标题和可见正文摘录", (ctx) => this.browserTool(ctx.bot, "read", ctx.args, turn(ctx)));
     R.register("browser.stop", "关掉浏览器面板（登录态仍保留）", (ctx) => this.browserTool(ctx.bot, "stop", ctx.args, turn(ctx)));
+    R.register("vault.login.list", "列出保险库登录项（无密码）。无参数", () => {
+      const list = this.deps.logins?.list() ?? this.deps.vault?.logins?.() ?? [];
+      if (!list.length) return { output: "还没有登录项。请用户在 Connect → 登录 里添加。" };
+      return { output: list.map((l) => `- ${l.id}：${l.website} · ${l.username}${l.hint ? `（${l.hint}）` : ""}`).join("\n") };
+    });
     // 后台暖探测缓存，让工具说明 / 提示词能跟上本机安装变化
     void probeCodingAgents().catch(() => {});
     builtin("memory.list", "列出某个 bot 已存的规范/事实单条。用户问「你记得什么 / 关于我知道些什么」时用。参数: bot?（bot 名，默认你自己）, kind?（rule=规范 / fact=事实，默认全部）");
@@ -2368,7 +2375,61 @@ export class BotRuntime {
         selector: typeof args.selector === "string" ? args.selector : undefined,
         submit: args.submit === true || args.submit === "true",
       });
-      return { output: r.ok ? r.output : `❌ ${r.error}` };
+      const redacted = text.includes("{{secret:") || /password|secret|token/i.test(String(args.ref ?? args.selector ?? ""));
+      return { output: r.ok ? (redacted ? "已填入（内容已打码）" : r.output) : `❌ ${r.error}` };
+    }
+    if (action === "fillLogin") {
+      const logins = this.deps.logins;
+      if (!logins) return { output: "❌ 登录保险库未启用" };
+      const gate = await this.ensureBrowserConsent(bot, undefined, turn);
+      if (!gate.ok) return { output: gate.output };
+      const key = String(args.loginId ?? args.id ?? args.website ?? args.login ?? "").trim();
+      if (!key) return { output: "browser.fillLogin 需要 loginId 或 website（先 vault.login.list）" };
+      const entry = logins.get(key);
+      if (!entry) return { output: `❌ 找不到登录项「${key}」。用 vault.login.list 查看。` };
+      const pass = logins.passwordOf(entry.id);
+      if (!pass) return { output: `❌ 登录项「${entry.website}」没有可用密码（请用户在 Connect → 登录里替换密码）` };
+      const userRef = typeof args.userRef === "string" ? args.userRef : typeof args.usernameRef === "string" ? args.usernameRef : undefined;
+      const passRef = typeof args.passRef === "string" ? args.passRef : typeof args.passwordRef === "string" ? args.passwordRef : undefined;
+      // 未指定 ref 时先 snapshot，按角色猜用户名/密码框
+      let uRef = userRef;
+      let pRef = passRef;
+      if (!uRef || !pRef) {
+        const snap = await presence.takeSnapshot(bot.id);
+        if (!snap.ok) return { output: `❌ ${snap.error}` };
+        const lines = snap.output.split("\n");
+        for (const line of lines) {
+          const m = line.match(/^(e\d+)\s+/i);
+          if (!m) continue;
+          const ref = m[1]!;
+          const low = line.toLowerCase();
+          if (!pRef && (low.includes("[redacted]") || low.includes("password") || low.includes("密码"))) pRef = ref;
+          else if (!uRef && (low.includes("user") || low.includes("email") || low.includes("账号") || low.includes("用户") || low.includes("textbox"))) uRef = ref;
+        }
+      }
+      if (!uRef && !pRef) return { output: "❌ 找不到用户名/密码输入框。先 browser.snapshot，再带 userRef / passRef 调用。" };
+      if (uRef) {
+        const ur = await presence.type(bot.id, { text: entry.username, ref: uRef });
+        if (!ur.ok) return { output: `❌ 填用户名失败：${ur.error}` };
+      }
+      if (pRef) {
+        const pr = await presence.type(bot.id, { text: pass, ref: pRef });
+        if (!pr.ok) return { output: `❌ 填密码失败：${pr.error}` };
+      }
+      this.deps.audit?.append({
+        botId: bot.id, cap: "browser:open", action: "browser.fillLogin",
+        args: entry.id, granted: true, ok: true, detail: entry.website.slice(0, 120),
+      });
+      return { output: `已填入登录「${entry.website}」的用户名${pRef ? "和密码" : ""}（密码未展示）。若还需验证码，用 browser.takeover。` };
+    }
+    if (action === "takeover") {
+      const reason = String(args.reason ?? args.why ?? "需要你完成验证码 / SSO / passkey 等敏感步骤").trim();
+      const id = `takeover-${Date.now().toString(36)}`;
+      return {
+        output: `请用户接管浏览器：${reason}。完成后点「我做完了，继续」。`,
+        blocks: [{ type: "takeover", id, botId: bot.id, reason }],
+        halt: true,
+      };
     }
     if (action === "keys") {
       const keys = String(args.keys ?? args.data ?? args.text ?? "").trim();
@@ -2376,7 +2437,7 @@ export class BotRuntime {
       const r = await presence.keys(bot.id, keys);
       return { output: r.ok ? r.output : `❌ ${r.error}` };
     }
-    return { output: "browser 支持 open / goto / snapshot / click / type / keys / read / stop" };
+    return { output: "browser 支持 open / goto / snapshot / click / type / fillLogin / takeover / keys / read / stop" };
   }
 
   /** 终端：open / read / write / keys / stop（cli.term 别名也走这里）。可带 cwd 指定目录。 */
@@ -2501,8 +2562,15 @@ export class BotRuntime {
         (ai ?? [{ kind: "rule" as const, scope: "bot" as const, content: userText.trim().slice(0, 200) }]).forEach(add);
       }
     }
-    if (autoEvent && /完成|搞定|做完了|成功/.test(reply)) {
-      events.push(this.deps.memory.add(bot.id, { kind: "event", content: `${new Date().toISOString()} ${reply.slice(0, 80)}`, source: "auto" }));
+    // G11 工作日志：带日期的 event，便于「上周做了什么」检索（蒸馏仍不进 MEMORY.md）
+    if (autoEvent && /完成|搞定|做完了|成功|已发送|已保存|已创建|简报/.test(reply)) {
+      const day = new Date().toISOString().slice(0, 10);
+      const line = reply.replace(/\s+/g, " ").trim().slice(0, 120);
+      const content = `${day} 工作：${line}`;
+      const recent = this.deps.memory.list(bot.id).filter((e) => e.kind === "event").slice(-8);
+      if (!recent.some((e) => e.content === content || e.content.includes(line.slice(0, 40)))) {
+        events.push(this.deps.memory.add(bot.id, { kind: "event", content, source: "auto", tags: ["work-log"] }));
+      }
     }
     return events;
   }

@@ -161,6 +161,48 @@ function choiceCard(c, m) {
   return el;
 }
 
+/** G11：浏览器接管 — 聚焦面板 / 交还后继续 */
+function takeoverCard(c, m) {
+  const el = document.createElement("div");
+  const answered = !!c.answer;
+  el.className = `q-card confirm ${answered ? "answered" : ""}`;
+  el.innerHTML = `
+    <div class="q-title">🖥 接管浏览器</div>
+    <div class="q-detail">${esc(c.reason || "需要你完成验证码、SSO 或 passkey 等敏感步骤。完成后把控制权交还给 bot。")}</div>
+    ${answered ? `<div class="q-done">${esc(c.answer)}</div>` : `
+      <div class="q-btns">
+        <button class="primary-btn" data-a="take">接管浏览器</button>
+        <button class="ghost-btn" data-a="done">我做完了，继续</button>
+      </div>`}`;
+  if (answered || m.id == null) { el.querySelectorAll("button").forEach((x) => (x.disabled = true)); return el; }
+  el.querySelector('[data-a="take"]').onclick = async () => {
+    try {
+      await api.browser.show?.(c.botId, true);
+      await api.browser.focus?.(c.botId);
+    } catch (_) { /* panel may still open via state */ }
+    await api.messages.answer(m.sessionId, m.id, c.id, "已接管（在面板里完成后再点「我做完了」）");
+    c.answer = "已接管（在面板里完成后再点「我做完了」）";
+    // 允许再次点「继续」：重新渲染为仍可 done —— 简化：直接换成 done-only
+    el.innerHTML = `
+      <div class="q-title">🖥 浏览器已交给你</div>
+      <div class="q-detail">${esc(c.reason || "")}</div>
+      <div class="q-btns"><button class="primary-btn" data-a="done2">我做完了，继续</button></div>`;
+    el.querySelector('[data-a="done2"]').onclick = async () => {
+      await api.messages.answer(m.sessionId, m.id, c.id, "我做完了，继续");
+      c.answer = "我做完了，继续";
+      el.replaceWith(takeoverCard(c, m));
+      sendAsUser("继续", m);
+    };
+  };
+  el.querySelector('[data-a="done"]').onclick = async () => {
+    await api.messages.answer(m.sessionId, m.id, c.id, "我做完了，继续");
+    c.answer = "我做完了，继续";
+    el.replaceWith(takeoverCard(c, m));
+    sendAsUser("继续", m);
+  };
+  return el;
+}
+
 function secretCard(c, m) {
   const el = document.createElement("div");
   el.className = `s-card ${c.saved ? "saved" : ""}`;
@@ -349,7 +391,7 @@ function makeMsgEl(m) {
   }
   const blocks = Array.isArray(m.content) ? m.content : null;
   const media = blocks ? blocks.filter((b) => b.type === "image" || b.type === "file" || b.type === "audio") : [];
-  const cards = blocks ? blocks.filter((b) => b.type === "choice" || b.type === "secret" || b.type === "form" || b.type === "conclusion" || b.type === "routine") : [];
+  const cards = blocks ? blocks.filter((b) => b.type === "choice" || b.type === "secret" || b.type === "form" || b.type === "conclusion" || b.type === "routine" || b.type === "takeover") : [];
   const sources = blocks?.find((b) => b.type === "sources")?.items ?? [];
   const rest = blocks ? blocks.filter((b) => !["image", "file", "audio", "choice", "secret", "conclusion", "routine", "sources"].includes(b.type)) : null;
   // Webhook 入站：左对齐入站卡（对齐 Grok），不是用户右侧绿泡；兼容旧数据 from=user + meta.webhook
@@ -381,6 +423,7 @@ function makeMsgEl(m) {
       : c.type === "secret" ? secretCard(c, m)
       : c.type === "form" ? formCard(c, m)
       : c.type === "routine" ? routineCard(c, m)
+      : c.type === "takeover" ? takeoverCard(c, m)
       : conclusionCard(c, m),
     wrapper.querySelector(".msg-meta"),
   ));
@@ -1041,9 +1084,19 @@ function consentCard(req, floating) {
   const opaqueCmd = !String(req.command || "").trim() || String(req.command).trim() === "$()";
   const alwaysPath = req.rememberPath ? `<button class="ghost-btn" data-d="allow-command" title="${esc(req.rememberPath)}">总是允许此目录</button>` : "";
   // "$()" 是解析失败占位，不能「总是允许」成一条永久规则
-  const always = !alwaysPath && !req.onceOnly && req.command && !opaqueCmd ? `<button class="ghost-btn" data-d="allow-command">总是允许 ${esc(req.command)}</button>` : "";
+  const alwaysCmd = !alwaysPath && !req.onceOnly && req.command && !opaqueCmd ? `<button class="ghost-btn" data-d="allow-command">总是允许 ${esc(req.command)}</button>` : "";
+  // 对齐 Grok Always allow → Custom Rules：白名单外路径等 onceOnly 也可写入 Allow 规则
+  const alwaysRule = !alwaysPath && !alwaysCmd && req.suggestAllowRule
+    ? `<button class="ghost-btn" data-d="allow-command" title="写入自定义 Allow 规则：${esc(req.suggestAllowRule)}">总是允许（写入规则）</button>`
+    : "";
+  const always = `${alwaysCmd}${alwaysRule}`;
   const group = !req.command && !req.rememberPath && !req.onceOnly && req.cap !== "bash:other" ? `<button class="ghost-btn" data-d="allow" title="以后不再问">以后不再问</button>` : "";
-  const reasons = req.reasons?.length ? `<div class="cs-reasons">${req.reasons.map((r) => `<div>· ${esc(r)}</div>`).join("")}${req.onceOnly && !req.danger ? `<div class="hint">这种写法只能逐次批准</div>` : ""}</div>` : "";
+  const onceHint = req.onceOnly && !req.danger
+    ? (req.suggestAllowRule
+      ? `<div class="hint">可点「总是允许（写入规则）」写入自定义 Allow，以后含 <code>${esc(req.suggestAllowRule)}</code> 的同类动作自动过</div>`
+      : `<div class="hint">这种写法只能逐次批准</div>`)
+    : "";
+  const reasons = req.reasons?.length ? `<div class="cs-reasons">${req.reasons.map((r) => `<div>· ${esc(r)}</div>`).join("")}${onceHint}</div>` : "";
   const typedGate = !!req.danger && req.cap !== "cli:agent" && req.cap !== "term:open";
   const pathHint = (req.cap === "cli:agent" || req.cap === "term:open")
     ? `<div class="hint">不用填密码，点下面的按钮即可。${req.rememberPath ? "「总是允许此目录」以后，这个文件夹的开终端、打字和派 Coding CLI 都不再问。" : ""}</div>`
@@ -1161,7 +1214,7 @@ api.onConsentResolved(({ id, decision }) => {
   c.float?.remove();
   if (c.inline) {
     c.inline.classList.add("resolved");
-    c.inline.querySelector(".cs-btns").innerHTML = `<span class="cs-done">${decision === "deny" ? "已拒绝" : decision === "allow" ? "已长期批准" : decision === "allow-command" ? `以后总是允许 ${esc(c.req.command || "")}` : "已允许一次"}</span>`;
+    c.inline.querySelector(".cs-btns").innerHTML = `<span class="cs-done">${decision === "deny" ? "已拒绝" : decision === "allow" ? "已长期批准" : decision === "allow-command" ? (c.req.suggestAllowRule && (c.req.onceOnly || !c.req.command) ? `已写入规则「${esc(c.req.suggestAllowRule)}」` : `以后总是允许 ${esc(c.req.command || c.req.suggestAllowRule || "")}`) : "已允许一次"}</span>`;
     c.inline.querySelector(".cs-warn")?.remove();
   }
 });

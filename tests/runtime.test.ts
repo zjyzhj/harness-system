@@ -66,7 +66,8 @@ describe("skill-registry", () => {
     expect(s?.name).toBe("网页搜索");
     expect(s?.description).toContain("搜索网页");
     expect(s?.requires).toContain("curl");
-    expect(s?.body).toContain("# 网页搜索技能");
+    expect(s?.body).toContain("# 网页搜索");
+    expect(s?.body).toContain("## 需要批准");
   });
   test("工具描述只含 description（渐进披露）", () => {
     const desc = skills.toolDescriptions();

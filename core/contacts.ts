@@ -9,6 +9,10 @@ export interface Contact {
   id: string;
   name: string;
   email?: string;
+  phone?: string;
+  address?: string;
+  /** 何时用这条联系人（对齐 Grok Vault Hints） */
+  hint?: string;
   note?: string;
   updatedAt: number;
 }
@@ -38,6 +42,9 @@ export class ContactStore {
       (c) =>
         c.name.toLowerCase().includes(n) ||
         (c.email ?? "").toLowerCase().includes(n) ||
+        (c.phone ?? "").toLowerCase().includes(n) ||
+        (c.address ?? "").toLowerCase().includes(n) ||
+        (c.hint ?? "").toLowerCase().includes(n) ||
         (c.note ?? "").toLowerCase().includes(n),
     );
   }
@@ -47,7 +54,7 @@ export class ContactStore {
     return this.items.find((c) => c.id === key) ?? this.items.find((c) => c.name === key);
   }
 
-  upsert(input: { id?: string; name: string; email?: string; note?: string }): Contact {
+  upsert(input: { id?: string; name: string; email?: string; phone?: string; address?: string; hint?: string; note?: string }): Contact {
     const name = input.name.trim();
     if (!name) throw new Error("联系人姓名不能为空");
     const id = input.id?.trim() || randomUUID();
@@ -56,6 +63,9 @@ export class ContactStore {
       id,
       name,
       email: input.email?.trim() || undefined,
+      phone: input.phone?.trim() || undefined,
+      address: input.address?.trim() || undefined,
+      hint: input.hint?.trim() || undefined,
       note: input.note?.trim() || undefined,
       updatedAt: Date.now(),
     };

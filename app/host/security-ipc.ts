@@ -31,6 +31,10 @@ export function registerSecurityIpc(deps: {
   }));
   ipcMain.handle("consent:setRule", (_e, botId: string, command: string, decision: "allow" | "deny") => consent.setCommandRule(botId, command, decision));
   ipcMain.handle("consent:removeRule", (_e, botId: string, command: string) => consent.removeCommandRule(botId, command));
+  ipcMain.handle("consent:actionRules", () => consent.actionRules.list());
+  ipcMain.handle("consent:addActionRule", (_e, text: string, decision: "ask_first" | "allow") => consent.actionRules.add(text, decision));
+  ipcMain.handle("consent:updateActionRule", (_e, id: string, patch: { text?: string; decision?: "ask_first" | "allow" }) => consent.actionRules.update(id, patch));
+  ipcMain.handle("consent:removeActionRule", (_e, id: string) => consent.actionRules.remove(id));
   ipcMain.handle("consent:setTrusted", (_e, botId: string, on: boolean) => consent.setTrusted(botId, on));
   ipcMain.handle("consent:setMode", (_e, botId: string, mode: "ask" | "auto" | "always") => consent.setPermissionMode(botId, mode));
   ipcMain.handle("consent:mode", (_e, botId: string) => consent.permissionMode(botId));

@@ -39,7 +39,10 @@ export class PromptBuilder {
     parts.push(bot.systemPrompt || `${bot.name}（${bot.role}）：${bot.persona}`);
     parts.push(`你是 ${bot.name}，角色：${bot.role}。人设：${bot.persona}`);
     if (opts?.extraSystem?.trim()) parts.push(opts.extraSystem.trim());
-    if (opts?.unattended) parts.push("【例行】这是用户已经定下的吩咐，现在到点了，没有人在场。不要反问，不要 ui.ask / ui.confirm / ui.secret。信息不全就写明假设，然后把准备、核对、草稿做完。查阅、整理、写草稿、在已指定目录里改代码可以直接做。出站 webhook.post，以及 secret.delete / skill.delete / sys.purge / task.delete / webhook.remove / env.delete，会停在批准点，除非这个 bot 是 Always。工具返回「停在批准点」时，把待批准的事写进回复，不要假装已经完成。没有新数据就报告失败，不要拿旧数据凑。用户明确禁止的命令不要做。");
+    if (opts?.unattended) parts.push("【例行】这是用户已经定下的吩咐，现在到点了，没有人在场。不要反问，不要 ui.ask / ui.confirm / ui.secret / browser.takeover。信息不全就写明假设，然后把准备、核对、草稿做完。查阅、整理、写草稿、在已指定目录里改代码可以直接做。出站 webhook.post，以及 secret.delete / skill.delete / sys.purge / task.delete / webhook.remove / env.delete，会停在批准点，除非这个 bot 是 Always。工具返回「停在批准点」时，把待批准的事写进回复，不要假装已经完成。**没有新数据、源失败或登录失效就明确报告失败，禁止用旧数据/缓存凑结果。**用户明确禁止的命令不要做。");
+    if (bot.isMaster) {
+      parts.push("【主控】你是用户的主对接点：可 bot.ask / 群聊交接协调其他 bot；用户问「大家怎样了 / 早报」时汇总例行失败、待批准与未完成项。不要替专责 bot 越权发外部消息。可用技能「晨间简报」或让用户挂例行。");
+    }
     // 软件真实状态放在交互约定前面，优先于对话里说过的旧话
     // 娱乐侧车事实（若有）经 PromptExtras.stableFact 注入，不进 Bot 核心
     parts.push(this.selfFacts(bot, opts));
@@ -124,10 +127,10 @@ export class PromptBuilder {
 - 只有工具结果里写明成功的事才能说「已发送 / 已完成」；没有对应工具就如实说做不到。
 - 需要密码 / Token / App Secret 等敏感信息时，用 ui.secret（name, label, note 写清用途）让用户在加密输入框里填写，不要让用户直接发在聊天里。密钥与普通配置默认是**账号级保险库**（对齐 Grok Vault）：本机所有 bot 都能用，交接不必再传凭据。已经配置过的看【已配置的环境】，不要重复要。已经信任的目录（「总是允许此目录」，或 bot 为 Auto / Always）里，新打开的终端环境带上普通配置和保险库密钥，命令里写 $名字；任务里写 {{secret:名字}} 也会换成真值。没信任的目录不会把密钥交进终端。网页搜索和打开网页仍然不能带密钥。
 - 碰用户电脑按路径选工具（意图清晰就直接干；含糊才 ui.ask）：
-  1) **看/找/交文件**：fs.list / fs.read / file.send。本机任意可读路径都可以（桌面、下载、任意文件夹；~ 可用）；**不会**打开终端面板。不要 bash ls，也不要因为「不在工程名单」就去 MCP / 绕路。工程名单只表示终端/派工槽，不限制浏览。
+  1) **看/找/交文件**：fs.list / fs.read / file.send。本机任意可读路径都可以（桌面、下载、任意文件夹、外置盘；~ 可用）；**不会**打开终端面板。不要 bash ls，也不要因为「不在工程名单」就去 MCP / 绕路。**禁止**用 MCP filesystem 扫工程盘——它的白名单常只有 mcp-sandbox，会误报「读不到」。工程名单只表示终端/派工槽，不限制浏览。
   2) **交互现场（shell）**：term.open 亮起面板并开 shell；用户点「打开」同义。
   3) **派工改仓（Coding CLI）**：cli.agent 同槽切到 Cursor/Claude/Codex 并打任务——**进 Cursor / Coding CLI 必须调 cli.agent**，禁止空口说「已切到 / 已进入」。之后用 term.read/write/keys。fs.write 只写 bot 工作区。同一目录点过一次「总是允许此目录」后，开终端、打字和派工都不再问。规范留在你自己这边，不要贴进终端。
-  4) **网页登录与站点操作（bot 自己的浏览器）**：browser.open / goto / snapshot / click / type / keys / read / stop。每个 bot 一块内部浏览器，cookie 按 bot 隔离，不是用户的 Chrome/Safari，也不是电脑操控去点别人的窗口。登录、填表、点按钮走这条；验证码让用户在浏览器面板里接手，聊里再说「继续」。browser.type 在已批准浏览器（或 Auto / Always）时可用 {{secret:名字}}。只读公开页仍用 web.fetch；本机 App 仍用电脑操控 MCP。
+  4) **网页登录与站点操作（bot 自己的浏览器）**：browser.open / goto / snapshot / click / type / fillLogin / takeover / keys / read / stop。每个 bot 一块内部浏览器，cookie 按 bot 隔离，不是用户的 Chrome/Safari，也不是电脑操控去点别人的窗口。登录优先 vault.login.list + browser.fillLogin（模型不见密码）；验证码/SSO/passkey **必须** browser.takeover，禁止空口说「你自己点」。browser.type 在已批准浏览器（或 Auto / Always）时可用 {{secret:名字}}。只读公开页仍用 web.fetch；本机 App 仍用电脑操控 MCP。
   短命令（构建、脚本、启动本机面板 / launcher、碰 $HOME / \`Application Support\` / \`~/.claude\` 或 GUI）用 bash.run：不抢终端面板。命令已「总是允许」，或 bot 为 Auto / Always 时，普通命令不再弹卡；被拒绝就别换写法重试。
   **不要**先塞进聊天沙箱或 Coding CLI 再因「沙箱拦了」改口「改用 bash.run」——能预见要碰家目录 / Application Support / 弹面板 / 出工程外，**第一下就 bash.run**（或 term）；禁止先撞墙再解释。
 - **两级选择卡**（意图含糊时用 ui.ask，禁止空口猜一条路；意图已清晰则禁止多此一举出卡）：
@@ -143,10 +146,11 @@ export class PromptBuilder {
   - 「以后对外发消息前都先问我」→ 长期规范，必须 memory.add / 写入技能。
 - 用户给某类任务定规范、改要求、指出你做得不对时，规范要写到以后真正会用到的地方（直接存，不要先问「存哪一层」）：
   1) 【技能】里有对应这类任务的技能 → 先 skill.get 看原文，再一次 skill.update：冲突用 replace，没有才 append。
-  2) 没有对应技能、但会反复做 → skill.save 建私有技能（how）；要定时/事件触发再用 task.create（when = Routine）。
+  2) 没有对应技能、但会反复做 → skill.save 建私有技能（how；instructions 须含 Grok 六段：何时使用 / 所需输入与权限 / 工作步骤 / 如何验收 / 交回什么 / 需要批准）；要定时/事件触发再用 task.create（when = Routine）。
   3) **关于用户本人的稳定事实**（姓名、时区、称呼、偏好）→ memory.add（kind: fact）；这类默认 scope:"all"（全员共享的少量用户事实，对齐 Grok）。
   4) **对本角色的做事要求**（语气、审批边界、分工）→ memory.add（kind: rule），默认只给你；用户明说「所有 bot / 大家都」才 scope:"all"。
   存完把工具结果里的链接原样给用户。没调用 skill.save / skill.update / memory.add 就不要说「建好了 / 记下了」——否则侧栏看不到。
+- **重大结果可审阅**（对齐 Grok）：交付前尽量分清「事实 / 假设 / 已完成 / 待批准 / 未核实」，附来源或文件引用；不要把假设写成已确认事实。
 - 记忆（Grok：稳定偏好 + 角色情境 + 工作摘要；相关才带进本轮）：
   1) 发现值得长期留的偏好/边界时自己 memory.add，不必先问「要不要记」；用户说「记住 / 忘掉 / 你记得什么」必须走 memory.add / forget / list。
   2) 登录态、地址、卡号、Token 进保险库（ui.secret / env），不要写进记忆。

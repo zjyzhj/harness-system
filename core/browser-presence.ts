@@ -121,18 +121,26 @@ export const BROWSER_SNAPSHOT_SCRIPT = `(() => {
     return t;
   };
   const nameOf = (el) => {
-    return (el.getAttribute('aria-label') || el.getAttribute('placeholder') || el.innerText || el.value || el.getAttribute('name') || el.getAttribute('title') || '').trim();
+    const raw = (el.getAttribute('aria-label') || el.getAttribute('placeholder') || el.innerText || el.getAttribute('name') || el.getAttribute('title') || '').trim();
+    // 密码框：名字也不带 value，避免泄露
+    if (el.tagName === 'INPUT' && String(el.type || '').toLowerCase() === 'password') return raw || 'password';
+    return (raw || String(el.value || '')).trim();
   };
   return {
     url: location.href,
     title: document.title || '',
-    elements: nodes.map((el) => ({
-      selector: pathOf(el),
-      role: roleOf(el),
-      name: nameOf(el).slice(0, 120),
-      tag: el.tagName.toLowerCase(),
-      value: 'value' in el ? String(el.value || '').slice(0, 80) : undefined,
-    })),
+    elements: nodes.map((el) => {
+      const isPass = el.tagName === 'INPUT' && String(el.type || '').toLowerCase() === 'password';
+      return {
+        selector: pathOf(el),
+        role: isPass ? 'textbox' : roleOf(el),
+        name: nameOf(el).slice(0, 120),
+        tag: el.tagName.toLowerCase(),
+        // 密码框永不返回 value（G11：密钥不进模型）
+        value: isPass ? '[redacted]' : ('value' in el ? String(el.value || '').slice(0, 80) : undefined),
+        password: isPass || undefined,
+      };
+    }),
   };
 })()`;
 

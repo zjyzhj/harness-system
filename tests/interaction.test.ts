@@ -57,13 +57,14 @@ describe("交互卡片", () => {
     providers.streamComplete = orig;
     const sys = systems[0] ?? "";
     expect(sys).toContain("两级选择卡");
-    expect(sys).toContain("三条路径");
     expect(sys).toContain("只看/找文件（不打开终端）");
     expect(sys).toContain("打开终端 shell");
     expect(sys).toContain("进 Coding CLI 改仓库");
+    expect(sys).toContain("用 bot 浏览器打开网页");
     expect(sys).toContain("再 ui.ask 一张 CLI 卡");
     expect(sys).toContain("agentCli");
     expect(sys).toContain("不要因为「不在工程名单」就去 MCP");
+    expect(sys).toContain("Grok 六段");
   });
 
   test("ui.ask：旁白 + 选项卡片，本轮结束不再调模型", async () => {

@@ -83,6 +83,10 @@ const api = {
     rules: () => ipcRenderer.invoke("consent:rules"),
     setRule: (botId: string, command: string, decision: string) => ipcRenderer.invoke("consent:setRule", botId, command, decision),
     removeRule: (botId: string, command: string) => ipcRenderer.invoke("consent:removeRule", botId, command),
+    actionRules: () => ipcRenderer.invoke("consent:actionRules"),
+    addActionRule: (text: string, decision: "ask_first" | "allow") => ipcRenderer.invoke("consent:addActionRule", text, decision),
+    updateActionRule: (id: string, patch: { text?: string; decision?: "ask_first" | "allow" }) => ipcRenderer.invoke("consent:updateActionRule", id, patch),
+    removeActionRule: (id: string) => ipcRenderer.invoke("consent:removeActionRule", id),
     setTrusted: (botId: string, on: boolean) => ipcRenderer.invoke("consent:setTrusted", botId, on),
     setMode: (botId: string, mode: "ask" | "auto" | "always") => ipcRenderer.invoke("consent:setMode", botId, mode),
     mode: (botId: string) => ipcRenderer.invoke("consent:mode", botId) as Promise<"ask" | "auto" | "always">,
@@ -205,8 +209,13 @@ const api = {
   },
   contacts: {
     list: () => ipcRenderer.invoke("contacts:list"),
-    upsert: (input: { id?: string; name: string; email?: string; note?: string }) => ipcRenderer.invoke("contacts:upsert", input),
+    upsert: (input: { id?: string; name: string; email?: string; phone?: string; address?: string; hint?: string; note?: string }) => ipcRenderer.invoke("contacts:upsert", input),
     remove: (id: string) => ipcRenderer.invoke("contacts:remove", id),
+  },
+  logins: {
+    list: () => ipcRenderer.invoke("logins:list"),
+    upsert: (input: { id?: string; website: string; username: string; password?: string; hint?: string; note?: string }) => ipcRenderer.invoke("logins:upsert", input),
+    remove: (id: string) => ipcRenderer.invoke("logins:remove", id),
   },
   connectors: {
     listWebhooks: () => ipcRenderer.invoke("connectors:listWebhooks"),

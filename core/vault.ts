@@ -6,8 +6,9 @@ import type { SecretStore, SecretInfo } from "./secret-store";
 import type { EnvStore, EnvEntry } from "./env-store";
 import type { ContactStore, Contact } from "./contacts";
 import type { ConnectorStore, WebhookEndpoint } from "./connectors";
+import type { LoginStore, LoginEntry } from "./login-store";
 
-export type VaultKind = "secret" | "env" | "contact" | "webhook" | "mcp" | "cli";
+export type VaultKind = "secret" | "env" | "contact" | "login" | "webhook" | "mcp" | "cli";
 
 export interface VaultItem {
   kind: VaultKind;
@@ -40,6 +41,7 @@ export interface VaultSources {
   env: EnvStore;
   contacts: ContactStore;
   connectors: ConnectorStore;
+  logins?: LoginStore;
   mcp?: () => McpCatalogEntry[];
   cli?: () => CliAdapterStatus[];
 }
@@ -52,10 +54,19 @@ export class Vault {
     for (const s of this.src.secrets.list(botId)) items.push(secretItem(s));
     for (const e of botId ? this.src.env.visibleTo(botId) : this.src.env.list()) items.push(envItem(e));
     for (const c of this.src.contacts.list()) items.push(contactItem(c));
+    for (const l of this.src.logins?.list() ?? []) items.push(loginItem(l));
     for (const w of this.src.connectors.listWebhooks()) items.push(webhookItem(w));
     for (const m of this.src.mcp?.() ?? []) items.push(mcpItem(m));
     for (const c of this.src.cli?.() ?? []) items.push(cliItem(c));
     return items;
+  }
+
+  logins(): LoginEntry[] {
+    return this.src.logins?.list() ?? [];
+  }
+
+  login(idOrWebsite: string): LoginEntry | undefined {
+    return this.src.logins?.get(idOrWebsite);
   }
 
   search(query: string, botId?: string): VaultItem[] {
@@ -86,6 +97,7 @@ export class Vault {
     secrets: number;
     env: number;
     contacts: number;
+    logins: number;
     webhooks: number;
     mcp: McpCatalogEntry[];
     cli: CliAdapterStatus[];
@@ -94,6 +106,7 @@ export class Vault {
       secrets: this.src.secrets.list().length,
       env: this.src.env.list().length,
       contacts: this.src.contacts.list().length,
+      logins: this.src.logins?.list().length ?? 0,
       webhooks: this.src.connectors.listWebhooks().length,
       mcp: this.src.mcp?.() ?? [],
       cli: this.src.cli?.() ?? [],
@@ -127,7 +140,17 @@ function contactItem(c: Contact): VaultItem {
     kind: "contact",
     id: c.id,
     title: c.name,
-    detail: [c.email, c.note].filter(Boolean).join(" · "),
+    detail: [c.email, c.phone, c.hint, c.note].filter(Boolean).join(" · "),
+  };
+}
+
+function loginItem(l: LoginEntry): VaultItem {
+  return {
+    kind: "login",
+    id: l.id,
+    title: l.website,
+    detail: [l.username, l.hint, "密码已存（不回显）"].filter(Boolean).join(" · "),
+    meta: { secretName: l.secretName },
   };
 }
 

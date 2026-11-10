@@ -128,7 +128,9 @@ export type ContentBlock =
   /** 群聊主持人的结论卡片：决定了什么、谁负责什么、还有什么没定 */
   | { type: "conclusion"; summary: string; decisions: string[]; tasks: ConclusionTask[]; open?: string[] }
   /** 对话里创建/展示例行（对齐 Grok Routines in transcript） */
-  | { type: "routine"; taskId: string; name: string; when?: string; enabled?: boolean };
+  | { type: "routine"; taskId: string; name: string; when?: string; enabled?: boolean }
+  /** 浏览器接管：用户完成验证码/SSO 后交还 bot（G11） */
+  | { type: "takeover"; id: string; botId: string; reason?: string; answer?: string };
 
 export interface FormField {
   key: string;

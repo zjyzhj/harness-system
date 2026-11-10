@@ -1,6 +1,6 @@
 # 待做（备选）
 
-> 更新：2026-11-02 · 近期加固已完成后的备选项；非阻塞上线。
+> 更新：2026-11-10 · 近期加固已完成后的备选项；非阻塞上线。
 
 ## 备选（先记着，未排期）
 
@@ -8,6 +8,7 @@
 
 ## 本轮已完成
 
+0. **[G11 Grok 本地对齐](goals/G11-grok-parity-spec.md)**：Custom Rules、Login Vault、浏览器接管、主控简报/例行历史/Library（无 G6、无支付）
 1. 例行入站 Webhook 令牌轮换 / 作废（例行面板 🪝 管理：复制 / 换新 / 关闭）
 2. 远程网关强制 HMAC：Connect → 入站网关「要求 HMAC」；`GatewayCfg.requireHmac`
 3. `webhook.post` 写入审计日志

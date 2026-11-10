@@ -71,6 +71,7 @@ import { BotRuntime } from "../core/bot-runtime";
 import { attachPetEntertainment, type PetHost } from "../core/pet";
 import { DemoSkillEngine } from "../core/demo-skill";
 import { ContactStore } from "../core/contacts";
+import { LoginStore } from "../core/login-store";
 import { ConnectorStore, CONNECT_INSTALL_CARDS } from "../core/connectors";
 import { parseRunAt } from "../core/runtime/tool-helpers";
 import { Vault } from "../core/vault";
@@ -478,12 +479,14 @@ function encryptLegacyConfigKeys() {
 }
 const env = new EnvStore(home);
 const contacts = new ContactStore(home);
+const logins = new LoginStore(home, secrets);
 const connectors = new ConnectorStore(home);
 const vault = new Vault({
   secrets,
   env,
   contacts,
   connectors,
+  logins,
   mcp: () => mcpManage.list(),
   cli: () => [
     { id: "bash", name: "本机 Shell（bash.run）", ready: true, detail: "经授权后执行" },
@@ -805,7 +808,7 @@ const petHost: PetHost = {
 const demoSkills = new DemoSkillEngine();
 const runtime: BotRuntime = new BotRuntime({
   store, providers, memory, skills, system, systemAccess, executor, offline: new OfflinePersona(), mcp, mcpManage, askBot, tasks: scheduler, notifyCheck,
-  groups, secrets, env, workspaceRoot: workspace, harnessHome: home, demo: demoSkills, vault, connectors, codingThreads, codingPresence, browserPresence,
+  groups, secrets, env, workspaceRoot: workspace, harnessHome: home, demo: demoSkills, vault, connectors, logins, codingThreads, codingPresence, browserPresence,
   groupPost: async (from, name, message, signal) => {
     const all = groups.list();
     const g = all.find((x) => x.name === name) ?? all.find((x) => x.name.includes(name) || name.includes(x.name));
@@ -2329,6 +2332,7 @@ app.whenReady().then(() => {
       const choices: [string, ConsentDecision][] = [["批准一次", "allow-once"]];
       if (req.rememberPath) choices.push(["总是允许此目录", "allow-command"]);
       else if (!req.onceOnly && req.command) choices.push([`总是允许 ${req.command}`, "allow-command"]);
+      else if (req.suggestAllowRule) choices.push([`总是允许（写入规则 ${req.suggestAllowRule}）`, "allow-command"]);
       if (!req.command && !req.rememberPath && !req.onceOnly && req.cap !== "bash:other") choices.push(["以后不再问", "allow"]);
       choices.push(["拒绝", "deny"]);
       const detail = `${req.description}${req.reasons?.length ? `\n\n需要注意：${req.reasons.join("；")}` : ""}`;
@@ -2344,16 +2348,23 @@ app.whenReady().then(() => {
       const onAbort = () => done("deny");
       signal?.addEventListener("abort", onAbort);
       pendingConsent.set(id, done);
-      sendUi("consent:request", { id, botId: req.botId, botName: name, cap: req.cap, capLabel, description: req.description, danger: !!req.requiresStrongConsent, command: req.command, onceOnly: !!req.onceOnly, rememberPath: req.rememberPath, reasons: req.reasons ?? [], sessionId });
+      sendUi("consent:request", {
+        id, botId: req.botId, botName: name, cap: req.cap, capLabel, description: req.description,
+        danger: !!req.requiresStrongConsent, command: req.command, onceOnly: !!req.onceOnly,
+        rememberPath: req.rememberPath, reasons: req.reasons ?? [], suggestAllowRule: req.suggestAllowRule,
+        sessionId,
+      });
     });
     if (sessionId) {
       const action = consentActionLabel(req, capLabel);
       const note = decision === "allow-command"
         ? (req.rememberPath
           ? `🔐 你允许 ${name} 以后在目录「${req.rememberPath}」直接开终端、打字和派 Coding CLI`
-          : opaqueConsentCmd(req.command)
-            ? `🔐 你允许 ${name} 以后直接${action}`
-            : `🔐 你允许 ${name} 以后直接执行 ${String(req.command).trim()}`)
+          : req.suggestAllowRule && (req.onceOnly || opaqueConsentCmd(req.command))
+            ? `🔐 已写入自定义规则「${req.suggestAllowRule}」，以后同类动作自动过`
+            : opaqueConsentCmd(req.command)
+              ? `🔐 你允许 ${name} 以后直接${action}`
+              : `🔐 你允许 ${name} 以后直接执行 ${String(req.command).trim()}`)
         : `🔐 你${decision === "allow-once" ? "批准了一次" : decision === "allow" ? "长期批准了" : "拒绝了"} ${name} ${action}`;
       pushConsentNote(sessionId, note);
     }
@@ -2995,9 +3006,15 @@ function createFromTemplate(t: BotTemplate, name = t.name, opts?: { onboard?: bo
   return bot;
 }
 ipcMain.handle("bots:duplicate", (_e, id: string) => {
+  const src = store.getBot(id);
   const t = botTemplate(id);
-  // 本机副本：不带开箱会话（依赖已在本机）
-  return createFromTemplate(t, `${t.name} 副本`, { onboard: false });
+  // 本机副本：不带开箱会话/记忆；拷贝技能开关（disabledSkills）
+  const bot = createFromTemplate(t, `${t.name} 副本`, { onboard: false });
+  if (src?.disabledSkills?.length) {
+    store.saveBot({ ...bot, disabledSkills: [...src.disabledSkills] });
+    return store.getBot(bot.id)!;
+  }
+  return bot;
 });
 /** 分享链接复制到剪贴板，同时在「下载」里存一份 .harnessbot 文件（链接太长发不出去时发文件） */
 ipcMain.handle("bots:share", async (_e, id: string) => {
@@ -3833,11 +3850,15 @@ ipcMain.handle("sessions:get", (_e, sessionId: string) => store.getSession(sessi
 ipcMain.handle("sessions:rename", (_e, sessionId: string, title: string) => store.renameSession(sessionId, title));
 ipcMain.handle("messages:delete", (_e, sessionId: string, ids: number[]) => store.deleteMessages(sessionId, ids));
 
-/** 问题卡片：记下用户点了哪个选项（卡片变成已答状态） */
+/** 问题卡片 / 浏览器接管卡：记下用户点了哪个选项（卡片变成已答状态） */
 ipcMain.handle("messages:answer", (_e, sessionId: string, id: number, choiceId: string, answer: string) => {
   const msg = store.updateMessage(sessionId, id, (m) => ({
     ...m,
-    content: Array.isArray(m.content) ? m.content.map((b) => (b.type === "choice" && b.id === choiceId ? { ...b, answer } : b)) : m.content,
+    content: Array.isArray(m.content)
+      ? m.content.map((b) =>
+          ((b.type === "choice" || b.type === "takeover") && b.id === choiceId) ? { ...b, answer } : b,
+        )
+      : m.content,
   }));
   const botId = store.getSession(sessionId)?.botId;
   if (botId && statuses.get(botId)?.state === "waiting") {
@@ -3860,8 +3881,11 @@ ipcMain.handle("messages:formAnswer", (_e, sessionId: string, id: number, formId
 ipcMain.handle("vault:list", (_e, query?: string) => (query ? vault.search(query) : vault.list()));
 ipcMain.handle("vault:catalog", () => vault.catalog());
 ipcMain.handle("contacts:list", () => contacts.list());
-ipcMain.handle("contacts:upsert", (_e, input: { id?: string; name: string; email?: string; note?: string }) => contacts.upsert(input));
+ipcMain.handle("contacts:upsert", (_e, input: { id?: string; name: string; email?: string; phone?: string; address?: string; hint?: string; note?: string }) => contacts.upsert(input));
 ipcMain.handle("contacts:remove", (_e, id: string) => contacts.remove(id));
+ipcMain.handle("logins:list", () => logins.list());
+ipcMain.handle("logins:upsert", (_e, input: { id?: string; website: string; username: string; password?: string; hint?: string; note?: string }) => logins.upsert(input));
+ipcMain.handle("logins:remove", (_e, id: string) => logins.remove(id));
 ipcMain.handle("connectors:listWebhooks", () => connectors.listWebhooks());
 ipcMain.handle("connectors:upsertWebhook", (_e, input: { id?: string; name: string; url: string; note?: string; headers?: Record<string, string> }) =>
   connectors.upsertWebhook(input));

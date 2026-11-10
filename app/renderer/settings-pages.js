@@ -13,9 +13,9 @@ const botOptions = (selected) => bots.map((b) => `<option value="${esc(b.id)}" $
 const errText = (e) => String(e?.message || e).replace(/^Error invoking remote method '[^']+': (Error: )?/, "");
 
 const PERM_MODE_HINT = {
-  ask: "每次操作先问你",
-  auto: "Shell / 终端 / Coding CLI 自动过；危险命令仍要确认",
-  always: "工具默认全过（含危险命令）；禁止规则仍生效",
+  ask: "对齐 Grok Ask：敏感操作先问；可用自定义规则收紧/放宽",
+  auto: "对齐 Grok Auto Review：Shell / 终端 / Coding CLI 自动过；危险命令与 Ask first 仍问",
+  always: "几乎全过（含危险命令）；禁止规则与 Ask first 仍生效",
 };
 
 function codingTrustDirs(termPaths = [], cliPaths = []) {
@@ -725,7 +725,7 @@ async function memoryFlow(opts = {}) {
 
 /* ---- 技能 ---- */
 async function skillsFlow() {
-  const modal = sheet({ icon: "🛠", title: "技能", sub: "技能是一段说明书（SKILL.md），bot 遇到对应任务时会按它来做", wide: true });
+  const modal = sheet({ icon: "🛠", title: "技能", sub: "技能是 Grok 式说明书：何时使用 · 输入与权限 · 步骤 · 验收 · 交回什么 · 需要批准", wide: true });
   const body = modal.querySelector(".mx-body");
   const render = async () => {
     const all = await api.skills.list();
@@ -1086,7 +1086,7 @@ async function tasksFlow() {
           ⚡ 试跑 · 📋 历史（成功 / 失败）· 🪝 仅已开通时显示 · 开关＝整条例行暂停<br/>
           每个 bot 最多 50 条。定时至少隔 5 分钟。每小时单条 200 次、全部合计 300 次，超了这次不做、也不自动重试。离开超过 14 天会先暂停，打开开关即可继续。</div>
         ${tasks.map((t) => {
-          const hist = (t.history || []).slice(-5).reverse();
+          const hist = (t.history || []).slice(-20).reverse();
           const lastLabel = routineResultLabel(t);
           const kindTag = t.webhookToken
             ? (t.schedule === false ? "仅 Webhook" : "定时+Webhook")
@@ -1627,9 +1627,10 @@ async function sysaccessFlow() {
   const body = modal.querySelector(".mx-body");
   let auditBot = "";
   const render = async () => {
-    const [tcc, grants, caps, events, cmd] = await Promise.all([
+    const [tcc, grants, caps, events, cmd, actionRules] = await Promise.all([
       api.system.tcc().catch(() => ({})), api.consent.list(), api.consent.caps(), api.audit.list({ limit: 200 }).catch(() => []),
       api.consent.rules().catch(() => ({ rules: [], trusted: [] })),
+      api.consent.actionRules?.().catch(() => []) ?? Promise.resolve([]),
     ]);
     const ruleBot = (id) => (id === "*" ? "所有 bot" : botById(id)?.name || id);
     const capLabel = (id) => caps.find((c) => c.id === id)?.label || id;
@@ -1660,6 +1661,19 @@ async function sysaccessFlow() {
           <select id="sa-ttl" class="skin-select"><option value="0">长期</option><option value="3600000">1 小时</option><option value="86400000">1 天</option><option value="once">仅一次</option></select>
           <button class="ghost-btn" id="sa-grant">预先批准</button>
         </div>
+      </div>
+      <div class="d-sec"><h4>自定义规则 · ${(actionRules || []).length}</h4>
+        <div class="hint">对齐 Grok Custom Rules：用一句话描述动作。Ask first 命中必问；Allow 命中可跳过常规询问（危险操作仍问）。Ask first 优先于 Allow，各最多 20 条。</div>
+        ${(actionRules || []).map((r) => `
+          <div class="d-card"><div class="c-main"><div class="c-title">${esc(r.text)} <span class="tag ${r.decision === "allow" ? "on" : ""}">${r.decision === "ask_first" ? "Ask first" : "Allow"}</span></div>
+            <div class="c-sub">${esc(fmtTime(r.createdAt))}</div></div>
+            <button class="ghost-btn danger-text" data-ar-del="${esc(r.id)}">删除</button></div>`).join("") || `<div class="d-empty">还没有自定义规则。例如：「发外部邮件」→ Ask first</div>`}
+        <div class="mx-inline sa-grant">
+          <input id="sa-ar-text" placeholder="例如：发外部邮件 / webhook / 删除文件" style="flex:1" />
+          <select id="sa-ar-dec" class="skin-select"><option value="ask_first">Ask first</option><option value="allow">Allow</option></select>
+          <button class="ghost-btn" id="sa-ar-add">添加</button>
+        </div>
+        <div class="ms-err hint" id="sa-ar-err"></div>
       </div>
       <div class="d-sec"><h4>命令规则 · ${cmd.rules.length}</h4>
         <div class="hint">「总是允许」的命令不再弹卡片；「禁止」的命令直接拦下。Ask/Auto 下危险命令仍每次确认；Always 模式危险命令也会直接跑，除非这里禁止。</div>
@@ -1697,6 +1711,14 @@ async function sysaccessFlow() {
     body.querySelector("#sa-reveal-e")?.addEventListener("click", () => api.system.revealElectronApp?.());
     body.querySelectorAll("[data-revoke]").forEach((b) => (b.onclick = async () => { await api.consent.revoke(b.dataset.revoke, b.dataset.cap); render(); }));
     body.querySelectorAll("[data-rule-cmd]").forEach((b) => (b.onclick = async () => { await api.consent.removeRule(b.dataset.ruleBot, b.dataset.ruleCmd); render(); }));
+    body.querySelectorAll("[data-ar-del]").forEach((b) => (b.onclick = async () => { await api.consent.removeActionRule?.(b.dataset.arDel); render(); }));
+    body.querySelector("#sa-ar-add")?.addEventListener("click", async () => {
+      const text = body.querySelector("#sa-ar-text").value.trim();
+      try {
+        await api.consent.addActionRule(text, body.querySelector("#sa-ar-dec").value);
+        render();
+      } catch (e) { body.querySelector("#sa-ar-err").textContent = errText(e); }
+    });
     body.querySelector("#sa-rule-add").onclick = async () => {
       const command = body.querySelector("#sa-rule-cmd").value.trim();
       try {
@@ -1979,10 +2001,12 @@ async function templatesBrowseFlow(bot) {
 async function vaultFlow(initialTab) {
   const modal = sheet({ icon: "🔗", title: "Connect", sub: "粘贴 Cloudflare Token，生成你的公网地址 · 出站 Webhook · 本机网关备用", wide: true });
   const body = modal.querySelector(".mx-body");
-  const allowed = new Set(["apps", "overview", "contacts", "webhooks", "gateway", "share", "mcp"]);
+  const allowed = new Set(["apps", "overview", "logins", "contacts", "webhooks", "gateway", "share", "mcp"]);
   let tab = allowed.has(initialTab) ? initialTab : "apps";
-  let catalog = await api.vault.catalog().catch(() => ({ secrets: 0, env: 0, contacts: 0, webhooks: 0, mcp: [], cli: [] }));
+  let catalog = await api.vault.catalog().catch(() => ({ secrets: 0, env: 0, contacts: 0, logins: 0, webhooks: 0, mcp: [], cli: [] }));
   let contactList = await api.contacts.list().catch(() => []);
+  let loginList = await api.logins?.list?.().catch(() => []) ?? [];
+  let editingLogin = null;
   let hooks = await api.connectors.listWebhooks().catch(() => []);
   let cards = await api.connect.cards().catch(() => []);
   let gw = await api.connect.gateway().catch(() => ({ enabled: false, running: false, port: 8787, host: "127.0.0.1" }));
@@ -2021,6 +2045,7 @@ async function vaultFlow(initialTab) {
   const refresh = async () => {
     catalog = await api.vault.catalog().catch(() => catalog);
     contactList = await api.contacts.list().catch(() => contactList);
+    loginList = await api.logins?.list?.().catch(() => loginList) ?? loginList;
     hooks = await api.connectors.listWebhooks().catch(() => hooks);
     cards = await api.connect.cards().catch(() => cards);
     gw = await api.connect.gateway().catch(() => gw);
@@ -2060,6 +2085,7 @@ async function vaultFlow(initialTab) {
     const tabs = [
       ["apps", "应用"],
       ["overview", "保险库"],
+      ["logins", "登录"],
       ["contacts", "通讯录"],
       ["webhooks", "出站 Webhook"],
       ["share", "云服务"],
@@ -2086,17 +2112,34 @@ async function vaultFlow(initialTab) {
         <div class="d-sec">
           <div class="d-card"><div class="c-main"><div class="c-title">密钥</div><div class="c-sub">${catalog.secrets} 项 · 加密本机</div></div><button class="ghost-btn" id="v-env">打开环境配置</button></div>
           <div class="d-card"><div class="c-main"><div class="c-title">环境变量</div><div class="c-sub">${catalog.env} 项 · 明文配置</div></div><button class="ghost-btn" id="v-env2">打开环境配置</button></div>
-          <div class="d-card"><div class="c-main"><div class="c-title">通讯录</div><div class="c-sub">${catalog.contacts} 人 · 无支付</div></div></div>
+          <div class="d-card"><div class="c-main"><div class="c-title">登录</div><div class="c-sub">${catalog.logins || 0} 项 · 密码不回显</div></div><button class="ghost-btn" data-goto="logins">管理</button></div>
+          <div class="d-card"><div class="c-main"><div class="c-title">通讯录</div><div class="c-sub">${catalog.contacts} 人 · 无支付</div></div><button class="ghost-btn" data-goto="contacts">管理</button></div>
           <div class="d-card"><div class="c-main"><div class="c-title">出站 Webhook</div><div class="c-sub">${catalog.webhooks} 个端点</div></div></div>
-          <div class="hint">密钥用 {{secret:名字}}。入站例行触发在「例行」卡片里开通 Webhook 令牌。</div>
+          <div class="hint">密钥用 {{secret:名字}}。网站登录用「登录」页；入站例行触发在「例行」卡片里开通 Webhook 令牌。不做银行卡/支付。</div>
         </div>`;
+    } else if (tab === "logins") {
+      main = `<div class="d-sec"><h4>网站登录 <button class="list-add" id="lg-new" title="添加">＋</button></h4>
+        <div class="hint">对齐 Grok Vault Login：网站 + 用户名 + 密码。密码只进保险库，列表永不回显。bot 用 browser.fillLogin 填充。</div>
+        ${loginList.map((l) => `<div class="d-card" data-lid="${esc(l.id)}"><div class="c-main"><div class="c-title">${esc(l.website)}</div><div class="c-sub">${esc([l.username, l.hint, "密码已存"].filter(Boolean).join(" · "))}</div></div>
+          <button class="ghost-btn" data-op="edit">编辑</button><button class="ghost-btn danger-text" data-op="del">删除</button></div>`).join("") || `<div class="d-empty">还没有登录项</div>`}
+        ${editingLogin ? `<div class="mx-form"><h4>${editingLogin.id ? "编辑" : "添加"}登录</h4>
+          <div class="mx-grid"><label>网站</label><input id="lg-web" value="${esc(editingLogin.website ?? "")}" placeholder="https://example.com" />
+          <label>用户名</label><input id="lg-user" value="${esc(editingLogin.username ?? "")}" />
+          <label>密码</label><input id="lg-pass" type="password" placeholder="${editingLogin.id ? "留空则不改密码" : "必填"}" autocomplete="new-password" />
+          <label>Hints</label><input id="lg-hint" value="${esc(editingLogin.hint ?? "")}" placeholder="何时用，例如工作账号" />
+          <label>备注</label><input id="lg-note" value="${esc(editingLogin.note ?? "")}" placeholder="可选" /></div>
+          <div class="actions"><button class="ghost-btn" id="lg-cancel">取消</button><button class="primary-btn" id="lg-save">保存</button></div></div>` : ""}
+      </div>`;
     } else if (tab === "contacts") {
       main = `<div class="d-sec"><h4>通讯录 <button class="list-add" id="ct-new" title="添加">＋</button></h4>
-        ${contactList.map((c) => `<div class="d-card" data-cid="${esc(c.id)}"><div class="c-main"><div class="c-title">${esc(c.name)}</div><div class="c-sub">${esc([c.email, c.note].filter(Boolean).join(" · ") || "无备注")}</div></div>
+        ${contactList.map((c) => `<div class="d-card" data-cid="${esc(c.id)}"><div class="c-main"><div class="c-title">${esc(c.name)}</div><div class="c-sub">${esc([c.email, c.phone, c.hint, c.note].filter(Boolean).join(" · ") || "无备注")}</div></div>
           <button class="ghost-btn" data-op="edit">编辑</button><button class="ghost-btn danger-text" data-op="del">删除</button></div>`).join("") || `<div class="d-empty">还没有联系人</div>`}
         ${editingContact ? `<div class="mx-form"><h4>${editingContact.id ? "编辑" : "添加"}联系人</h4>
           <div class="mx-grid"><label>姓名</label><input id="ct-name" value="${esc(editingContact.name ?? "")}" />
           <label>邮箱</label><input id="ct-email" value="${esc(editingContact.email ?? "")}" placeholder="可选" />
+          <label>电话</label><input id="ct-phone" value="${esc(editingContact.phone ?? "")}" placeholder="可选" />
+          <label>地址</label><input id="ct-addr" value="${esc(editingContact.address ?? "")}" placeholder="可选" />
+          <label>Hints</label><input id="ct-hint" value="${esc(editingContact.hint ?? "")}" placeholder="何时用" />
           <label>备注</label><input id="ct-note" value="${esc(editingContact.note ?? "")}" placeholder="可选" /></div>
           <div class="actions"><button class="ghost-btn" id="ct-cancel">取消</button><button class="primary-btn" id="ct-save">保存</button></div></div>` : ""}
       </div>`;
@@ -2268,6 +2311,29 @@ async function vaultFlow(initialTab) {
     body.querySelector("#v-env")?.addEventListener("click", () => { closeModal(); envFlow(); });
     body.querySelector("#v-env2")?.addEventListener("click", () => { closeModal(); envFlow(); });
     body.querySelector("#v-mcp")?.addEventListener("click", () => { closeModal(); mcpFlow(); });
+    body.querySelectorAll("[data-goto]").forEach((b) => (b.onclick = () => { tab = b.dataset.goto; render(); }));
+    body.querySelector("#lg-new")?.addEventListener("click", () => { editingLogin = { website: "", username: "" }; render(); });
+    body.querySelector("#lg-cancel")?.addEventListener("click", () => { editingLogin = null; render(); });
+    body.querySelector("#lg-save")?.addEventListener("click", async () => {
+      try {
+        const pass = body.querySelector("#lg-pass").value;
+        await api.logins.upsert({
+          id: editingLogin.id,
+          website: body.querySelector("#lg-web").value.trim(),
+          username: body.querySelector("#lg-user").value.trim(),
+          password: pass || undefined,
+          hint: body.querySelector("#lg-hint").value.trim() || undefined,
+          note: body.querySelector("#lg-note").value.trim() || undefined,
+        });
+        editingLogin = null;
+        await refresh();
+      } catch (e) { alert(errText(e)); }
+    });
+    body.querySelectorAll("[data-lid]").forEach((card) => {
+      const id = card.dataset.lid;
+      card.querySelector('[data-op="edit"]').onclick = () => { editingLogin = { ...loginList.find((l) => l.id === id) }; render(); };
+      card.querySelector('[data-op="del"]').onclick = async () => { if (confirm("删除这个登录项？密码也会从保险库移除。")) { await api.logins.remove(id); await refresh(); } };
+    });
     body.querySelector("#ct-new")?.addEventListener("click", () => { editingContact = { name: "" }; render(); });
     body.querySelector("#ct-cancel")?.addEventListener("click", () => { editingContact = null; render(); });
     body.querySelector("#ct-save")?.addEventListener("click", async () => {
@@ -2276,6 +2342,9 @@ async function vaultFlow(initialTab) {
           id: editingContact.id,
           name: body.querySelector("#ct-name").value.trim(),
           email: body.querySelector("#ct-email").value.trim() || undefined,
+          phone: body.querySelector("#ct-phone")?.value.trim() || undefined,
+          address: body.querySelector("#ct-addr")?.value.trim() || undefined,
+          hint: body.querySelector("#ct-hint")?.value.trim() || undefined,
           note: body.querySelector("#ct-note").value.trim() || undefined,
         });
         editingContact = null;
